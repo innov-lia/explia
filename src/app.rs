@@ -15,12 +15,15 @@ use crate::launch;
 use crate::places::{self, Drive, DriveKind};
 use crate::preview::{self, ArchivePreview, PreviewContent, TextPreview};
 use crate::settings::Settings;
+use crate::trash;
 use crate::view::{self, Category, ExtensionFilter, SortKey, SortOrder};
 
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
 pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
 /// Largeur du volet d'aperçu agrandi, en part de la largeur disponible.
 const PREVIEW_EXPANDED_RATIO: f32 = 0.65;
+/// Durée du clic maintenu qui démarre la multi-sélection, en secondes.
+const LONG_PRESS_SECONDS: f64 = 0.5;
 /// Largeur de la colonne « Taille ».
 const SIZE_COLUMN_WIDTH: f32 = 110.0;
 /// Nombre maximal de threads qui calculent les tailles de dossiers.
@@ -72,6 +75,17 @@ enum Action {
     OpenAsAdmin(PathBuf),
     /// Passe la barre d'adresse en mode saisie.
     EditAddress,
+    /// Clic maintenu sur une ligne : démarre (ou complète) la multi-sélection.
+    LongPress(Entry),
+    /// Clic sur une ligne pendant la multi-sélection : l'ajoute ou la retire.
+    ToggleMulti(Entry),
+    /// Quitte la multi-sélection.
+    ClearMulti,
+    /// Demande confirmation avant de supprimer la sélection.
+    AskDelete,
+    CancelDelete,
+    /// Envoie la sélection à la corbeille.
+    ConfirmDelete,
 }
 
 pub struct ExpliaApp {
@@ -109,6 +123,14 @@ pub struct ExpliaApp {
     folder_generation: Arc<AtomicU64>,
     window_sized: bool,
     selected: Option<Entry>,
+    /// Multi-sélection : un seul type à la fois (tous dossiers, ou tous fichiers).
+    multi: Vec<Entry>,
+    /// Attente de confirmation de la suppression de la multi-sélection.
+    confirm_delete: bool,
+    /// Un clic maintenu vient d'être traité : le relâchement ne doit pas compter comme un clic.
+    long_press_done: bool,
+    /// Message d'information (non erroné) affiché dans la barre d'état.
+    notice: Option<String>,
     preview: PreviewState,
     event_tx: Sender<Event>,
     event_rx: Receiver<Event>,
@@ -146,6 +168,10 @@ impl ExpliaApp {
             window_sized: settings.window_size.is_some(),
             saved_settings: settings,
             selected: None,
+            multi: Vec::new(),
+            confirm_delete: false,
+            long_press_done: false,
+            notice: None,
             preview: PreviewState::None,
             event_tx,
             event_rx,
@@ -277,11 +303,73 @@ impl ExpliaApp {
             },
         }
         self.error = None;
+        self.notice = None;
         self.address = target.display();
         self.location = target;
         self.selected = None;
+        self.multi.clear();
+        self.confirm_delete = false;
         self.preview = PreviewState::None;
         self.recompute_visible();
+    }
+
+    /// Relit le dossier affiché (après une suppression, par exemple).
+    fn refresh_listing(&mut self) {
+        let Location::Dir(path) = &self.location else {
+            return;
+        };
+        match fs_nav::list_dir(path) {
+            Ok(entries) => {
+                self.entries = entries;
+                self.start_folder_sizes();
+                self.recompute_visible();
+            }
+            Err(err) => {
+                self.error = Some(format!("Impossible de relire le dossier : {err}"));
+            }
+        }
+    }
+
+    /// Ajoute ou retire une ligne de la multi-sélection. Un seul type à la fois :
+    /// on ne mélange pas dossiers et fichiers.
+    fn toggle_multi(&mut self, entry: Entry) {
+        self.confirm_delete = false;
+        self.selected = None;
+        self.preview = PreviewState::None;
+        if let Some(position) = self.multi.iter().position(|e| e.path == entry.path) {
+            self.multi.remove(position);
+            return;
+        }
+        if let Some(first) = self.multi.first()
+            && first.is_dir != entry.is_dir
+        {
+            self.error = Some(
+                "Sélection d'un seul type à la fois : dossiers ou fichiers, pas les deux."
+                    .to_string(),
+            );
+            return;
+        }
+        self.error = None;
+        self.multi.push(entry);
+    }
+
+    fn delete_multi(&mut self) {
+        let paths: Vec<PathBuf> = self.multi.iter().map(|e| e.path.clone()).collect();
+        let count = paths.len();
+        self.confirm_delete = false;
+        match trash::move_to_recycle_bin(&paths) {
+            Ok(()) => {
+                self.error = None;
+                self.notice = Some(format!("{count} élément(s) envoyé(s) à la corbeille."));
+            }
+            Err(message) => {
+                self.error = Some(message);
+                self.notice = None;
+            }
+        }
+        // Dans tous les cas, on relit le dossier : certains éléments ont pu être supprimés.
+        self.multi.clear();
+        self.refresh_listing();
     }
 
     fn submit_address(&mut self) {
@@ -394,6 +482,18 @@ impl ExpliaApp {
                 self.address_editing = true;
                 self.focus_address = true;
             }
+            Action::LongPress(entry) => {
+                self.long_press_done = true;
+                self.toggle_multi(entry);
+            }
+            Action::ToggleMulti(entry) => self.toggle_multi(entry),
+            Action::ClearMulti => {
+                self.multi.clear();
+                self.confirm_delete = false;
+            }
+            Action::AskDelete => self.confirm_delete = !self.multi.is_empty(),
+            Action::CancelDelete => self.confirm_delete = false,
+            Action::ConfirmDelete => self.delete_multi(),
         }
     }
 
@@ -737,7 +837,8 @@ impl ExpliaApp {
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, self.visible.len(), |ui, range| {
                 for entry in &self.visible[range] {
-                    let is_selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path);
+                    let is_selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path)
+                        || self.multi.iter().any(|m| m.path == entry.path);
                     let icon = if entry.is_dir {
                         "📁"
                     } else if preview::is_supported_image(&entry.path) {
@@ -755,7 +856,21 @@ impl ExpliaApp {
                         &format!("{icon} {}", entry.name),
                         &self.entry_size_text(entry),
                     );
-                    if response.double_clicked() {
+                    let multi_mode = !self.multi.is_empty();
+                    // Clic maintenu : démarre la multi-sélection (ou ajoute la ligne).
+                    if response.is_pointer_button_down_on() && !self.long_press_done {
+                        let held = ui.input(|i| i.pointer.press_start_time().map(|t| i.time - t));
+                        if held.is_some_and(|seconds| seconds >= LONG_PRESS_SECONDS) {
+                            action = Some(Action::LongPress(entry.clone()));
+                        } else {
+                            // Réveille l'interface pour détecter la fin du délai.
+                            ui.ctx()
+                                .request_repaint_after(std::time::Duration::from_millis(100));
+                        }
+                    }
+                    if self.long_press_done {
+                        // Le relâchement qui suit un clic maintenu n'est pas un clic.
+                    } else if response.double_clicked() && !multi_mode {
                         // Dossier : on entre ; fichier : on l'ouvre avec son application.
                         action = Some(if entry.is_dir {
                             Action::Go(Location::Dir(entry.path.clone()))
@@ -763,7 +878,11 @@ impl ExpliaApp {
                             Action::Open(entry.path.clone())
                         });
                     } else if response.clicked() {
-                        action = Some(Action::Select(entry.clone()));
+                        action = Some(if multi_mode {
+                            Action::ToggleMulti(entry.clone())
+                        } else {
+                            Action::Select(entry.clone())
+                        });
                     }
                     response.context_menu(|ui| {
                         if entry.is_dir {
@@ -799,6 +918,67 @@ impl ExpliaApp {
         action
     }
 
+    /// Contenu du volet pendant la multi-sélection : résumé et actions (supprimer).
+    fn actions_content(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        let count = self.multi.len();
+        let kind = if self.multi.first().is_some_and(|e| e.is_dir) {
+            "dossier(s)"
+        } else {
+            "fichier(s)"
+        };
+        ui.label(egui::RichText::new(format!("{count} {kind} sélectionné(s)")).strong());
+        ui.weak("Clic maintenu ou clic sur une ligne pour ajouter ou retirer.");
+        ui.add_space(6.0);
+        if self.confirm_delete {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("Envoyer {count} {kind} à la corbeille ?"),
+            );
+            ui.horizontal(|ui| {
+                let confirm = egui::Button::new(
+                    egui::RichText::new("Confirmer la suppression").color(egui::Color32::WHITE),
+                )
+                .fill(egui::Color32::from_rgb(180, 40, 40));
+                if ui.add(confirm).clicked() {
+                    action = Some(Action::ConfirmDelete);
+                }
+                if ui.button("Annuler").clicked() {
+                    action = Some(Action::CancelDelete);
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                if ui.button("🗑 Supprimer").clicked() {
+                    action = Some(Action::AskDelete);
+                }
+                if ui.button("Désélectionner").clicked() {
+                    action = Some(Action::ClearMulti);
+                }
+            });
+            ui.weak("Les éléments vont dans la corbeille de Windows.");
+        }
+        ui.add_space(6.0);
+        ui.separator();
+        let row_height = table_row_height(ui) + ui.spacing().item_spacing.y;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show_rows(ui, row_height, count, |ui, range| {
+                for item in &self.multi[range] {
+                    let icon = if item.is_dir { "📁" } else { "📄" };
+                    // Taille à jour (celle d'un dossier peut arriver après la sélection).
+                    let fresh = self
+                        .entries
+                        .iter()
+                        .find(|e| e.path == item.path)
+                        .unwrap_or(item);
+                    let size = self.entry_size_text(fresh);
+                    table_row(ui, false, &format!("{icon} {}", item.name), &size);
+                }
+            });
+        action
+    }
+
     /// Volet d'aperçu. Renvoie `true` si l'utilisateur a cliqué sur la flèche
     /// « < » / « > » pour agrandir ou réduire le volet, et l'action éventuelle
     /// demandée (ouvrir le fichier).
@@ -813,9 +993,16 @@ impl ExpliaApp {
                 ("<", "Agrandir le volet d'aperçu")
             };
             toggle = ui.button(arrow).on_hover_text(hint).clicked();
-            ui.heading("Aperçu");
+            ui.heading(if self.multi.is_empty() {
+                "Aperçu"
+            } else {
+                "Actions"
+            });
         });
         ui.separator();
+        if !self.multi.is_empty() {
+            return (toggle, self.actions_content(ui));
+        }
         let Some(selected) = &self.selected else {
             ui.weak("Sélectionnez un élément.");
             return (toggle, None);
@@ -1072,6 +1259,17 @@ impl eframe::App for ExpliaApp {
         let ctx = ui.ctx().clone();
         self.size_window_once(&ctx);
         self.poll_events(&ctx);
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            self.long_press_done = false;
+        }
+        // Échap quitte la multi-sélection (sauf pendant la saisie d'un chemin).
+        if !self.address_editing
+            && !self.multi.is_empty()
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            self.multi.clear();
+            self.confirm_delete = false;
+        }
         let mut action = None;
 
         egui::Panel::top("toolbar").show(ui, |ui| {
@@ -1084,6 +1282,8 @@ impl eframe::App for ExpliaApp {
         egui::Panel::bottom("status").show(ui, |ui| {
             if let Some(error) = &self.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
+            } else if let Some(notice) = &self.notice {
+                ui.label(notice);
             } else {
                 ui.label(self.status_text());
             }
@@ -1094,7 +1294,8 @@ impl eframe::App for ExpliaApp {
             .show(ui, |ui| {
                 action = self.sidebar(ui).or(action.take());
             });
-        if self.show_preview {
+        // Pendant la multi-sélection, le volet devient un volet d'actions, même masqué.
+        if self.show_preview || !self.multi.is_empty() {
             // Deux identifiants distincts : chaque mode garde sa propre largeur.
             let (id, width) = if self.preview_expanded {
                 (

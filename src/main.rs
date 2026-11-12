@@ -8,6 +8,7 @@ mod launch;
 mod places;
 mod preview;
 mod settings;
+mod trash;
 mod view;
 
 use settings::Settings;
