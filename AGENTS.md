@@ -16,12 +16,15 @@ classique d'explorateur.
 2. **Barre d'adresse** : afficher le chemin courant, permettre de
 saisir un chemin Windows et valider la navigation.
 3. **Vue des emplacements** : afficher les lecteurs disponibles (`C:`,
-`D:`, etc.) au démarrage ou depuis l'accueil.
+`D:`, etc.) depuis « Ce PC ». Au démarrage, ExPLIA ouvre le dossier de
+l'utilisateur courant (décision de l'utilisateur).
 4. **Zone centrale** : afficher les dossiers et fichiers du répertoire
 courant ; permettre d'ouvrir un dossier et de revenir au dossier
 parent.
-5. **Barre latérale** : accès rapide à Ce PC, Bureau, Documents,
-Téléchargements et aux lecteurs détectés.
+5. **Barre latérale** : « Favoris » (vide par défaut, remplis par
+l'utilisateur) puis la section « Ce PC » avec les lecteurs détectés
+(décision de l'utilisateur : plus de raccourcis Bureau, Documents,
+Téléchargements par défaut).
 6. **Aperçu** : afficher une miniature et un aperçu simple des images
 prises en charge (au minimum PNG, JPEG, BMP). Pour les autres types,
 afficher une icône et les informations du fichier.
@@ -41,6 +44,13 @@ si nécessaire.
 d'image.
 * Vérifier les versions et API des dépendances dans leur documentation
 actuelle avant de les utiliser.
+* Dépendance d'exécution **facultative** (décision de l'utilisateur) : la
+lecture audio et vidéo intégrée charge dynamiquement `libvlc.dll` du **VLC 3.x
+64 bits installé sur la machine** (`src/player.rs`). VLC n'est jamais embarqué
+ni redistribué ; sans VLC, l'application retombe sur l'application par défaut de
+Windows. Cette exigence doit rester documentée dans le README et signalée dans
+l'interface. Le code `unsafe` de l'interface avec libVLC reste isolé dans
+`src/player.rs`, et seuls des fichiers locaux sont confiés à VLC.
 
 Si le dépôt contient déjà un framework ou une architecture cohérente,
 inspecte-les et conserve-les sauf raison technique solide. Ne remplace
@@ -70,7 +80,18 @@ l'utilisation.
 
 * Le MVP est **en lecture seule** : aucune suppression, aucun
 renommage, aucun déplacement, aucune copie, aucune écriture de
-fichier.
+fichier. **Exceptions autorisées par l'utilisateur** :
+  * l'application enregistre ses réglages (taille de la fenêtre, options,
+  favoris) dans `%APPDATA%\ExPLIA\settings.txt`, et rien d'autre ;
+  * sur geste explicite de l'utilisateur (double-clic ou menu), elle peut
+  ouvrir un fichier avec son application associée ou lancer un exécutable,
+  y compris en administrateur via la fenêtre UAC de Windows ;
+  * sur demande explicite et après confirmation dans l'application, elle peut
+  envoyer des fichiers ou des dossiers sélectionnés à la **corbeille** de
+  Windows (jamais de suppression définitive de sa propre initiative) ;
+  * sur demande explicite de l'utilisateur, elle peut renommer un fichier ou
+  un dossier, dans son dossier d'origine, sans jamais écraser un élément existant.
+Aucun autre fichier ne doit être écrit.
 * Ne jamais lancer de commande destructive ou modifier des fichiers en
 dehors du dépôt.
 * Ne jamais modifier le registre Windows, les permissions, les
