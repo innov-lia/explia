@@ -345,6 +345,15 @@ enum Action {
     SortBy(SortKey),
     /// Affiche ou masque les dossiers et fichiers cachés.
     ToggleHidden,
+    /// Ctrl+clic (ou Maj+clic) dans une colonne qui n'est pas la dernière (vue en colonnes) :
+    /// cette colonne devient le dossier affiché, l'élément qui y était en surbrillance est
+    /// sélectionné, puis `entry` est ajouté (ou la plage jusqu'à `entry` si `range`).
+    ColumnMultiSelect {
+        dir: PathBuf,
+        anchor: Option<PathBuf>,
+        entry: Entry,
+        range: bool,
+    },
     /// Ouvre un dossier et y sélectionne un fichier (vue en colonnes).
     GoSelect {
         dir: PathBuf,
@@ -1964,6 +1973,28 @@ impl ExpliaApp {
                 self.select_path_after_nav = Some(file);
                 self.navigate(Location::Dir(dir));
             }
+            Action::ColumnMultiSelect {
+                dir,
+                anchor,
+                entry,
+                range,
+            } => {
+                self.select_path_after_nav = anchor;
+                self.navigate(Location::Dir(dir.clone()));
+                if self.location == Location::Dir(dir) {
+                    let target = self
+                        .visible
+                        .iter()
+                        .find(|e| e.path == entry.path)
+                        .cloned()
+                        .unwrap_or(entry);
+                    if range {
+                        self.select_range(target);
+                    } else {
+                        self.toggle_multi(target);
+                    }
+                }
+            }
             Action::StartRename(entry) => self.start_rename(&entry),
             Action::CommitRename { path, new_name } => self.commit_rename(ctx, path, &new_name),
             Action::CancelRename => self.renaming = None,
@@ -2947,6 +2978,16 @@ impl ExpliaApp {
                                             action = Some(Action::ToggleMulti(entry.clone()));
                                         } else if is_last && response.clicked() && shift {
                                             action = Some(Action::SelectRange(entry.clone()));
+                                        } else if !is_last && response.clicked() && (ctrl || shift)
+                                        {
+                                            // Colonne précédente : la sélection multiple part de
+                                            // l'élément en surbrillance dans cette colonne.
+                                            action = Some(Action::ColumnMultiSelect {
+                                                dir: dir.clone(),
+                                                anchor: next_dir.cloned(),
+                                                entry: entry.clone(),
+                                                range: shift && !ctrl,
+                                            });
                                         } else if response.double_clicked() && !entry.is_dir {
                                             action = Some(open_action(&entry.path));
                                         } else if response.clicked() {
@@ -5303,5 +5344,45 @@ mod tests {
         // Un clic dans la zone centrale ne donne pas la main à la barre latérale.
         app.apply(&ctx, Action::Go(Location::Dir(tree.0.join("Apple"))));
         assert!(!app.sidebar_focus);
+    }
+
+    #[test]
+    fn ctrl_click_in_a_previous_column_starts_from_its_highlighted_folder() {
+        let tree = TempTree::new("column-multi");
+        tree.file("grec/doc.txt", b"x");
+        tree.dir("aa");
+        tree.dir("models");
+        let (mut app, ctx) = app_in(&tree);
+        // « grec » est ouvert : sa colonne parente le montre en surbrillance.
+        app.navigate(Location::Dir(tree.0.join("grec")));
+        let models = fs_nav::entry_from_path(&tree.0.join("models")).unwrap();
+        app.apply(
+            &ctx,
+            Action::ColumnMultiSelect {
+                dir: tree.0.clone(),
+                anchor: Some(tree.0.join("grec")),
+                entry: models,
+                range: false,
+            },
+        );
+        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        let mut selected: Vec<String> = app.multi.iter().map(|e| e.name.clone()).collect();
+        selected.sort();
+        assert_eq!(selected, ["grec", "models"]);
+        // Maj+clic : la plage depuis l'élément en surbrillance.
+        app.navigate(Location::Dir(tree.0.join("grec")));
+        let aa = fs_nav::entry_from_path(&tree.0.join("aa")).unwrap();
+        app.apply(
+            &ctx,
+            Action::ColumnMultiSelect {
+                dir: tree.0.clone(),
+                anchor: Some(tree.0.join("grec")),
+                entry: aa,
+                range: true,
+            },
+        );
+        let mut range: Vec<String> = app.multi.iter().map(|e| e.name.clone()).collect();
+        range.sort();
+        assert_eq!(range, ["aa", "grec"]);
     }
 }
