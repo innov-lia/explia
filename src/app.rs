@@ -28,10 +28,12 @@ const MIXED_TYPES_MESSAGE: &str =
     "Sélection d'un seul type à la fois : dossiers ou fichiers, pas les deux.";
 /// Durée du clic maintenu qui démarre la multi-sélection, en secondes.
 const LONG_PRESS_SECONDS: f64 = 0.5;
-/// Un second clic sur l'élément sélectionné démarre le renommage s'il survient entre ces
-/// deux délais (en secondes) : plus tôt, c'est un double-clic ; plus tard, un nouveau clic.
-const RENAME_CLICK_MIN_SECONDS: f64 = 0.45;
-const RENAME_CLICK_MAX_SECONDS: f64 = 3.0;
+/// Largeur des boutons « Renommer / Annuler » et « Supprimer / Confirmer » du volet Actions :
+/// identique pour que « Confirmer » apparaisse exactement à la place de « Supprimer ».
+const EDIT_BUTTON_WIDTH: f32 = 120.0;
+/// Délai (en secondes) pendant lequel « Confirmer » ignore les clics après « Supprimer » :
+/// un double-clic accidentel ne doit pas valider la suppression.
+const CONFIRM_ARMING_SECONDS: f64 = 0.6;
 /// Déplacement maximal du pointeur, en points, pendant un clic maintenu.
 const LONG_PRESS_TOLERANCE: f32 = 12.0;
 /// Largeur de la colonne « Taille ».
@@ -98,7 +100,7 @@ enum Action {
     CancelDelete,
     /// Envoie la sélection à la corbeille.
     ConfirmDelete,
-    /// Passe une ligne en mode renommage (F2, clic lent, bouton « Renommer »).
+    /// Passe une ligne en mode renommage (F2, menu contextuel, bouton « Renommer »).
     StartRename(Entry),
     CommitRename {
         path: PathBuf,
@@ -168,9 +170,8 @@ pub struct ExpliaApp {
     notice: Option<String>,
     /// Renommage en cours (une seule ligne à la fois).
     renaming: Option<RenameState>,
-    /// Dernier clic sur une ligne (chemin, instant) : un second clic lent sur la ligne
-    /// déjà sélectionnée démarre le renommage, comme dans l'Explorateur.
-    last_row_click: Option<(PathBuf, f64)>,
+    /// Instant (secondes) où « Supprimer » a été demandé : sert à armer « Confirmer ».
+    delete_asked_at: Option<f64>,
     preview: PreviewState,
     event_tx: Sender<Event>,
     event_rx: Receiver<Event>,
@@ -215,7 +216,7 @@ impl ExpliaApp {
             long_press_done: false,
             notice: None,
             renaming: None,
-            last_row_click: None,
+            delete_asked_at: None,
             preview: PreviewState::None,
             event_tx,
             event_rx,
@@ -354,7 +355,6 @@ impl ExpliaApp {
         self.clear_multi();
         self.anchor = None;
         self.renaming = None;
-        self.last_row_click = None;
         self.preview = PreviewState::None;
         self.recompute_visible();
     }
@@ -644,7 +644,10 @@ impl ExpliaApp {
             Action::ToggleMulti(entry) => self.toggle_multi(entry),
             Action::SelectRange(entry) => self.select_range(entry),
             Action::ClearMulti => self.clear_multi(),
-            Action::AskDelete => self.confirm_delete = !self.delete_targets().is_empty(),
+            Action::AskDelete => {
+                self.confirm_delete = !self.delete_targets().is_empty();
+                self.delete_asked_at = Some(ctx.input(|i| i.time));
+            }
             Action::CancelDelete => self.confirm_delete = false,
             Action::ConfirmDelete => self.delete_selection(),
             Action::StartRename(entry) => self.start_rename(&entry),
@@ -991,7 +994,6 @@ impl ExpliaApp {
         let row_height = table_row_height(ui) + ui.spacing().item_spacing.y;
         // État modifié pendant le dessin de la liste : sorti de `self` le temps de la frame.
         let mut rename = self.renaming.take();
-        let mut last_click = self.last_row_click.take();
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             // Un clic maintenu ne doit pas faire défiler la liste.
@@ -1080,27 +1082,11 @@ impl ExpliaApp {
                             Action::Open(entry.path.clone())
                         });
                     } else if response.clicked() {
-                        let now = ui.input(|i| i.time);
-                        // Second clic « lent » sur l'élément déjà sélectionné : renommage.
-                        let slow_second_click = !multi_mode
-                            && self.multi.is_empty()
-                            && self.selected.as_ref().is_some_and(|s| s.path == entry.path)
-                            && last_click.as_ref().is_some_and(|(path, time)| {
-                                *path == entry.path
-                                    && (RENAME_CLICK_MIN_SECONDS..RENAME_CLICK_MAX_SECONDS)
-                                        .contains(&(now - time))
-                            });
-                        if slow_second_click {
-                            last_click = None;
-                            action = Some(Action::StartRename(entry.clone()));
+                        action = Some(if multi_mode {
+                            Action::ToggleMulti(entry.clone())
                         } else {
-                            last_click = Some((entry.path.clone(), now));
-                            action = Some(if multi_mode {
-                                Action::ToggleMulti(entry.clone())
-                            } else {
-                                Action::Select(entry.clone())
-                            });
-                        }
+                            Action::Select(entry.clone())
+                        });
                     }
                     response.context_menu(|ui| {
                         if ui.button("Renommer  (F2)").clicked() {
@@ -1139,54 +1125,79 @@ impl ExpliaApp {
                 }
             });
         self.renaming = rename;
-        self.last_row_click = last_click;
         action
     }
 
-    /// Boutons « Renommer » et « Supprimer ». « Supprimer » demande d'abord confirmation,
-    /// puis envoie à la corbeille. `rename` : l'élément à renommer (un seul à la fois).
+    /// Deux boutons côte à côte, de même largeur :
+    /// - emplacement 1 : « Renommer » (ou « Désélectionner »), qui devient « Annuler »
+    ///   pendant la confirmation ;
+    /// - emplacement 2 : « Supprimer », qui devient « Confirmer » **à la même place** :
+    ///   on clique deux fois au même endroit pour supprimer (vers la corbeille).
+    ///
+    /// `rename` : l'élément à renommer (un seul à la fois) ; `deselect` : propose
+    /// « Désélectionner » à la place de « Renommer » (multi-sélection).
     fn edit_controls(
         &self,
         ui: &mut egui::Ui,
         what: &str,
         rename: Option<&Entry>,
+        deselect: bool,
     ) -> Option<Action> {
         let mut action = None;
+        let size = egui::vec2(EDIT_BUTTON_WIDTH, ui.spacing().interact_size.y);
+        let now = ui.input(|i| i.time);
+        let armed = self
+            .delete_asked_at
+            .is_none_or(|asked| now - asked > CONFIRM_ARMING_SECONDS);
+        if self.confirm_delete && !armed {
+            // Réveille l'interface pour que le bouton soit prêt à la fin du délai.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        ui.horizontal(|ui| {
+            // Emplacement 1.
+            if self.confirm_delete {
+                if ui.add_sized(size, egui::Button::new("Annuler")).clicked() {
+                    action = Some(Action::CancelDelete);
+                }
+            } else if let Some(entry) = rename {
+                if ui
+                    .add_sized(size, egui::Button::new("✏ Renommer"))
+                    .on_hover_text("Raccourci : F2")
+                    .clicked()
+                {
+                    action = Some(Action::StartRename(entry.clone()));
+                }
+            } else if deselect
+                && ui
+                    .add_sized(size, egui::Button::new("Désélectionner"))
+                    .clicked()
+            {
+                action = Some(Action::ClearMulti);
+            }
+            // Emplacement 2.
+            if self.confirm_delete {
+                let confirm =
+                    egui::Button::new(egui::RichText::new("Confirmer").color(egui::Color32::WHITE))
+                        .fill(egui::Color32::from_rgb(180, 40, 40));
+                if ui.add_sized(size, confirm).clicked() && armed {
+                    action = Some(Action::ConfirmDelete);
+                }
+            } else if ui
+                .add_sized(size, egui::Button::new("🗑 Supprimer"))
+                .on_hover_text("Raccourci : Suppr")
+                .clicked()
+            {
+                action = Some(Action::AskDelete);
+            }
+        });
+        // Ligne d'information sous les boutons : n'en change pas la position.
         if self.confirm_delete {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
                 format!("Envoyer {what} à la corbeille ?"),
             );
-            ui.horizontal(|ui| {
-                let confirm = egui::Button::new(
-                    egui::RichText::new("Confirmer la suppression").color(egui::Color32::WHITE),
-                )
-                .fill(egui::Color32::from_rgb(180, 40, 40));
-                if ui.add(confirm).clicked() {
-                    action = Some(Action::ConfirmDelete);
-                }
-                if ui.button("Annuler").clicked() {
-                    action = Some(Action::CancelDelete);
-                }
-            });
         } else {
-            ui.horizontal_wrapped(|ui| {
-                if let Some(entry) = rename
-                    && ui
-                        .button("✏ Renommer")
-                        .on_hover_text("Raccourci : F2")
-                        .clicked()
-                {
-                    action = Some(Action::StartRename(entry.clone()));
-                }
-                if ui
-                    .button("🗑 Supprimer")
-                    .on_hover_text("Raccourci : Suppr")
-                    .clicked()
-                {
-                    action = Some(Action::AskDelete);
-                }
-            });
             ui.weak("Suppression : vers la corbeille de Windows.");
         }
         action
@@ -1203,10 +1214,7 @@ impl ExpliaApp {
         ui.label(egui::RichText::new(format!("{count} {kind} sélectionné(s)")).strong());
         ui.weak("Clic maintenu ou clic sur une ligne pour ajouter ou retirer.");
         ui.add_space(6.0);
-        let mut action = self.edit_controls(ui, &format!("{count} {kind}"), None);
-        if !self.confirm_delete && ui.button("Désélectionner").clicked() {
-            action = Some(Action::ClearMulti);
-        }
+        let action = self.edit_controls(ui, &format!("{count} {kind}"), None, true);
         ui.add_space(6.0);
         ui.separator();
         let row_height = table_row_height(ui) + ui.spacing().item_spacing.y;
@@ -1270,7 +1278,7 @@ impl ExpliaApp {
             }
             ui.add_space(6.0);
             let what = format!("le dossier « {} »", entry.name);
-            return (toggle, self.edit_controls(ui, &what, Some(entry)));
+            return (toggle, self.edit_controls(ui, &what, Some(entry), false));
         }
         ui.label(preview::kind_description(&entry.path));
         ui.label(format!("Taille : {}", self.entry_size_text(entry)));
@@ -1302,7 +1310,7 @@ impl ExpliaApp {
             }
         });
         let what = format!("le fichier « {} »", entry.name);
-        if let Some(edit_action) = self.edit_controls(ui, &what, Some(entry)) {
+        if let Some(edit_action) = self.edit_controls(ui, &what, Some(entry), false) {
             action = Some(edit_action);
         }
         ui.add_space(4.0);
