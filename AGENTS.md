@@ -44,6 +44,13 @@ si nécessaire.
 d'image.
 * Vérifier les versions et API des dépendances dans leur documentation
 actuelle avant de les utiliser.
+* Dépendance d'exécution **facultative** (décision de l'utilisateur) : la
+lecture audio et vidéo intégrée charge dynamiquement `libvlc.dll` du **VLC 3.x
+64 bits installé sur la machine** (`src/player.rs`). VLC n'est jamais embarqué
+ni redistribué ; sans VLC, l'application retombe sur l'application par défaut de
+Windows. Cette exigence doit rester documentée dans le README et signalée dans
+l'interface. Le code `unsafe` de l'interface avec libVLC reste isolé dans
+`src/player.rs`, et seuls des fichiers locaux sont confiés à VLC.
 
 Si le dépôt contient déjà un framework ou une architecture cohérente,
 inspecte-les et conserve-les sauf raison technique solide. Ne remplace

@@ -9,6 +9,7 @@ mod fs_nav;
 mod launch;
 mod media;
 mod places;
+mod player;
 mod preview;
 mod settings;
 mod trash;

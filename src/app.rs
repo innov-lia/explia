@@ -16,6 +16,7 @@ use crate::fs_nav::{self, Entry, Location};
 use crate::launch;
 use crate::media::{self, MediaInfo, MediaKind};
 use crate::places::{self, Drive, DriveKind};
+use crate::player::{self, Player, PlayerState};
 use crate::preview::{self, ArchivePreview, ImagePreview, PreviewContent, TextPreview};
 use crate::settings::Settings;
 use crate::trash;
@@ -101,6 +102,24 @@ enum Event {
     },
     /// Miniature décodée pour la grille d'images (`None` si le décodage a échoué).
     Thumb(PathBuf, Option<ImagePreview>),
+    /// Lecteur audio / vidéo prêt (ou échec), après le chargement de VLC.
+    PlayerReady(PathBuf, Result<Player, String>),
+}
+
+/// Lecture intégrée en cours dans le volet d'aperçu.
+enum PlayerSlot {
+    None,
+    /// VLC se charge et ouvre le fichier (en arrière-plan).
+    Loading(PathBuf),
+    Ready(Box<ActivePlayer>),
+}
+
+struct ActivePlayer {
+    path: PathBuf,
+    player: Player,
+    texture: Option<egui::TextureHandle>,
+    /// Version de la dernière image affichée.
+    frame_version: u64,
 }
 
 enum PreviewState {
@@ -152,6 +171,11 @@ enum Action {
     ConfirmDelete,
     /// Entre dans un dossier au clavier (flèche droite) : son premier élément est sélectionné.
     EnterFolder(PathBuf),
+    /// Lit un fichier audio ou vidéo dans le volet d'aperçu (VLC), sinon avec l'application
+    /// par défaut de Windows.
+    Play(PathBuf),
+    /// Arrête la lecture intégrée.
+    StopPlayer,
     /// Change la façon d'afficher le dossier (liste, colonnes, grille d'images).
     SetViewMode(ViewMode),
     /// Affiche ou masque les dossiers et fichiers cachés.
@@ -239,6 +263,8 @@ pub struct ExpliaApp {
     thumbs_in_flight: usize,
     /// Nombre de tuiles par ligne dans la grille (pour les flèches haut / bas).
     gallery_columns: usize,
+    /// Lecture audio / vidéo intégrée (libVLC).
+    player: PlayerSlot,
     window_sized: bool,
     selected: Option<Entry>,
     /// Multi-sélection : un seul type à la fois (tous dossiers, ou tous fichiers).
@@ -313,6 +339,7 @@ impl ExpliaApp {
             thumbs_requested: HashSet::new(),
             thumbs_in_flight: 0,
             gallery_columns: 1,
+            player: PlayerSlot::None,
             folder_generation: Arc::new(AtomicU64::new(0)),
             // Une taille mémorisée est appliquée dès la création de la fenêtre (voir `main`).
             window_sized: settings.window_size.is_some(),
@@ -544,6 +571,8 @@ impl ExpliaApp {
 
     /// Change d'emplacement. En cas d'erreur, on reste sur l'emplacement actuel.
     fn navigate(&mut self, target: Location) {
+        // Une lecture en cours ne suit pas dans un autre dossier.
+        self.stop_player();
         let select_first = std::mem::take(&mut self.select_first_after_nav);
         let select_path = self.select_path_after_nav.take();
         // Dossier quitté : si on remonte d'un niveau, on le resélectionne (comme l'Explorateur).
@@ -733,6 +762,8 @@ impl ExpliaApp {
     }
 
     fn delete_selection(&mut self) {
+        // Un fichier en cours de lecture est verrouillé : on libère VLC avant de supprimer.
+        self.stop_player();
         let paths: Vec<PathBuf> = self.delete_targets().into_iter().map(|e| e.path).collect();
         let count = paths.len();
         self.confirm_delete = false;
@@ -770,6 +801,7 @@ impl ExpliaApp {
 
     /// Applique le renommage ; en cas d'erreur, la saisie reste ouverte pour corriger.
     fn commit_rename(&mut self, ctx: &egui::Context, path: PathBuf, new_name: &str) {
+        self.stop_player();
         match fileops::rename_in_place(&path, new_name) {
             Ok(new_path) => {
                 self.renaming = None;
@@ -805,7 +837,101 @@ impl ExpliaApp {
         self.navigate(target);
     }
 
+    /// Arrête la lecture intégrée (libère le fichier et la mémoire).
+    fn stop_player(&mut self) {
+        self.player = PlayerSlot::None;
+    }
+
+    /// Lance la lecture dans le volet d'aperçu. VLC se charge en arrière-plan ; sans VLC, le
+    /// fichier est ouvert avec l'application par défaut de Windows et un message l'explique.
+    fn start_player(&mut self, path: PathBuf) {
+        self.stop_player();
+        if !player::is_available() {
+            self.error = Some(player::VLC_MISSING_MESSAGE.to_string());
+            self.report_launch_keep_error(launch::open(&path));
+            return;
+        }
+        self.error = None;
+        self.player = PlayerSlot::Loading(path.clone());
+        let tx = self.event_tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = Player::open(&path);
+            let _ = tx.send(Event::PlayerReady(path, result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Traite la fin du chargement de VLC : le lecteur est affiché s'il est toujours attendu.
+    fn on_player_ready(&mut self, path: PathBuf, result: Result<Player, String>) {
+        let still_wanted = matches!(&self.player, PlayerSlot::Loading(p) if *p == path);
+        match result {
+            Ok(player) if still_wanted => {
+                self.player = PlayerSlot::Ready(Box::new(ActivePlayer {
+                    path,
+                    player,
+                    texture: None,
+                    frame_version: 0,
+                }));
+            }
+            // Sélection abandonnée entre-temps : le lecteur est simplement libéré.
+            Ok(_) => {}
+            Err(message) if still_wanted => {
+                self.player = PlayerSlot::None;
+                self.error = Some(format!(
+                    "{message} Ouverture avec l'application par défaut."
+                ));
+                self.report_launch_keep_error(launch::open(&path));
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Met à jour la texture de l'image vidéo et demande les images suivantes pendant la lecture.
+    fn update_player(&mut self, ctx: &egui::Context) {
+        let PlayerSlot::Ready(active) = &mut self.player else {
+            return;
+        };
+        if let Some(frame) = active.player.frame_newer_than(active.frame_version) {
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.rgba);
+            match &mut active.texture {
+                Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
+                None => {
+                    active.texture =
+                        Some(ctx.load_texture("video", image, egui::TextureOptions::LINEAR));
+                }
+            }
+            active.frame_version = frame.version;
+        }
+        // Pendant la lecture, l'interface se redessine environ 30 fois par seconde.
+        if matches!(
+            active.player.state(),
+            PlayerState::Playing | PlayerState::Loading
+        ) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+    }
+
+    /// Comme `report_launch`, sans effacer un message déjà affiché en cas de succès.
+    fn report_launch_keep_error(&mut self, result: Result<(), String>) {
+        if let Err(message) = result {
+            self.error = Some(message);
+        }
+    }
+
     fn select(&mut self, ctx: &egui::Context, entry: Entry) {
+        // Choisir un autre élément arrête la lecture en cours.
+        if !matches!(&self.player, PlayerSlot::None) {
+            let same = match &self.player {
+                PlayerSlot::Loading(path) => *path == entry.path,
+                PlayerSlot::Ready(active) => active.path == entry.path,
+                PlayerSlot::None => false,
+            };
+            if !same {
+                self.stop_player();
+            }
+        }
         // Un clic simple remplace toute sélection multiple.
         self.clear_multi();
         self.preview = PreviewState::None;
@@ -858,6 +984,7 @@ impl ExpliaApp {
                         self.media.insert(path, info);
                     }
                 }
+                Event::PlayerReady(path, result) => self.on_player_ready(path, result),
                 Event::Thumb(path, thumb) => {
                     self.thumbs_in_flight = self.thumbs_in_flight.saturating_sub(1);
                     // Une miniature en échec reste dans `thumbs_requested` : on ne la redemande pas.
@@ -921,6 +1048,8 @@ impl ExpliaApp {
             }
             Action::RemoveFavorite(path) => self.favorites.remove(&path),
             Action::Open(path) => self.report_launch(launch::open(&path)),
+            Action::Play(path) => self.start_player(path),
+            Action::StopPlayer => self.stop_player(),
             Action::OpenAsAdmin(path) => self.report_launch(launch::open_as_admin(&path)),
             Action::EditAddress => {
                 self.address_editing = true;
@@ -1432,7 +1561,7 @@ impl ExpliaApp {
                                             &[],
                                         );
                                         if response.double_clicked() && !entry.is_dir {
-                                            action = Some(Action::Open(entry.path.clone()));
+                                            action = Some(open_action(&entry.path));
                                         } else if response.clicked() {
                                             action = Some(if entry.is_dir {
                                                 Action::Go(Location::Dir(entry.path.clone()))
@@ -1513,7 +1642,7 @@ impl ExpliaApp {
                             action = Some(if entry.is_dir {
                                 Action::Go(Location::Dir(entry.path.clone()))
                             } else {
-                                Action::Open(entry.path.clone())
+                                open_action(&entry.path)
                             });
                         } else if response.clicked() {
                             action = Some(Action::Select(entry.clone()));
@@ -1746,11 +1875,12 @@ impl ExpliaApp {
                 } else if self.long_press_done {
                     // Le relâchement qui suit un clic maintenu n'est pas un clic.
                 } else if response.double_clicked() && !multi_mode {
-                    // Dossier : on entre ; fichier : on l'ouvre avec son application.
+                    // Dossier : on entre ; audio ou vidéo : on la lit ; autre fichier : on l'ouvre
+                    // avec son application.
                     action = Some(if entry.is_dir {
                         Action::Go(Location::Dir(entry.path.clone()))
                     } else {
-                        Action::Open(entry.path.clone())
+                        open_action(&entry.path)
                     });
                 } else if response.clicked() {
                     action = Some(if multi_mode {
@@ -1776,12 +1906,19 @@ impl ExpliaApp {
                             ui.close();
                         }
                     } else {
+                        let playable = is_playable(&entry.path);
                         let label = if launch::is_executable(&entry.path) {
                             "Exécuter"
+                        } else if playable {
+                            "Lire"
                         } else {
                             "Ouvrir"
                         };
                         if ui.button(label).clicked() {
+                            action = Some(open_action(&entry.path));
+                            ui.close();
+                        }
+                        if playable && ui.button("Ouvrir avec le lecteur externe").clicked() {
                             action = Some(Action::Open(entry.path.clone()));
                             ui.close();
                         }
@@ -1866,7 +2003,7 @@ impl ExpliaApp {
                         Some(entry) if enter && entry.is_dir => {
                             Some(Action::EnterFolder(entry.path.clone()))
                         }
-                        Some(entry) if enter => Some(Action::Open(entry.path.clone())),
+                        Some(entry) if enter => Some(open_action(&entry.path)),
                         _ => None,
                     };
                 }
@@ -2048,6 +2185,88 @@ impl ExpliaApp {
         action
     }
 
+    /// Zone du lecteur intégré. Renvoie l'action éventuelle (arrêt) et `true` si le lecteur
+    /// (ou son chargement) est affiché pour ce fichier.
+    fn player_area(&self, ui: &mut egui::Ui, entry: &Entry) -> (Option<Action>, bool) {
+        match &self.player {
+            PlayerSlot::Loading(path) if *path == entry.path => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Chargement de VLC…");
+                });
+                (None, true)
+            }
+            PlayerSlot::Ready(active) if active.path == entry.path => {
+                (Self::player_controls(ui, active), true)
+            }
+            _ => (None, false),
+        }
+    }
+
+    /// Image de la vidéo et commandes : lecture / pause, arrêt, position, volume.
+    fn player_controls(ui: &mut egui::Ui, active: &ActivePlayer) -> Option<Action> {
+        let mut action = None;
+        let player = &active.player;
+        match &active.texture {
+            Some(texture) => {
+                let size = texture.size_vec2();
+                let scale = (ui.available_width() / size.x).min(4.0);
+                ui.image(egui::load::SizedTexture::new(texture.id(), size * scale));
+            }
+            None => {
+                // Son (pas d'image) ou image pas encore décodée.
+                ui.label(egui::RichText::new("🎵").size(48.0));
+            }
+        }
+        let state = player.state();
+        let length = player.length();
+        ui.horizontal(|ui| {
+            let label = match state {
+                PlayerState::Playing => "⏸",
+                PlayerState::Ended => "⟲",
+                _ => "▶",
+            };
+            if ui
+                .button(label)
+                .on_hover_text("Lecture / pause (Espace)")
+                .clicked()
+            {
+                player.toggle_pause();
+            }
+            if ui.button("⏹").on_hover_text("Arrêter").clicked() {
+                action = Some(Action::StopPlayer);
+            }
+            let total = length.map_or("--:--".to_string(), dates::format_duration);
+            ui.label(format!(
+                "{} / {total}",
+                dates::format_duration(player.time())
+            ));
+            if state == PlayerState::Error {
+                ui.colored_label(ui.visuals().error_fg_color, "Erreur de lecture");
+            }
+        });
+        // Les curseurs occupent toute la largeur du volet.
+        ui.spacing_mut().slider_width = (ui.available_width() - 12.0).max(60.0);
+        if let Some(length) = length {
+            let total = length.as_secs_f32().max(0.1);
+            let mut position = player.time().as_secs_f32().min(total);
+            let slider = egui::Slider::new(&mut position, 0.0..=total).show_value(false);
+            if ui.add(slider).changed() {
+                player.set_time(std::time::Duration::from_secs_f32(position));
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label("🔊");
+            ui.spacing_mut().slider_width = (ui.available_width() - 12.0).max(40.0);
+            let mut volume = player.volume();
+            let slider = egui::Slider::new(&mut volume, 0..=100).show_value(false);
+            if ui.add(slider).changed() {
+                player.set_volume(volume);
+            }
+        });
+        action
+    }
+
     /// Contenu du volet : en-tête, aperçu ou actions.
     fn preview_content(&self, ui: &mut egui::Ui) -> (bool, Option<Action>) {
         let mut toggle = false;
@@ -2094,21 +2313,38 @@ impl ExpliaApp {
         ui.label(format!("Taille : {}", self.entry_size_text(entry)));
         ui.add_space(4.0);
         let is_video = preview::is_video(&entry.path);
+        let playable = is_playable(&entry.path);
         let is_executable = launch::is_executable(&entry.path);
         ui.horizontal_wrapped(|ui| {
-            let label = if is_video {
-                "▶ Lire"
-            } else if is_executable {
-                "▶ Exécuter"
+            if playable {
+                // Lecture dans le volet (VLC) ; sans VLC, ouverture avec l'application par défaut.
+                if ui
+                    .button("▶ Lire")
+                    .on_hover_text("Lit le fichier ici (nécessite VLC 64 bits installé)")
+                    .clicked()
+                {
+                    action = Some(Action::Play(entry.path.clone()));
+                }
+                if ui
+                    .button("↗ Lecteur externe")
+                    .on_hover_text("Ouvre le fichier avec l'application par défaut de Windows")
+                    .clicked()
+                {
+                    action = Some(Action::Open(entry.path.clone()));
+                }
             } else {
-                "Ouvrir"
-            };
-            if ui
-                .button(label)
-                .on_hover_text("Ouvre le fichier avec l'application par défaut de Windows")
-                .clicked()
-            {
-                action = Some(Action::Open(entry.path.clone()));
+                let label = if is_executable {
+                    "▶ Exécuter"
+                } else {
+                    "Ouvrir"
+                };
+                if ui
+                    .button(label)
+                    .on_hover_text("Ouvre le fichier avec l'application par défaut de Windows")
+                    .clicked()
+                {
+                    action = Some(Action::Open(entry.path.clone()));
+                }
             }
             if is_executable
                 && ui
@@ -2124,11 +2360,36 @@ impl ExpliaApp {
             action = Some(edit_action);
         }
         ui.add_space(4.0);
+        // Lecteur audio / vidéo intégré : affiché dès qu'une lecture est lancée sur ce fichier.
+        if playable {
+            let (player_action, showing) = self.player_area(ui, entry);
+            if player_action.is_some() {
+                action = player_action;
+            }
+            if showing {
+                return (toggle, action);
+            }
+        }
         if !preview::is_previewable(&entry.path) {
             ui.add_space(12.0);
-            let icon = if is_video { "🎬" } else { "📄" };
+            let icon = if is_video {
+                "🎬"
+            } else if playable {
+                "🎵"
+            } else {
+                "📄"
+            };
             ui.label(egui::RichText::new(icon).size(64.0));
-            ui.weak("Pas d'aperçu pour ce type de fichier.");
+            if playable && !player::is_available() {
+                ui.weak(
+                    "Lecture intégrée : installez VLC (64 bits, videolan.org). \
+                     Sans VLC, « Lire » ouvre le lecteur par défaut.",
+                );
+            } else if playable {
+                ui.weak("Cliquez sur « Lire » pour l'écouter ou la regarder ici.");
+            } else {
+                ui.weak("Pas d'aperçu pour ce type de fichier.");
+            }
             return (toggle, action);
         }
         ui.add_space(8.0);
@@ -2498,6 +2759,24 @@ fn size_row(ui: &mut egui::Ui, selected: bool, name: &str, size: &str) -> egui::
     )
 }
 
+/// Fichier audio ou vidéo que le lecteur intégré sait lire.
+fn is_playable(path: &Path) -> bool {
+    matches!(
+        media::kind_of(path),
+        Some(MediaKind::Video | MediaKind::Audio)
+    )
+}
+
+/// Action d'« ouverture » d'un fichier (double-clic, Entrée) : lecture intégrée pour l'audio
+/// et la vidéo, application associée pour le reste.
+fn open_action(path: &Path) -> Action {
+    if is_playable(path) {
+        Action::Play(path.to_path_buf())
+    } else {
+        Action::Open(path.to_path_buf())
+    }
+}
+
 fn favorite_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -2520,6 +2799,7 @@ impl eframe::App for ExpliaApp {
         let ctx = ui.ctx().clone();
         self.size_window_once(&ctx);
         self.poll_events(&ctx);
+        self.update_player(&ctx);
         if ctx.input(|i| i.pointer.primary_pressed()) {
             self.long_press_done = false;
         }
@@ -2537,13 +2817,18 @@ impl eframe::App for ExpliaApp {
         // Raccourcis (jamais pendant une saisie) : F2 renomme ; Suppr demande la suppression,
         // puis Entrée la confirme (Échap l'annule).
         if !ctx.egui_wants_keyboard_input() && self.renaming.is_none() && !self.address_editing {
-            let (f2, delete, enter) = ctx.input(|i| {
+            let (f2, delete, enter, space) = ctx.input(|i| {
                 (
                     i.key_pressed(egui::Key::F2),
                     i.key_pressed(egui::Key::Delete),
                     i.key_pressed(egui::Key::Enter),
+                    i.key_pressed(egui::Key::Space),
                 )
             });
+            // Espace : lecture / pause du lecteur intégré.
+            if space && let PlayerSlot::Ready(active) = &self.player {
+                active.player.toggle_pause();
+            }
             let single = match self.multi.len() {
                 0 => self.selected.as_ref(),
                 1 => self.multi.first(),
@@ -2616,6 +2901,7 @@ impl eframe::App for ExpliaApp {
 
     /// À la fermeture : mémorise aussi la taille de la fenêtre.
     fn on_exit(&mut self) {
+        self.stop_player();
         let settings = self.current_settings();
         self.write_settings(settings);
     }

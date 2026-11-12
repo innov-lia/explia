@@ -22,7 +22,8 @@ Exceptions :
 - Multi-sélection et suppression : **clic maintenu** (0,5 s) sur une ligne pour démarrer la sélection, puis un clic sur chaque ligne à ajouter ou retirer. **Ctrl+clic** ajoute ou retire une ligne ; **Maj+clic** sélectionne toute la plage entre le dernier élément choisi et celui sur lequel vous cliquez. Un seul type à la fois : uniquement des dossiers, ou uniquement des fichiers. Le volet d'aperçu devient un volet « Actions » : **Supprimer** (envoi à la corbeille, avec confirmation) ou **Désélectionner** (Échap fonctionne aussi).
 - Actions sur un élément : un clic sur un **dossier** transforme le volet « Aperçu » en volet « Actions » (**Renommer**, **Supprimer**) ; sur un fichier, ces boutons s'ajoutent sous l'aperçu. **F2**, le bouton « Renommer » ou le clic droit puis « Renommer » permettent de renommer directement dans la liste (Entrée valide, Échap annule ; l'extension n'est pas sélectionnée). Au clavier : **Suppr** puis **Entrée** supprime l'élément sélectionné (Échap annule). **Suppr** ou le bouton « Supprimer » demande la suppression : le bouton devient « Confirmer » **à la même place** (un second clic au même endroit valide ; « Annuler » est juste à côté). Un double-clic accidentel est ignoré pendant 0,6 s.
 - Navigation aux flèches : **↑ / ↓** déplacent la sélection (la liste défile pour la garder visible ; **Maj+↑/↓** étend la sélection) ; **←** remonte au dossier parent en resélectionnant le dossier quitté ; **→** entre dans le dossier sélectionné et sélectionne son premier élément. Dans la vue « Ce PC », ↑ / ↓ choisissent un lecteur et → l'ouvre.
-- Ouvrir : double-clic sur un fichier (vidéo `.mp4`/`.mkv`, document, exécutable…) pour l'ouvrir avec l'application par défaut de Windows, qui lit les vidéos. Clic droit sur un exécutable (`.exe`, `.bat`, `.cmd`, `.msi`) : « Exécuter » ou « Exécuter en tant qu'administrateur » (fenêtre UAC). Le volet d'aperçu propose les mêmes boutons.
+- **Lecture audio et vidéo intégrée** (⚠ **VLC requis**, voir ci-dessous) : un clic sur « ▶ Lire », un double-clic ou Entrée sur un fichier audio ou vidéo le lit directement dans le volet d'aperçu, avec lecture / pause (bouton ou **Espace**), arrêt, barre de position et volume. Agrandissez le volet avec la flèche `<` pour une image plus grande. « ↗ Lecteur externe » (ou clic droit) ouvre le fichier dans l'application par défaut de Windows.
+- Ouvrir : double-clic sur un document ou un autre fichier pour l'ouvrir avec l'application par défaut de Windows. Clic droit sur un exécutable (`.exe`, `.bat`, `.cmd`, `.msi`) : « Exécuter » ou « Exécuter en tant qu'administrateur » (fenêtre UAC). Le volet d'aperçu propose les mêmes boutons.
 - Barre latérale : **Favoris** (vide par défaut : uniquement les dossiers que vous ajoutez), puis la section **Ce PC** (un clic ouvre la vue des lecteurs) avec la liste des lecteurs. Clic droit sur un dossier de la liste : « Ajouter aux favoris » ; clic droit sur un de vos favoris : « Retirer des favoris ».
 - Aperçu (décodé hors du thread d'interface) : images PNG, JPEG, BMP, GIF (première image) et WebP ; fichiers texte courants (`.txt`, `.md`, `.json`, `.csv`, `.rs`, `.log`, …, 64 Ko affichés au maximum) ; contenu des archives `.zip` (liste des fichiers, rien n'est extrait) ; pour les autres fichiers (PDF, Office, vidéos…), type et taille. La flèche `<` devant « Aperçu » agrandit le volet pour tout voir d'un coup, `>` le réduit.
 
@@ -31,6 +32,16 @@ Exceptions :
 - Windows 10 ou 11, x86_64.
 - [Rust stable](https://rustup.rs) (édition 2024, Rust 1.85 ou plus récent).
 - Toolchain `x86_64-pc-windows-msvc` : installer les *Visual Studio Build Tools* avec la charge de travail « Développement Desktop en C++ » (inclut le SDK Windows).
+- Facultatif, pour la lecture audio et vidéo intégrée : **VLC 3.x 64 bits** (voir la section suivante).
+
+## Lecture audio et vidéo : VLC requis (facultatif)
+
+ExPLIA n'embarque aucun lecteur. Pour lire les vidéos et les sons **dans ExPLIA**, il utilise la bibliothèque `libvlc.dll` d'un **VLC installé sur la machine** :
+
+- **VLC 3.x en 64 bits** (téléchargement : <https://www.videolan.org>). VLC en 32 bits et VLC 4 ne sont pas pris en charge.
+- ExPLIA cherche VLC dans l'ordre : (1) le dossier indiqué par la variable d'environnement `EXPLIA_VLC_DIR` ; (2) un dossier `vlc` placé à côté de `explia.exe` (VLC « portable ») ; (3) `C:\Program Files\VideoLAN\VLC`.
+- **Sans VLC**, tout le reste fonctionne : « ▶ Lire » ouvre simplement le fichier avec l'application par défaut de Windows et un message indique comment obtenir la lecture intégrée.
+- ExPLIA ne redistribue pas VLC (il le charge à la demande, en mémoire, au premier fichier lu) et ne lui transmet que des fichiers locaux : aucun flux réseau.
 
 ## Compilation et exécution
 
@@ -57,6 +68,7 @@ cargo clippy -- -D warnings
 | `src/view.rs` | Tri et filtre par extension de la liste affichée. |
 | `src/favorites.rs` | Liste des favoris. |
 | `src/settings.rs` | Fichier de réglages (`settings.txt`) : lecture, écriture, valeurs par défaut. |
+| `src/player.rs` | Lecture audio / vidéo intégrée : chargement dynamique de libVLC (code `unsafe` isolé ici). |
 | `src/media.rs` | Lecture des en-têtes multimédia : dimensions, résolution, durée. |
 | `src/dates.rs` | Dates à l'heure locale et durées. |
 | `src/fileops.rs` | Renommage : validation du nom Windows, refus d'écraser. |
