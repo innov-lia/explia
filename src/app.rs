@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::containers::menu::{MenuButton, MenuConfig};
 use eframe::egui::{self, PopupCloseBehavior};
 
+use crate::clipboard;
 use crate::dates;
 use crate::favorites::Favorites;
 use crate::fileops;
@@ -295,6 +296,15 @@ enum Action {
     CloseResults,
     /// Passe la vidéo en plein écran, ou en sort.
     ToggleVideoFullscreen,
+    /// Copie le chemin complet dans le presse-papiers (texte).
+    CopyPath(PathBuf),
+    /// Copie des fichiers ou dossiers dans le presse-papiers de Windows (à coller ailleurs).
+    CopyFiles(Vec<PathBuf>),
+    /// Ouvre PowerShell dans un dossier, éventuellement en administrateur (UAC).
+    OpenPowerShell {
+        dir: PathBuf,
+        admin: bool,
+    },
     /// Demande la suppression d'un dossier qui n'est pas une ligne de la liste (le dossier
     /// affiché lui-même, ou un dossier parent d'un résultat).
     AskDeleteFolder(PathBuf),
@@ -1633,6 +1643,25 @@ impl ExpliaApp {
                 self.delete_asked_at = Some(ctx.input(|i| i.time));
             }
             Action::CancelDelete => self.cancel_delete(),
+            Action::CopyPath(path) => {
+                let text = path.display().to_string();
+                ctx.copy_text(text.clone());
+                self.error = None;
+                self.notice = Some(format!("Chemin copié : {text}"));
+            }
+            Action::CopyFiles(paths) => match clipboard::copy_files(&paths) {
+                Ok(()) => {
+                    self.error = None;
+                    self.notice = Some(format!(
+                        "{} élément(s) copié(s) : collez-les dans l'Explorateur ou sur le Bureau (Ctrl+V).",
+                        paths.len()
+                    ));
+                }
+                Err(message) => self.error = Some(message),
+            },
+            Action::OpenPowerShell { dir, admin } => {
+                self.report_launch(launch::open_powershell(&dir, admin));
+            }
             Action::ToggleVideoFullscreen => self.set_video_fullscreen(ctx, !self.video_fullscreen),
             Action::FindEmptyFolders => self.start_scan(ResultKind::EmptyFolders),
             Action::FindDuplicates => self.start_scan(ResultKind::Duplicates),
@@ -3149,6 +3178,46 @@ impl ExpliaApp {
             }
             ui.separator();
         }
+        // Copier : l'élément, ou toute la multi-sélection s'il en fait partie.
+        let targets: Vec<PathBuf> = if self.multi.iter().any(|m| m.path == entry.path) {
+            self.multi.iter().map(|m| m.path.clone()).collect()
+        } else {
+            vec![entry.path.clone()]
+        };
+        let copy_label = if targets.len() > 1 {
+            format!("📋 Copier ({} éléments)  (Ctrl+C)", targets.len())
+        } else {
+            "📋 Copier  (Ctrl+C)".to_string()
+        };
+        if ui
+            .button(copy_label)
+            .on_hover_text("À coller dans l'Explorateur, sur le Bureau ou ailleurs (Ctrl+V)")
+            .clicked()
+        {
+            action = Some(Action::CopyFiles(targets));
+            ui.close();
+        }
+        if ui.button("Copier le chemin").clicked() {
+            action = Some(Action::CopyPath(entry.path.clone()));
+            ui.close();
+        }
+        if entry.is_dir {
+            if ui.button(">_ PowerShell ici").clicked() {
+                action = Some(Action::OpenPowerShell {
+                    dir: entry.path.clone(),
+                    admin: false,
+                });
+                ui.close();
+            }
+            if ui.button(">_ PowerShell ici (administrateur)").clicked() {
+                action = Some(Action::OpenPowerShell {
+                    dir: entry.path.clone(),
+                    admin: true,
+                });
+                ui.close();
+            }
+        }
+        ui.separator();
         if entry.is_dir {
             if self.favorites.contains(&entry.path) {
                 if ui.button("Retirer des favoris").clicked() {
@@ -3421,6 +3490,41 @@ impl ExpliaApp {
         action
     }
 
+    /// Outils d'un dossier, dans le volet de détail : PowerShell (normal ou administrateur) et
+    /// copie du chemin.
+    fn folder_tools(&self, ui: &mut egui::Ui, dir: &Path) -> Option<Action> {
+        let mut action = None;
+        ui.horizontal_wrapped(|ui| {
+            if powershell_button(ui, ">_ PowerShell")
+                .on_hover_text("Ouvre PowerShell dans ce dossier")
+                .clicked()
+            {
+                action = Some(Action::OpenPowerShell {
+                    dir: dir.to_path_buf(),
+                    admin: false,
+                });
+            }
+            if powershell_button(ui, ">_ Admin")
+                .on_hover_text("Ouvre PowerShell en tant qu'administrateur (fenêtre UAC)")
+                .clicked()
+            {
+                action = Some(Action::OpenPowerShell {
+                    dir: dir.to_path_buf(),
+                    admin: true,
+                });
+            }
+            if ui
+                .button("📋 Chemin")
+                .on_hover_text("Copie le chemin du dossier")
+                .clicked()
+            {
+                action = Some(Action::CopyPath(dir.to_path_buf()));
+            }
+        });
+        ui.add_space(4.0);
+        action
+    }
+
     /// Contenu du volet pendant la multi-sélection : résumé et actions (supprimer).
     fn actions_content(&self, ui: &mut egui::Ui) -> Option<Action> {
         let count = self.multi.len();
@@ -3432,7 +3536,19 @@ impl ExpliaApp {
         ui.label(egui::RichText::new(format!("{count} {kind} sélectionné(s)")).strong());
         ui.weak("Clic maintenu ou clic sur une ligne pour ajouter ou retirer.");
         ui.add_space(6.0);
-        let action = self.edit_controls(ui, &format!("{count} {kind}"), None, true);
+        let mut copy_action = None;
+        if ui
+            .button("📋 Copier  (Ctrl+C)")
+            .on_hover_text("À coller dans l'Explorateur, sur le Bureau ou ailleurs (Ctrl+V)")
+            .clicked()
+        {
+            copy_action = Some(Action::CopyFiles(
+                self.multi.iter().map(|e| e.path.clone()).collect(),
+            ));
+        }
+        let action = self
+            .edit_controls(ui, &format!("{count} {kind}"), None, true)
+            .or(copy_action);
         ui.add_space(6.0);
         ui.separator();
         let row_height = table_row_height(ui);
@@ -3644,6 +3760,7 @@ impl ExpliaApp {
                 ui.label(egui::RichText::new(favorite_name(path)).strong());
                 ui.label("Dossier courant");
                 ui.add_space(6.0);
+                let tools = self.folder_tools(ui, path);
                 if ui
                     .button("🗑 Supprimer ce dossier")
                     .on_hover_text("Envoie le dossier affiché à la corbeille (après confirmation)")
@@ -3652,6 +3769,7 @@ impl ExpliaApp {
                     return Some(Action::AskDeleteFolder(path.clone()));
                 }
                 ui.weak("Suppression : vers la corbeille de Windows.");
+                return tools;
             } else {
                 ui.weak("Sélectionnez un élément.");
             }
@@ -3676,8 +3794,12 @@ impl ExpliaApp {
                 ui.label(format!("Taille : {size}"));
             }
             ui.add_space(6.0);
+            let tools = self.folder_tools(ui, &entry.path);
             let what = format!("le dossier « {} »", entry.name);
-            return self.edit_controls(ui, &what, Some(entry), false).or(action);
+            return self
+                .edit_controls(ui, &what, Some(entry), false)
+                .or(action)
+                .or(tools);
         }
         ui.label(preview::kind_description(&entry.path));
         ui.label(format!("Taille : {}", self.entry_size_text(entry)));
@@ -3864,6 +3986,18 @@ impl ExpliaApp {
             }
         }
     }
+}
+
+/// Bouton aux couleurs de PowerShell (fond bleu nuit, texte blanc).
+fn powershell_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(label)
+                .color(egui::Color32::WHITE)
+                .strong(),
+        )
+        .fill(egui::Color32::from_rgb(1, 36, 86)),
+    )
 }
 
 /// Ligne « .. » en tête de liste : un clic revient au dossier précédent (le parent).
@@ -4378,12 +4512,14 @@ impl eframe::App for ExpliaApp {
         // Raccourcis (jamais pendant une saisie) : F2 renomme ; Suppr demande la suppression,
         // puis Entrée la confirme (Échap l'annule).
         if !ctx.egui_wants_keyboard_input() && self.renaming.is_none() && !self.address_editing {
-            let (f2, delete, enter, space) = ctx.input(|i| {
+            let (f2, delete, enter, space, copy) = ctx.input(|i| {
                 (
                     i.key_pressed(egui::Key::F2),
                     i.key_pressed(egui::Key::Delete),
                     i.key_pressed(egui::Key::Enter),
                     i.key_pressed(egui::Key::Space),
+                    // Ctrl+C : egui le transmet comme un événement « Copier ».
+                    i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
                 )
             });
             // Espace : lecture / pause du lecteur intégré.
@@ -4399,6 +4535,9 @@ impl eframe::App for ExpliaApp {
                 action = Some(Action::ConfirmDelete);
             } else if f2 && let Some(entry) = single {
                 action = Some(Action::StartRename(entry.clone()));
+            } else if copy && !self.delete_targets().is_empty() {
+                let paths = self.delete_targets().into_iter().map(|e| e.path).collect();
+                action = Some(Action::CopyFiles(paths));
             } else if delete && !self.delete_targets().is_empty() {
                 action = Some(Action::AskDelete);
             } else if !self.confirm_delete {

@@ -26,6 +26,20 @@ pub fn open_as_admin(path: &Path) -> Result<(), String> {
     imp::shell_execute("runas", path)
 }
 
+/// Arguments de PowerShell pour une console qui reste ouverte dans le dossier `dir`.
+/// Le chemin est entre apostrophes (chaîne littérale) ; une apostrophe du chemin est doublée.
+pub fn powershell_args(dir: &Path) -> String {
+    let literal = dir.display().to_string().replace('\'', "''");
+    format!("-NoExit -Command \"Set-Location -LiteralPath '{literal}'\"")
+}
+
+/// Ouvre une console PowerShell dans le dossier `dir` ; `admin` : en tant qu'administrateur
+/// (Windows affiche la fenêtre UAC).
+pub fn open_powershell(dir: &Path, admin: bool) -> Result<(), String> {
+    let verb = if admin { "runas" } else { "open" };
+    imp::run_program(verb, "powershell.exe", &powershell_args(dir), dir)
+}
+
 #[cfg(windows)]
 mod imp {
     use std::os::windows::ffi::OsStrExt;
@@ -37,6 +51,35 @@ mod imp {
 
     fn wide(text: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
         text.as_ref().encode_wide().chain(Some(0)).collect()
+    }
+
+    /// Lance `program` avec ses arguments, dans le dossier `dir`.
+    pub fn run_program(verb: &str, program: &str, args: &str, dir: &Path) -> Result<(), String> {
+        let verb = wide(verb);
+        let file = wide(program);
+        let args = wide(args);
+        let dir = wide(dir);
+        // SAFETY: toutes les chaînes sont terminées par un zéro et vivent pendant l'appel ;
+        // la fenêtre parente est nulle (autorisé par l'API).
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                args.as_ptr(),
+                dir.as_ptr(),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = result as isize;
+        if code > 32 {
+            return Ok(());
+        }
+        Err(match code {
+            2 | 3 => format!("{program} introuvable."),
+            5 => "Lancement refusé ou annulé.".to_string(),
+            other => format!("Impossible de lancer {program} (code {other})."),
+        })
     }
 
     pub fn shell_execute(verb: &str, path: &Path) -> Result<(), String> {
@@ -76,11 +119,30 @@ mod imp {
     pub fn shell_execute(_verb: &str, _path: &Path) -> Result<(), String> {
         Err("Ouverture de fichiers disponible uniquement sous Windows.".to_string())
     }
+
+    pub fn run_program(
+        _verb: &str,
+        _program: &str,
+        _args: &str,
+        _dir: &Path,
+    ) -> Result<(), String> {
+        Err("Lancement de programmes disponible uniquement sous Windows.".to_string())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn powershell_starts_in_the_folder_and_stays_open() {
+        assert_eq!(
+            powershell_args(Path::new("C:\\Mes Dossiers")),
+            "-NoExit -Command \"Set-Location -LiteralPath 'C:\\Mes Dossiers'\""
+        );
+        // Une apostrophe du chemin est doublée dans la chaîne littérale de PowerShell.
+        assert!(powershell_args(Path::new("C:\\l'été")).contains("'C:\\l''été'"));
+    }
 
     #[test]
     fn executables_are_recognized() {

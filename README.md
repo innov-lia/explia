@@ -53,6 +53,9 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 - **Volet « Actions »** : un clic sur un dossier (ou une multi-sélection) transforme l'aperçu du volet de détail en actions ; sur un fichier, les boutons s'ajoutent sous l'aperçu.
 - **Renommer** : **F2**, bouton « Renommer » ou clic droit, directement dans la liste ou la dernière colonne de la vue en colonnes (Entrée valide, Échap annule ; l'extension n'est pas sélectionnée). Les noms interdits par Windows sont refusés et un élément existant n'est jamais écrasé.
 - **Supprimer** : **Suppr** ou bouton « Supprimer », vers la **corbeille de Windows** (récupérable). Le bouton devient « Confirmer » **à la même place** (un second clic au même endroit valide ; « Annuler » est juste à côté) ; au clavier, **Suppr** puis **Entrée**, Échap annule. Un double-clic accidentel est ignoré pendant 0,6 s.
+- **Copier** (clic droit « 📋 Copier », bouton du volet pour une multi-sélection, ou **Ctrl+C**) : place les fichiers et dossiers dans le presse-papiers de Windows ; collez-les ensuite dans l'Explorateur, sur le Bureau ou dans une autre application (**Ctrl+V**). ExPLIA n'écrit rien lui-même : c'est l'application où l'on colle qui copie.
+- **Copier le chemin** (clic droit, ou bouton « 📋 Chemin » d'un dossier) : le chemin complet, en texte.
+- **PowerShell** : dans le volet de détail d'un dossier (dossier sélectionné ou dossier affiché), boutons **>_ PowerShell** et **>_ Admin** (en administrateur, fenêtre UAC) ; aussi au clic droit sur un dossier. La console s'ouvre directement dans ce dossier (Windows PowerShell, `powershell.exe`).
 - **Ouvrir** : double-clic sur un fichier l'ouvre avec l'application par défaut de Windows. Clic droit sur un exécutable (`.exe`, `.bat`, `.cmd`, `.msi`) : « Exécuter » ou « Exécuter en tant qu'administrateur » (fenêtre UAC).
 
 ### Réglages
@@ -73,6 +76,8 @@ Vos réglages sont enregistrés automatiquement dans `%APPDATA%\ExPLIA\settings.
 | **Espace** | Lecture / pause du lecteur intégré |
 | **Échap** | Annule une saisie, une confirmation ou la multi-sélection |
 | **Ctrl+clic**, **Maj+clic**, **clic maintenu** | Sélection multiple |
+| **Ctrl+C** | Copie la sélection (à coller dans l'Explorateur ou sur le Bureau) |
+| **Ctrl+F** | Va dans la barre de recherche |
 | **Double-clic** | Ouvre un dossier ; lit un fichier audio / vidéo ; ouvre un autre fichier |
 
 ## Sécurité et données
@@ -141,6 +146,7 @@ cargo clippy -- -D warnings
 | `src/trash.rs` | Envoi à la corbeille (`SHFileOperationW` avec `FOF_ALLOWUNDO`). |
 | `src/launch.rs` | Ouverture d'un fichier / lancement d'un exécutable (`ShellExecuteW`, UAC). |
 | `src/scan.rs` | Parcours en lecture seule : recherche récursive, dossiers vides, doublons (empreintes). |
+| `src/clipboard.rs` | Presse-papiers de Windows : liste de fichiers (`CF_HDROP`) à coller ailleurs. |
 | `src/places.rs` | Lecteurs logiques, capacité / occupation / nom / format des lecteurs, dossier de l'utilisateur (API Windows). |
 | `src/preview.rs` | Aperçus : images, texte, archives ZIP, miniatures. |
 | `.cargo/config.toml` | Liaison statique du runtime C. |
