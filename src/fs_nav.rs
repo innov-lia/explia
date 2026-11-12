@@ -53,6 +53,20 @@ pub fn is_link(meta: &fs::Metadata) -> bool {
     }
 }
 
+/// Dossiers qui séparent `path` de `root` (exclu), du plus proche au plus éloigné, en commençant
+/// par le dossier qui contient `path` : `a\\b` puis `a` pour `root\\a\\b\\f.txt`. Vide si `path`
+/// n'est pas sous `root` ou directement dans `root`.
+pub fn levels_below(root: &Path, path: &Path) -> Vec<PathBuf> {
+    if !path.starts_with(root) {
+        return Vec::new();
+    }
+    path.ancestors()
+        .skip(1)
+        .take_while(|ancestor| *ancestor != root && ancestor.starts_with(root))
+        .map(Path::to_path_buf)
+        .collect()
+}
+
 /// Construit l'entrée décrivant un chemin (nom, type, taille, dates). `None` s'il est illisible.
 pub fn entry_from_path(path: &Path) -> Option<Entry> {
     let own = fs::symlink_metadata(path).ok()?;
@@ -256,6 +270,22 @@ pub fn breadcrumbs_with_home(path: &Path, home: Option<&Path>) -> Vec<(String, P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn levels_below_lists_the_folders_between_root_and_file() {
+        let root = Path::new("C:\\Data");
+        let deep = Path::new("C:\\Data\\a\\b\\f.txt");
+        assert_eq!(
+            levels_below(root, deep),
+            [
+                PathBuf::from("C:\\Data\\a\\b"),
+                PathBuf::from("C:\\Data\\a")
+            ]
+        );
+        assert!(levels_below(root, Path::new("C:\\Data\\f.txt")).is_empty());
+        assert!(levels_below(root, Path::new("D:\\x\\f.txt")).is_empty());
+    }
 
     #[cfg(windows)]
     #[test]

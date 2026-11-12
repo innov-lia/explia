@@ -291,14 +291,13 @@ enum Action {
     FindEmptyFolders,
     /// Lance la recherche des doublons (selon l'option « Récursive » et le seuil en Mo).
     FindDuplicates,
-    /// Change le seuil, en Mo, de la recherche de doublons.
-    SetDuplicateMb(u32),
     /// Sélectionne les copies : tout sauf le premier fichier de chaque groupe de doublons.
     SelectDuplicateCopies,
     /// Ferme les résultats et revient au contenu du dossier.
     CloseResults,
-    /// Demande la suppression du dossier affiché lui-même.
-    AskDeleteCurrent,
+    /// Demande la suppression d'un dossier qui n'est pas une ligne de la liste (le dossier
+    /// affiché lui-même, ou un dossier parent d'un résultat).
+    AskDeleteFolder(PathBuf),
     /// Clic sur un en-tête de colonne : trie dessus, ou inverse l'ordre s'il est déjà actif.
     SortBy(SortKey),
     /// Affiche ou masque les dossiers et fichiers cachés.
@@ -834,15 +833,15 @@ impl ExpliaApp {
         }
     }
 
-    /// Annule la demande de suppression. Si elle visait le dossier affiché lui-même, la
-    /// sélection provisoire est retirée.
+    /// Annule la demande de suppression. Si elle visait un dossier qui n'est pas une ligne de la
+    /// liste (dossier affiché, dossier parent d'un résultat), la sélection provisoire est retirée.
     fn cancel_delete(&mut self) {
         self.confirm_delete = false;
-        let on_current = match (&self.selected, &self.location) {
-            (Some(selected), Location::Dir(path)) => selected.path == *path,
-            _ => false,
-        };
-        if on_current {
+        let provisional = self
+            .selected
+            .as_ref()
+            .is_some_and(|selected| !self.visible.iter().any(|e| e.path == selected.path));
+        if provisional {
             self.selected = None;
             self.preview = PreviewState::None;
         }
@@ -1574,7 +1573,6 @@ impl ExpliaApp {
             Action::CancelDelete => self.cancel_delete(),
             Action::FindEmptyFolders => self.start_scan(ResultKind::EmptyFolders),
             Action::FindDuplicates => self.start_scan(ResultKind::Duplicates),
-            Action::SetDuplicateMb(mb) => self.duplicate_min_mb = mb.clamp(1, 1_000_000),
             Action::SelectDuplicateCopies => {
                 // On garde le premier fichier de chaque groupe ; les autres sont sélectionnés.
                 let mut seen = HashSet::new();
@@ -1610,10 +1608,8 @@ impl ExpliaApp {
                 self.preview = PreviewState::None;
                 self.recompute_visible();
             }
-            Action::AskDeleteCurrent => {
-                if let Location::Dir(path) = &self.location
-                    && let Some(entry) = fs_nav::entry_from_path(path)
-                {
+            Action::AskDeleteFolder(path) => {
+                if let Some(entry) = fs_nav::entry_from_path(&path) {
                     self.clear_multi();
                     self.selected = Some(entry);
                     self.confirm_delete = true;
@@ -1912,6 +1908,41 @@ impl ExpliaApp {
             if ui.button("🖥 Ce PC").clicked() {
                 action = Some(Action::Go(Location::ThisPc));
             }
+            ui.separator();
+            menu(ui, "Sélection", |ui| {
+                let on_dir = matches!(self.location, Location::Dir(_));
+                let scope = if self.recursive {
+                    "sous-dossiers compris"
+                } else {
+                    "dossier courant seulement"
+                };
+                ui.weak(format!("Portée : {scope} (case Récursive)"));
+                if ui
+                    .add_enabled(on_dir, egui::Button::new("📂 Dossiers vides"))
+                    .on_hover_text("Liste et sélectionne les dossiers sans aucun fichier")
+                    .clicked()
+                {
+                    action = Some(Action::FindEmptyFolders);
+                    ui.close();
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(on_dir, egui::Button::new("📑 Doublons"))
+                        .on_hover_text("Fichiers de même contenu (même empreinte), plus gros que la taille indiquée")
+                        .clicked()
+                    {
+                        action = Some(Action::FindDuplicates);
+                        ui.close();
+                    }
+                    ui.label(">");
+                    ui.add(
+                        egui::DragValue::new(&mut self.duplicate_min_mb)
+                            .range(1..=1_000_000)
+                            .suffix(" Mo"),
+                    )
+                    .on_hover_text("Taille minimale des fichiers examinés (modifiable)");
+                });
+            });
             ui.separator();
             menu(ui, "Afficher", |ui| {
                 ui.weak("Colonnes");
@@ -3236,6 +3267,59 @@ impl ExpliaApp {
         action
     }
 
+    /// Emplacement d'un résultat, dans le volet de détail : le dossier qui le contient, puis
+    /// chaque dossier au-dessus jusqu'au dossier affiché (exclu). Chaque ligne permet d'**ouvrir**
+    /// ce dossier (on y retrouve le fichier, on peut remonter) ou de le **supprimer**
+    /// (corbeille, avec confirmation) : pratique pour éliminer un dossier entier de doublons.
+    fn result_location(&self, ui: &mut egui::Ui, entry: &Entry) -> Option<Action> {
+        let mut action = None;
+        let Location::Dir(root) = &self.location else {
+            return None;
+        };
+        let parent = entry.path.parent()?;
+        ui.add_space(2.0);
+        ui.weak("Emplacement");
+        let mut levels = fs_nav::levels_below(root, &entry.path);
+        if levels.is_empty() {
+            // Directement dans le dossier affiché : on peut seulement l'ouvrir.
+            levels.push(parent.to_path_buf());
+        }
+        for (index, level) in levels.iter().enumerate() {
+            let label = level
+                .strip_prefix(root)
+                .ok()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map_or_else(|| level.display().to_string(), |p| p.display().to_string());
+            ui.horizontal(|ui| {
+                let open = ui
+                    .small_button("↗ Ouvrir")
+                    .on_hover_text(format!("Aller dans {}", level.display()));
+                if open.clicked() {
+                    action = Some(if index == 0 {
+                        Action::GoSelect {
+                            dir: level.clone(),
+                            file: entry.path.clone(),
+                        }
+                    } else {
+                        Action::Go(Location::Dir(level.clone()))
+                    });
+                }
+                // Le dossier affiché lui-même se supprime depuis son propre volet.
+                if level != root
+                    && ui
+                        .small_button("🗑")
+                        .on_hover_text("Supprimer ce dossier (corbeille, avec confirmation)")
+                        .clicked()
+                {
+                    action = Some(Action::AskDeleteFolder(level.clone()));
+                }
+                ui.add(egui::Label::new(egui::RichText::new(label).weak()).truncate());
+            });
+        }
+        ui.add_space(2.0);
+        action
+    }
+
     /// Contenu du volet pendant la multi-sélection : résumé et actions (supprimer).
     fn actions_content(&self, ui: &mut egui::Ui) -> Option<Action> {
         let count = self.multi.len();
@@ -3359,48 +3443,6 @@ impl ExpliaApp {
                 }
             }
         });
-        // Seconde ligne : actions qui sélectionnent ou listent des éléments (voir « Récursive »).
-        ui.add_space(2.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Sélection").strong());
-            let on_dir = matches!(self.location, Location::Dir(_));
-            let empty_hint = if self.recursive {
-                "Sélectionne les dossiers vides (sans aucun fichier), sous-dossiers compris"
-            } else {
-                "Sélectionne les sous-dossiers directs qui sont vides (sans aucun fichier)"
-            };
-            if ui
-                .add_enabled(on_dir, egui::Button::new("📂 Dossiers vides"))
-                .on_hover_text(empty_hint)
-                .clicked()
-            {
-                action = Some(Action::FindEmptyFolders);
-            }
-            if ui
-                .add_enabled(on_dir, egui::Button::new("📑 Doublons"))
-                .on_hover_text(
-                    "Fichiers de même contenu (même empreinte), plus gros que la taille indiquée",
-                )
-                .clicked()
-            {
-                action = Some(Action::FindDuplicates);
-            }
-            ui.label(">");
-            let mut mb = self.duplicate_min_mb;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut mb)
-                        .range(1..=1_000_000)
-                        .suffix(" Mo"),
-                )
-                .on_hover_text(
-                    "Taille minimale des fichiers examinés pour les doublons (modifiable)",
-                )
-                .changed()
-            {
-                action = Some(Action::SetDuplicateMb(mb));
-            }
-        });
         ui.separator();
         (toggle, action)
     }
@@ -3507,7 +3549,7 @@ impl ExpliaApp {
                     .on_hover_text("Envoie le dossier affiché à la corbeille (après confirmation)")
                     .clicked()
                 {
-                    return Some(Action::AskDeleteCurrent);
+                    return Some(Action::AskDeleteFolder(path.clone()));
                 }
                 ui.weak("Suppression : vers la corbeille de Windows.");
             } else {
@@ -3522,16 +3564,10 @@ impl ExpliaApp {
             .find(|e| e.path == selected.path)
             .unwrap_or(selected);
         ui.label(egui::RichText::new(&entry.name).strong());
-        // Parmi des résultats, le dossier d'origine du fichier.
-        if self.results.is_some()
-            && let Some(parent) = entry.path.parent()
-        {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(format!("Emplacement : {}", parent.display())).weak(),
-                )
-                .wrap(),
-            );
+        // Parmi des résultats (doublons, recherche) : où se trouve l'élément, avec de quoi aller
+        // dans son dossier, remonter et supprimer un dossier parent.
+        if self.results.is_some() {
+            action = self.result_location(ui, entry);
         }
         if entry.is_dir {
             ui.label("Dossier");
@@ -3541,7 +3577,7 @@ impl ExpliaApp {
             }
             ui.add_space(6.0);
             let what = format!("le dossier « {} »", entry.name);
-            return self.edit_controls(ui, &what, Some(entry), false);
+            return self.edit_controls(ui, &what, Some(entry), false).or(action);
         }
         ui.label(preview::kind_description(&entry.path));
         ui.label(format!("Taille : {}", self.entry_size_text(entry)));
@@ -4408,7 +4444,7 @@ mod tests {
         tree.file("sub/c.bin", &big);
         tree.file("autre.bin", &vec![4u8; 1_200_000]);
         let (mut app, ctx) = app_in(&tree);
-        app.apply(&ctx, Action::SetDuplicateMb(1));
+        app.duplicate_min_mb = 1;
         app.apply(&ctx, Action::FindDuplicates);
         wait_scan(&mut app, &ctx);
         assert_eq!(names(&app), ["a.bin", "b.bin", "c.bin"]);
@@ -4418,7 +4454,7 @@ mod tests {
         // Le premier fichier du groupe (ordre des chemins) est conservé.
         assert!(app.multi.iter().all(|e| e.name != "a.bin"));
         // Seuil plus haut que les fichiers : aucun doublon.
-        app.apply(&ctx, Action::SetDuplicateMb(2));
+        app.duplicate_min_mb = 2;
         app.apply(&ctx, Action::FindDuplicates);
         wait_scan(&mut app, &ctx);
         assert!(app.visible.is_empty());
@@ -4465,7 +4501,7 @@ mod tests {
         let tree = TempTree::new("current");
         tree.dir("vide");
         let (mut app, ctx) = app_in(&tree);
-        app.apply(&ctx, Action::AskDeleteCurrent);
+        app.apply(&ctx, Action::AskDeleteFolder(tree.0.clone()));
         assert!(app.confirm_delete);
         assert_eq!(
             app.selected.as_ref().map(|e| e.path.clone()),
@@ -4480,5 +4516,49 @@ mod tests {
         let current = fs_nav::entry_from_path(&tree.0).unwrap();
         app.start_rename(&current);
         assert!(app.renaming.is_none());
+    }
+
+    #[test]
+    fn a_parent_folder_of_a_result_can_be_targeted_then_cancelled() {
+        let tree = TempTree::new("parent-of-result");
+        let big = vec![9u8; 1_200_000];
+        tree.file("a/b/copie1.bin", &big);
+        tree.file("c/copie2.bin", &big);
+        let (mut app, ctx) = app_in(&tree);
+        app.duplicate_min_mb = 1;
+        app.apply(&ctx, Action::FindDuplicates);
+        wait_scan(&mut app, &ctx);
+        assert_eq!(app.visible.len(), 2);
+        let first = app.visible[0].clone();
+        app.apply(&ctx, Action::Select(first.clone()));
+        assert_eq!(
+            app.selected.as_ref().map(|e| e.path.clone()),
+            Some(first.path.clone())
+        );
+        // Le dossier parent du résultat devient la cible provisoire de la suppression.
+        let parent = first.path.parent().unwrap().to_path_buf();
+        app.apply(&ctx, Action::AskDeleteFolder(parent.clone()));
+        assert!(app.confirm_delete);
+        assert_eq!(app.delete_targets()[0].path, parent);
+        app.apply(&ctx, Action::CancelDelete);
+        assert!(!app.confirm_delete && app.selected.is_none());
+        // Un résultat sélectionné normalement reste sélectionné après un Échap sans demande.
+        app.apply(&ctx, Action::Select(first.clone()));
+        app.cancel_delete();
+        assert!(app.selected.is_some());
+        // « Ouvrir » : on arrive dans le dossier du fichier, résultats fermés, fichier choisi.
+        app.apply(
+            &ctx,
+            Action::GoSelect {
+                dir: parent.clone(),
+                file: first.path.clone(),
+            },
+        );
+        assert!(app.results.is_none());
+        assert_eq!(app.location, Location::Dir(parent));
+        assert_eq!(
+            app.selected.as_ref().map(|e| e.name.clone()),
+            Some(first.name)
+        );
     }
 }
