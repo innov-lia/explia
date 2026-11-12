@@ -1345,14 +1345,11 @@ impl ExpliaApp {
         });
     }
 
-    /// Haut de la zone centrale : Ce PC, fil d'Ariane (ou saisie du chemin) et barre de recherche.
+    /// Haut de la zone centrale : fil d'Ariane (ou saisie du chemin) et barre de recherche.
     fn location_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         ui.horizontal(|ui| {
             enlarge_toolbar(ui);
-            if ui.button("🖥 Ce PC").clicked() {
-                action = Some(Action::Go(Location::ThisPc));
-            }
             let spacing = ui.spacing().item_spacing.x;
             let search_width = SEARCH_WIDTH.min(ui.available_width() * 0.4);
             let address_width = (ui.available_width() - search_width - spacing).max(80.0);
@@ -1474,13 +1471,18 @@ impl ExpliaApp {
     }
 
     /// Seconde ligne : Trier | Afficher | Extension | Option.
-    fn options_bar(&mut self, ui: &mut egui::Ui) {
+    fn options_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
         let mut sizes_option_changed = false;
         let mut columns_changed = false;
         let mut new_view_mode = None;
         let mut toggle_hidden = false;
         let mut hidden_shown = self.show_hidden;
         ui.horizontal(|ui| {
+            if ui.button("🖥 Ce PC").clicked() {
+                action = Some(Action::Go(Location::ThisPc));
+            }
+            ui.separator();
             menu(ui, "Afficher", |ui| {
                 ui.weak("Colonnes");
                 for (flag, label) in [
@@ -1561,6 +1563,7 @@ impl ExpliaApp {
             let ctx = ui.ctx().clone();
             self.apply(&ctx, Action::ToggleHidden);
         }
+        action
     }
 
     /// Position, dans la liste affichée, de la ligne courante (curseur ou sélection).
@@ -3673,7 +3676,7 @@ impl eframe::App for ExpliaApp {
         egui::Panel::top("toolbar").show(ui, |ui| {
             enlarge_toolbar(ui);
             ui.add_space(4.0);
-            self.options_bar(ui);
+            action = self.options_bar(ui).or(action.take());
             ui.add_space(4.0);
         });
         egui::Panel::bottom("status").show(ui, |ui| {
