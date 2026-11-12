@@ -6,7 +6,7 @@ description = "ExPLIA : explorateur de fichiers Windows en lecture seule"
 
 [dependencies]
 eframe = "0.37.0"
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp"] }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = [

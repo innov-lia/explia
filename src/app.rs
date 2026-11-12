@@ -9,21 +9,27 @@ use eframe::egui::{self, PopupCloseBehavior};
 use crate::favorites::{self, Favorites};
 use crate::fs_nav::{self, Entry, Location};
 use crate::places::{self, Drive, DriveKind, Place};
-use crate::preview::{self, ImagePreview};
+use crate::preview::{self, PreviewContent, TextPreview};
 use crate::view::{self, COMMON_EXTENSIONS, ExtensionFilter, SortKey, SortOrder};
 
 /// Part de l'écran occupée par la fenêtre au démarrage.
-const WINDOW_SCREEN_RATIO: f32 = 0.8;
+const WINDOW_SCREEN_RATIO: f32 = 0.6;
+/// Largeur du volet d'aperçu agrandi, en part de la largeur disponible.
+const PREVIEW_EXPANDED_RATIO: f32 = 0.65;
 
-type PreviewResult = (PathBuf, Result<ImagePreview, String>);
+type PreviewResult = (PathBuf, Result<PreviewContent, String>);
 
 enum PreviewState {
     None,
     Loading(PathBuf),
-    Ready {
+    Image {
         path: PathBuf,
         texture: egui::TextureHandle,
         original: (u32, u32),
+    },
+    Text {
+        path: PathBuf,
+        preview: TextPreview,
     },
     Failed {
         path: PathBuf,
@@ -54,6 +60,8 @@ pub struct ExpliaApp {
     sort_order: SortOrder,
     filter: ExtensionFilter,
     show_preview: bool,
+    /// Volet d'aperçu agrandi (flèche « < » / « > »).
+    preview_expanded: bool,
     window_sized: bool,
     selected: Option<Entry>,
     preview: PreviewState,
@@ -78,6 +86,7 @@ impl ExpliaApp {
             sort_order: SortOrder::Ascending,
             filter: ExtensionFilter::default(),
             show_preview: true,
+            preview_expanded: false,
             window_sized: false,
             selected: None,
             preview: PreviewState::None,
@@ -161,14 +170,14 @@ impl ExpliaApp {
 
     fn select(&mut self, ctx: &egui::Context, entry: Entry) {
         self.preview = PreviewState::None;
-        if !entry.is_dir && preview::is_supported_image(&entry.path) {
+        if !entry.is_dir && preview::is_previewable(&entry.path) {
             // Le décodage se fait hors du thread d'interface.
             let path = entry.path.clone();
             self.preview = PreviewState::Loading(path.clone());
             let tx = self.preview_tx.clone();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
-                let result = preview::load_image_preview(&path);
+                let result = preview::load_preview(&path);
                 let _ = tx.send((path, result));
                 ctx.request_repaint();
             });
@@ -183,19 +192,20 @@ impl ExpliaApp {
                 continue;
             }
             self.preview = match result {
-                Ok(img) => {
+                Ok(PreviewContent::Image(img)) => {
                     let color = egui::ColorImage::from_rgba_unmultiplied(img.size, &img.rgba);
                     let texture = ctx.load_texture(
                         path.to_string_lossy(),
                         color,
                         egui::TextureOptions::LINEAR,
                     );
-                    PreviewState::Ready {
+                    PreviewState::Image {
                         path,
                         texture,
                         original: img.original,
                     }
                 }
+                Ok(PreviewContent::Text(preview)) => PreviewState::Text { path, preview },
                 Err(message) => PreviewState::Failed { path, message },
             };
         }
@@ -434,25 +444,37 @@ impl ExpliaApp {
         action
     }
 
-    fn preview_panel(&self, ui: &mut egui::Ui) {
+    /// Volet d'aperçu. Renvoie `true` si l'utilisateur a cliqué sur la flèche
+    /// « < » / « > » pour agrandir ou réduire le volet.
+    fn preview_panel(&self, ui: &mut egui::Ui) -> bool {
+        let mut toggle = false;
         ui.add_space(4.0);
-        ui.heading("Aperçu");
+        ui.horizontal(|ui| {
+            let (arrow, hint) = if self.preview_expanded {
+                (">", "Réduire le volet d'aperçu")
+            } else {
+                ("<", "Agrandir le volet d'aperçu")
+            };
+            toggle = ui.button(arrow).on_hover_text(hint).clicked();
+            ui.heading("Aperçu");
+        });
         ui.separator();
         let Some(entry) = &self.selected else {
             ui.weak("Sélectionnez un élément.");
-            return;
+            return toggle;
         };
         ui.label(egui::RichText::new(&entry.name).strong());
         if entry.is_dir {
             ui.label("Dossier");
-            return;
+            return toggle;
         }
         ui.label(preview::kind_description(&entry.path));
         ui.label(format!("Taille : {}", fs_nav::format_size(entry.size)));
-        if !preview::is_supported_image(&entry.path) {
+        if !preview::is_previewable(&entry.path) {
             ui.add_space(12.0);
             ui.label(egui::RichText::new("📄").size(64.0));
-            return;
+            ui.weak("Pas d'aperçu pour ce type de fichier.");
+            return toggle;
         }
         ui.add_space(8.0);
         match &self.preview {
@@ -462,20 +484,40 @@ impl ExpliaApp {
                     ui.label("Chargement de l'aperçu…");
                 });
             }
-            PreviewState::Ready {
+            PreviewState::Image {
                 path,
                 texture,
                 original,
             } if *path == entry.path => {
                 ui.label(format!("Dimensions : {} × {} px", original.0, original.1));
                 ui.add_space(4.0);
-                let available = ui.available_width();
-                let tex_size = texture.size_vec2();
-                let scale = (available / tex_size.x).min(1.0);
-                ui.image(egui::load::SizedTexture::new(
-                    texture.id(),
-                    tex_size * scale,
-                ));
+                egui::ScrollArea::both()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        let tex_size = texture.size_vec2();
+                        let scale = (ui.available_width() / tex_size.x).min(1.0);
+                        ui.image(egui::load::SizedTexture::new(
+                            texture.id(),
+                            tex_size * scale,
+                        ));
+                    });
+            }
+            PreviewState::Text { path, preview } if *path == entry.path => {
+                if preview.truncated {
+                    ui.weak(format!(
+                        "Début du fichier ({} Ko affichés)",
+                        preview::MAX_TEXT_BYTES / 1024
+                    ));
+                }
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&preview.content).monospace())
+                                .wrap(),
+                        );
+                    });
             }
             PreviewState::Failed { path, message } if *path == entry.path => {
                 ui.colored_label(
@@ -485,6 +527,7 @@ impl ExpliaApp {
             }
             _ => {}
         }
+        toggle
     }
 
     fn status_text(&self) -> String {
@@ -553,10 +596,23 @@ impl eframe::App for ExpliaApp {
                 action = self.sidebar(ui).or(action.take());
             });
         if self.show_preview {
-            egui::Panel::right("preview")
-                .default_size(300.0)
+            // Deux identifiants distincts : chaque mode garde sa propre largeur.
+            let (id, width) = if self.preview_expanded {
+                (
+                    "preview_wide",
+                    ui.available_width() * PREVIEW_EXPANDED_RATIO,
+                )
+            } else {
+                ("preview", 300.0)
+            };
+            let toggle = egui::Panel::right(id)
+                .default_size(width)
                 .resizable(true)
-                .show(ui, |ui| self.preview_panel(ui));
+                .show(ui, |ui| self.preview_panel(ui))
+                .inner;
+            if toggle {
+                self.preview_expanded = !self.preview_expanded;
+            }
         }
         egui::CentralPanel::default().show(ui, |ui| {
             action = self.central(ui).or(action.take());
