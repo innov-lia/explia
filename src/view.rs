@@ -41,8 +41,10 @@ pub enum ViewMode {
     List,
     /// Colonnes successives, une par niveau du chemin (navigation « style Mac »).
     Columns,
-    /// Grille de miniatures (visionnage rapide des images).
+    /// Grille de miniatures (visionnage rapide des images du dossier).
     Gallery,
+    /// Même grille, pour les vidéos du dossier.
+    Videos,
 }
 
 impl ViewMode {
@@ -51,13 +53,46 @@ impl ViewMode {
             ViewMode::List => "list",
             ViewMode::Columns => "columns",
             ViewMode::Gallery => "gallery",
+            ViewMode::Videos => "videos",
+        }
+    }
+
+    /// Grille de miniatures (images ou vidéos).
+    pub fn is_grid(self) -> bool {
+        matches!(self, ViewMode::Gallery | ViewMode::Videos)
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        [
+            ViewMode::List,
+            ViewMode::Columns,
+            ViewMode::Gallery,
+            ViewMode::Videos,
+        ]
+        .into_iter()
+        .find(|mode| mode.id() == id)
+    }
+}
+
+/// Côté de la fenêtre où se place un bloc (barre latérale, volet de détail, onglets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+impl Side {
+    pub fn id(self) -> &'static str {
+        match self {
+            Side::Left => "left",
+            Side::Right => "right",
         }
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
-        [ViewMode::List, ViewMode::Columns, ViewMode::Gallery]
+        [Side::Left, Side::Right]
             .into_iter()
-            .find(|mode| mode.id() == id)
+            .find(|side| side.id() == id)
     }
 }
 
@@ -553,11 +588,30 @@ mod tests {
 
     #[test]
     fn view_mode_ids_round_trip() {
-        for mode in [ViewMode::List, ViewMode::Columns, ViewMode::Gallery] {
+        for mode in [
+            ViewMode::List,
+            ViewMode::Columns,
+            ViewMode::Gallery,
+            ViewMode::Videos,
+        ] {
             assert_eq!(ViewMode::from_id(mode.id()), Some(mode));
         }
         assert_eq!(ViewMode::from_id("?"), None);
         assert_eq!(ViewMode::default(), ViewMode::List);
+    }
+
+    #[test]
+    fn side_ids_round_trip() {
+        for side in [Side::Left, Side::Right] {
+            assert_eq!(Side::from_id(side.id()), Some(side));
+        }
+        assert_eq!(Side::from_id("?"), None);
+    }
+
+    #[test]
+    fn only_galleries_are_grids() {
+        assert!(ViewMode::Gallery.is_grid() && ViewMode::Videos.is_grid());
+        assert!(!ViewMode::List.is_grid() && !ViewMode::Columns.is_grid());
     }
 
     #[test]

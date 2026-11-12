@@ -20,7 +20,7 @@ use crate::player::{self, Player, PlayerState};
 use crate::preview::{self, ArchivePreview, ImagePreview, PreviewContent, TextPreview};
 use crate::settings::Settings;
 use crate::trash;
-use crate::view::{self, Category, Columns, ExtensionFilter, SortKey, SortOrder, ViewMode};
+use crate::view::{self, Category, Columns, ExtensionFilter, Side, SortKey, SortOrder, ViewMode};
 
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
 pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
@@ -275,6 +275,10 @@ pub struct ExpliaApp {
     /// Bord droit du bouton « Extension » : la barre latérale s'ouvre à cette largeur,
     /// pour que ses onglets s'alignent sur lui.
     extension_right: Option<f32>,
+    /// Disposition : côté de la barre latérale, de ses onglets et du volet de détail.
+    sidebar_side: Side,
+    tabs_side: Side,
+    preview_side: Side,
     /// Onglet affiché dans la barre latérale.
     sidebar_tab: SidebarTab,
     /// Le clavier pilote la liste des lecteurs : ↑ / ↓ changent de lecteur, → revient au dossier.
@@ -380,6 +384,9 @@ impl ExpliaApp {
             drive_infos: HashMap::new(),
             show_drive_usage: settings.show_drive_usage,
             extension_right: None,
+            sidebar_side: settings.sidebar_side,
+            tabs_side: settings.tabs_side,
+            preview_side: settings.preview_side,
             sidebar_tab: SidebarTab::Pc,
             drives_focus: false,
             drive_cursor: None,
@@ -784,7 +791,8 @@ impl ExpliaApp {
             self.toggle_multi(entry);
             return;
         };
-        match view::select_range(&self.visible, &anchor, &entry.path) {
+        let list: Vec<Entry> = self.nav_list().into_iter().cloned().collect();
+        match view::select_range(&list, &anchor, &entry.path) {
             Ok(range) => {
                 self.confirm_delete = false;
                 self.selected = None;
@@ -1262,6 +1270,9 @@ impl ExpliaApp {
             custom_extensions: self.filter.custom().to_string(),
             favorites: self.favorites.paths().to_vec(),
             applications: self.applications.paths().to_vec(),
+            sidebar_side: self.sidebar_side,
+            tabs_side: self.tabs_side,
+            preview_side: self.preview_side,
         }
     }
 
@@ -1443,6 +1454,7 @@ impl ExpliaApp {
                     (ViewMode::List, "Liste"),
                     (ViewMode::Columns, "Colonnes (style Mac)"),
                     (ViewMode::Gallery, "Grille d'images"),
+                    (ViewMode::Videos, "Grille de vidéos"),
                 ] {
                     if ui.radio(self.view_mode == mode, label).clicked() {
                         new_view_mode = Some(mode);
@@ -1453,6 +1465,19 @@ impl ExpliaApp {
                     .changed()
                 {
                     toggle_hidden = true;
+                }
+                ui.separator();
+                ui.weak("Disposition (côté de la fenêtre)");
+                for (label, side) in [
+                    ("Barre latérale", &mut self.sidebar_side),
+                    ("Onglets", &mut self.tabs_side),
+                    ("Volet de détail", &mut self.preview_side),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        ui.radio_value(side, Side::Left, "Gauche");
+                        ui.radio_value(side, Side::Right, "Droite");
+                    });
                 }
             });
             ui.separator();
@@ -1532,7 +1557,70 @@ impl ExpliaApp {
         self.cursor
             .as_ref()
             .or(self.selected.as_ref().map(|s| &s.path))
-            .and_then(|path| self.visible.iter().position(|e| e.path == *path))
+            .and_then(|path| self.nav_list().iter().position(|e| e.path == *path))
+    }
+
+    /// Le fichier figure dans la grille : les images en mode « Images », les vidéos en mode
+    /// « Vidéos ». Hors grille, tout est affiché (les dossiers sont dans la colonne de navigation).
+    fn in_grid(&self, entry: &Entry) -> bool {
+        match self.view_mode {
+            ViewMode::Gallery => !entry.is_dir && preview::is_supported_image(&entry.path),
+            ViewMode::Videos => !entry.is_dir && preview::is_video(&entry.path),
+            ViewMode::List | ViewMode::Columns => true,
+        }
+    }
+
+    /// Éléments parcourus au clavier et par plage : ceux de la grille, ou tout le dossier.
+    fn nav_list(&self) -> Vec<&Entry> {
+        self.visible.iter().filter(|e| self.in_grid(e)).collect()
+    }
+
+    /// Panneau de la barre latérale, à gauche ou à droite selon la disposition.
+    fn sidebar_panel(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        // Largeur d'ouverture : à gauche avec les onglets à droite, le bord droit des onglets
+        // s'aligne sur le bouton « Extension ».
+        let width = match (self.extension_right, self.sidebar_side, self.tabs_side) {
+            (Some(right), Side::Left, Side::Right) => right + SIDEBAR_MARGIN,
+            _ => 240.0,
+        };
+        let panel = match self.sidebar_side {
+            Side::Left => egui::Panel::left("sidebar-left"),
+            Side::Right => egui::Panel::right("sidebar-right"),
+        };
+        panel.default_size(width).resizable(true).show(ui, |ui| {
+            action = self.sidebar(ui);
+        });
+        action
+    }
+
+    /// Volet de détail (aperçu, actions), à gauche ou à droite selon la disposition. Pendant
+    /// la multi-sélection, il devient un volet d'actions, même masqué.
+    fn detail_panel(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        if !self.show_preview && self.multi.is_empty() {
+            return None;
+        }
+        // Deux identifiants distincts : chaque mode garde sa propre largeur.
+        let width = if self.preview_expanded {
+            ui.available_width() * PREVIEW_EXPANDED_RATIO
+        } else {
+            300.0
+        };
+        let panel = match (self.preview_side, self.preview_expanded) {
+            (Side::Left, false) => egui::Panel::left("preview-left"),
+            (Side::Left, true) => egui::Panel::left("preview-wide-left"),
+            (Side::Right, false) => egui::Panel::right("preview-right"),
+            (Side::Right, true) => egui::Panel::right("preview-wide-right"),
+        };
+        let (toggle, action) = panel
+            .default_size(width)
+            .resizable(true)
+            .show(ui, |ui| self.preview_panel(ui))
+            .inner;
+        if toggle {
+            self.preview_expanded = !self.preview_expanded;
+        }
+        action
     }
 
     /// Barre latérale en « classeur » : la liste des dossiers de l'onglet actif à gauche,
@@ -1543,6 +1631,11 @@ impl ExpliaApp {
         let list_width =
             (ui.available_width() - SIDEBAR_TAB_WIDTH - ui.spacing().item_spacing.x).max(60.0);
         ui.horizontal_top(|ui| {
+            if self.tabs_side == Side::Left
+                && let Some(tab) = self.sidebar_tabs(ui)
+            {
+                action = Some(Action::SidebarTab(tab));
+            }
             ui.vertical(|ui| {
                 ui.set_width(list_width);
                 ui.set_height(height);
@@ -1551,17 +1644,19 @@ impl ExpliaApp {
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         ui.add_space(4.0);
-                        action = self.sidebar_list(ui);
+                        action = self.sidebar_list(ui).or(action.take());
                     });
             });
-            if let Some(tab) = self.sidebar_tabs(ui) {
+            if self.tabs_side == Side::Right
+                && let Some(tab) = self.sidebar_tabs(ui)
+            {
                 action = Some(Action::SidebarTab(tab));
             }
         });
         action
     }
 
-    /// Intercalaires du classeur : texte vertical sur le bord droit de la barre latérale.
+    /// Intercalaires du classeur : texte vertical, sur le bord gauche ou droit de la liste.
     fn sidebar_tabs(&self, ui: &mut egui::Ui) -> Option<SidebarTab> {
         let mut clicked = None;
         ui.vertical(|ui| {
@@ -1589,22 +1684,41 @@ impl ExpliaApp {
                 } else {
                     visuals.widgets.inactive.weak_bg_fill
                 };
-                let corners = egui::CornerRadius {
-                    nw: 0,
-                    sw: 0,
-                    ne: 8,
-                    se: 8,
+                // Coins arrondis du côté extérieur ; texte tourné d'un quart de tour (de haut en
+                // bas à droite, de bas en haut à gauche), centré dans l'onglet.
+                let on_left = self.tabs_side == Side::Left;
+                let (corners, origin, angle) = if on_left {
+                    (
+                        egui::CornerRadius {
+                            nw: 8,
+                            sw: 8,
+                            ne: 0,
+                            se: 0,
+                        },
+                        egui::pos2(
+                            rect.center().x - text.y / 2.0,
+                            rect.center().y + text.x / 2.0,
+                        ),
+                        -std::f32::consts::FRAC_PI_2,
+                    )
+                } else {
+                    (
+                        egui::CornerRadius {
+                            nw: 0,
+                            sw: 0,
+                            ne: 8,
+                            se: 8,
+                        },
+                        egui::pos2(
+                            rect.center().x + text.y / 2.0,
+                            rect.center().y - text.x / 2.0,
+                        ),
+                        std::f32::consts::FRAC_PI_2,
+                    )
                 };
                 ui.painter().rect_filled(rect, corners, fill);
-                // Texte tourné d'un quart de tour (lecture de haut en bas), centré dans l'onglet.
-                let origin = egui::pos2(
-                    rect.center().x + text.y / 2.0,
-                    rect.center().y - text.x / 2.0,
-                );
-                ui.painter().add(
-                    egui::epaint::TextShape::new(origin, galley, color)
-                        .with_angle(std::f32::consts::FRAC_PI_2),
-                );
+                ui.painter()
+                    .add(egui::epaint::TextShape::new(origin, galley, color).with_angle(angle));
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
@@ -1779,7 +1893,7 @@ impl ExpliaApp {
             }
             (Location::Dir(_), ViewMode::List) => self.listing_view(ui),
             (Location::Dir(_), ViewMode::Columns) => self.columns_view(ui),
-            (Location::Dir(_), ViewMode::Gallery) => self.gallery_layout(ui),
+            (Location::Dir(_), ViewMode::Gallery | ViewMode::Videos) => self.gallery_layout(ui),
         }
     }
 
@@ -1995,6 +2109,10 @@ impl ExpliaApp {
     /// Colonne de navigation de la grille d'images : `..` puis les sous-dossiers du dossier.
     fn nav_column(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
+        // Le dossier de la barre d'adresse, en tête de la colonne.
+        if let Location::Dir(path) = &self.location {
+            ui.add(egui::Label::new(egui::RichText::new(favorite_name(path)).weak()).truncate());
+        }
         let parent = self.location.parent();
         let folders: Vec<&Entry> = self.visible.iter().filter(|e| e.is_dir).collect();
         let shift = usize::from(parent.is_some());
@@ -2038,8 +2156,16 @@ impl ExpliaApp {
     /// Grille de miniatures : visionnage rapide des images du dossier. Les dossiers et les autres
     /// fichiers apparaissent comme des tuiles avec une icône.
     fn gallery_view(&mut self, ui: &mut egui::Ui) -> Option<Action> {
-        if self.visible.is_empty() {
-            ui.label("Aucun élément à afficher dans ce dossier.");
+        // Éléments de la grille (indices dans `visible`) : les images ou les vidéos du dossier.
+        let items: Vec<usize> = (0..self.visible.len())
+            .filter(|&index| self.in_grid(&self.visible[index]))
+            .collect();
+        if items.is_empty() {
+            ui.label(if self.view_mode == ViewMode::Videos {
+                "Aucune vidéo dans ce dossier."
+            } else {
+                "Aucune image dans ce dossier."
+            });
             return None;
         }
         let spacing = ui.spacing().item_spacing;
@@ -2048,7 +2174,7 @@ impl ExpliaApp {
             as usize)
             .max(1);
         self.gallery_columns = columns;
-        let rows = self.visible.len().div_ceil(columns);
+        let rows = items.len().div_ceil(columns);
         let mut area = egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .scroll_source(
@@ -2071,9 +2197,10 @@ impl ExpliaApp {
             for row in range {
                 ui.horizontal(|ui| {
                     for column in 0..columns {
-                        let Some(entry) = self.visible.get(row * columns + column) else {
+                        let Some(&index) = items.get(row * columns + column) else {
                             break;
                         };
+                        let entry = &self.visible[index];
                         let selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path)
                             || self.multi.iter().any(|m| m.path == entry.path);
                         let is_image = !entry.is_dir && preview::is_supported_image(&entry.path);
@@ -2410,7 +2537,7 @@ impl ExpliaApp {
                 i.key_pressed(egui::Key::Enter),
             )
         });
-        let gallery = self.view_mode == ViewMode::Gallery;
+        let gallery = self.view_mode.is_grid();
         if !(up || down || left || right || backspace || (enter && gallery)) {
             return None;
         }
@@ -2447,9 +2574,9 @@ impl ExpliaApp {
                         _ => 0,
                     };
                     if delta != 0 {
-                        let next =
-                            view::step_index(self.cursor_index(), self.visible.len(), delta)?;
-                        let entry = self.visible[next].clone();
+                        let list = self.nav_list();
+                        let next = view::step_index(self.cursor_index(), list.len(), delta)?;
+                        let entry = list[next].clone();
                         self.scroll_to_index = Some(next);
                         return Some(if shift {
                             Action::SelectRange(entry)
@@ -2601,17 +2728,33 @@ impl ExpliaApp {
     /// « < » / « > » pour agrandir ou réduire le volet, et l'action éventuelle
     /// demandée (ouvrir le fichier).
     fn preview_panel(&self, ui: &mut egui::Ui) -> (bool, Option<Action>) {
-        let option_action = self.option_bar(ui);
-        let (toggle, content_action) = self.preview_content(ui);
+        let (toggle, option_action) = self.option_bar(ui);
+        let content_action = self.preview_content(ui);
         (toggle, option_action.or(content_action))
     }
 
-    /// Barre d'options, au-dessus de l'aperçu : navigation en colonnes (style Mac) et
-    /// visionnage d'images (grille de miniatures). Les éléments cachés se règlent dans « Afficher ».
-    fn option_bar(&self, ui: &mut egui::Ui) -> Option<Action> {
+    /// Barre du haut du volet de détail : flèche d'agrandissement, navigation en colonnes
+    /// (style Mac), visionnage d'images et de vidéos (grilles). Les éléments cachés se règlent dans « Afficher ».
+    fn option_bar(&self, ui: &mut egui::Ui) -> (bool, Option<Action>) {
         let mut action = None;
+        let mut toggle = false;
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
+            // Flèche pour agrandir / réduire le volet : elle pointe vers le centre de la fenêtre
+            // quand le volet peut grandir, vers son bord quand il peut rétrécir.
+            let grows_left = self.preview_side == Side::Right;
+            let (arrow, hint) = if self.preview_expanded {
+                (
+                    if grows_left { ">" } else { "<" },
+                    "Réduire le volet de détail",
+                )
+            } else {
+                (
+                    if grows_left { "<" } else { ">" },
+                    "Agrandir le volet de détail",
+                )
+            };
+            toggle = ui.button(arrow).on_hover_text(hint).clicked();
             for (mode, label, hint) in [
                 (
                     ViewMode::Columns,
@@ -2621,7 +2764,12 @@ impl ExpliaApp {
                 (
                     ViewMode::Gallery,
                     "🖼 Images",
-                    "Visionnage d'images : grille de miniatures pour en voir plusieurs rapidement",
+                    "Visionnage d'images : les images du dossier en grille de miniatures",
+                ),
+                (
+                    ViewMode::Videos,
+                    "🎬 Vidéos",
+                    "Visionnage de vidéos : les vidéos du dossier en grille",
                 ),
             ] {
                 let active = self.view_mode == mode;
@@ -2640,7 +2788,7 @@ impl ExpliaApp {
             }
         });
         ui.separator();
-        action
+        (toggle, action)
     }
 
     /// Zone du lecteur intégré. Renvoie l'action éventuelle (arrêt) et `true` si le lecteur
@@ -2726,29 +2874,14 @@ impl ExpliaApp {
     }
 
     /// Contenu du volet : en-tête, aperçu ou actions.
-    fn preview_content(&self, ui: &mut egui::Ui) -> (bool, Option<Action>) {
-        let mut toggle = false;
+    fn preview_content(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let (arrow, hint) = if self.preview_expanded {
-                (">", "Réduire le volet d'aperçu")
-            } else {
-                ("<", "Agrandir le volet d'aperçu")
-            };
-            toggle = ui.button(arrow).on_hover_text(hint).clicked();
-            // Un dossier (ou une multi-sélection) n'a pas d'aperçu : le volet propose des actions.
-            let actions_mode =
-                !self.multi.is_empty() || self.selected.as_ref().is_some_and(|s| s.is_dir);
-            ui.heading(if actions_mode { "Actions" } else { "Aperçu" });
-        });
-        ui.separator();
         if !self.multi.is_empty() {
-            return (toggle, self.actions_content(ui));
+            return self.actions_content(ui);
         }
         let Some(selected) = &self.selected else {
             ui.weak("Sélectionnez un élément.");
-            return (toggle, None);
+            return None;
         };
         // La taille d'un dossier peut arriver après la sélection : on relit l'entrée à jour.
         let entry = self
@@ -2765,7 +2898,7 @@ impl ExpliaApp {
             }
             ui.add_space(6.0);
             let what = format!("le dossier « {} »", entry.name);
-            return (toggle, self.edit_controls(ui, &what, Some(entry), false));
+            return self.edit_controls(ui, &what, Some(entry), false);
         }
         ui.label(preview::kind_description(&entry.path));
         ui.label(format!("Taille : {}", self.entry_size_text(entry)));
@@ -2825,7 +2958,7 @@ impl ExpliaApp {
                 action = player_action;
             }
             if showing {
-                return (toggle, action);
+                return action;
             }
         }
         if !preview::is_previewable(&entry.path) {
@@ -2848,7 +2981,7 @@ impl ExpliaApp {
             } else {
                 ui.weak("Pas d'aperçu pour ce type de fichier.");
             }
-            return (toggle, action);
+            return action;
         }
         ui.add_space(8.0);
         match &self.preview {
@@ -2924,7 +3057,7 @@ impl ExpliaApp {
             }
             _ => {}
         }
-        (toggle, action)
+        action
     }
 
     fn status_text(&self) -> String {
@@ -3459,37 +3592,10 @@ impl eframe::App for ExpliaApp {
                 ui.label(self.status_text());
             }
         });
-        egui::Panel::left("sidebar")
-            // Largeur d'ouverture : le bord droit des onglets s'aligne sur le bouton « Extension ».
-            .default_size(
-                self.extension_right
-                    .map_or(240.0, |right| right + SIDEBAR_MARGIN),
-            )
-            .resizable(true)
-            .show(ui, |ui| {
-                action = self.sidebar(ui).or(action.take());
-            });
-        // Pendant la multi-sélection, le volet devient un volet d'actions, même masqué.
-        if self.show_preview || !self.multi.is_empty() {
-            // Deux identifiants distincts : chaque mode garde sa propre largeur.
-            let (id, width) = if self.preview_expanded {
-                (
-                    "preview_wide",
-                    ui.available_width() * PREVIEW_EXPANDED_RATIO,
-                )
-            } else {
-                ("preview", 300.0)
-            };
-            let (toggle, preview_action) = egui::Panel::right(id)
-                .default_size(width)
-                .resizable(true)
-                .show(ui, |ui| self.preview_panel(ui))
-                .inner;
-            if toggle {
-                self.preview_expanded = !self.preview_expanded;
-            }
-            action = preview_action.or(action.take());
-        }
+        // Les blocs se placent à gauche ou à droite (menu Afficher > Disposition) ; du même
+        // côté, la barre latérale est la plus proche du bord de la fenêtre.
+        action = self.sidebar_panel(ui).or(action.take());
+        action = self.detail_panel(ui).or(action.take());
         egui::CentralPanel::default().show(ui, |ui| {
             action = self.central(ui).or(action.take());
         });

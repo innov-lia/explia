@@ -8,7 +8,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::view::{Category, Columns, SortKey, SortOrder, ViewMode};
+use crate::view::{Category, Columns, Side, SortKey, SortOrder, ViewMode};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -28,6 +28,10 @@ pub struct Settings {
     pub categories: Vec<Category>,
     pub custom_extensions: String,
     pub favorites: Vec<PathBuf>,
+    /// Disposition : côté de la barre latérale, de ses onglets et du volet de détail.
+    pub sidebar_side: Side,
+    pub tabs_side: Side,
+    pub preview_side: Side,
     /// Applications ajoutées par l'utilisateur (onglet « Applications »).
     pub applications: Vec<PathBuf>,
 }
@@ -48,6 +52,9 @@ impl Default for Settings {
             categories: Vec::new(),
             custom_extensions: String::new(),
             favorites: Vec::new(),
+            sidebar_side: Side::Left,
+            tabs_side: Side::Right,
+            preview_side: Side::Right,
             applications: Vec::new(),
         }
     }
@@ -109,6 +116,21 @@ impl Settings {
                 }
                 "custom_extensions" => settings.custom_extensions = value.to_string(),
                 "favorite" if !value.is_empty() => settings.favorites.push(PathBuf::from(value)),
+                "sidebar_side" => {
+                    if let Some(side) = Side::from_id(value) {
+                        settings.sidebar_side = side;
+                    }
+                }
+                "tabs_side" => {
+                    if let Some(side) = Side::from_id(value) {
+                        settings.tabs_side = side;
+                    }
+                }
+                "preview_side" => {
+                    if let Some(side) = Side::from_id(value) {
+                        settings.preview_side = side;
+                    }
+                }
                 "application" if !value.is_empty() => {
                     settings.applications.push(PathBuf::from(value));
                 }
@@ -136,6 +158,9 @@ impl Settings {
         text += &format!("show_drive_usage={}\n", self.show_drive_usage);
         text += &format!("view_mode={}\n", self.view_mode.id());
         text += &format!("show_hidden={}\n", self.show_hidden);
+        text += &format!("sidebar_side={}\n", self.sidebar_side.id());
+        text += &format!("tabs_side={}\n", self.tabs_side.id());
+        text += &format!("preview_side={}\n", self.preview_side.id());
         text += &format!("columns={}\n", self.columns.ids().join(","));
         let categories: Vec<&str> = self.categories.iter().map(|c| c.id()).collect();
         text += &format!("categories={}\n", categories.join(","));
@@ -192,7 +217,7 @@ mod tests {
             preview_expanded: true,
             skip_folder_sizes: true,
             show_drive_usage: false,
-            view_mode: ViewMode::Gallery,
+            view_mode: ViewMode::Videos,
             show_hidden: true,
             columns: Columns {
                 size: false,
@@ -203,6 +228,9 @@ mod tests {
             categories: vec![Category::Image, Category::Code],
             custom_extensions: "mkv, .pdf".to_string(),
             favorites: vec![PathBuf::from("C:\\Projets"), PathBuf::from("D:\\Photos")],
+            sidebar_side: Side::Right,
+            tabs_side: Side::Left,
+            preview_side: Side::Left,
             applications: vec![PathBuf::from("C:\\Outils\\app.exe")],
         }
     }
