@@ -2853,7 +2853,7 @@ impl ExpliaApp {
             .stick_to_right(true)
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    for (level, (name, dir)) in crumbs.iter().enumerate() {
+                    for (level, (_, dir)) in crumbs.iter().enumerate() {
                         let is_last = level + 1 == crumbs.len();
                         let next_dir = crumbs.get(level + 1).map(|(_, path)| path);
                         let entries: &[Entry] = if is_last {
@@ -2864,7 +2864,6 @@ impl ExpliaApp {
                         ui.vertical(|ui| {
                             ui.set_width(widths[level]);
                             ui.set_height(height);
-                            ui.add(egui::Label::new(egui::RichText::new(name).weak()).truncate());
                             if is_last {
                                 if let Some(key) = table_header(
                                     ui,
