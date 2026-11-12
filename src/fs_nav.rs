@@ -43,6 +43,39 @@ impl Location {
     }
 }
 
+/// Segments cliquables d'un chemin : libellé et chemin complet de chaque niveau,
+/// par exemple `C:`, `Users`, `Bob` pour `C:\Users\Bob`.
+pub fn breadcrumbs(path: &Path) -> Vec<(String, PathBuf)> {
+    use std::path::Component;
+
+    let mut crumbs: Vec<(String, PathBuf)> = Vec::new();
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match component {
+            Component::Prefix(prefix) => {
+                crumbs.push((
+                    prefix.as_os_str().to_string_lossy().into_owned(),
+                    current.clone(),
+                ));
+            }
+            Component::RootDir => match crumbs.last_mut() {
+                // `C:` devient `C:\` : la racine du lecteur, pas le dossier courant du lecteur.
+                Some(last) => last.1 = current.clone(),
+                None => crumbs.push((
+                    component.as_os_str().to_string_lossy().into_owned(),
+                    current.clone(),
+                )),
+            },
+            Component::Normal(name) => {
+                crumbs.push((name.to_string_lossy().into_owned(), current.clone()));
+            }
+            Component::CurDir | Component::ParentDir => {}
+        }
+    }
+    crumbs
+}
+
 /// Interprète le texte saisi dans la barre d'adresse. `None` si le texte est vide.
 pub fn parse_address(input: &str) -> Option<Location> {
     let text = input.trim().trim_matches('"').trim();
@@ -139,6 +172,22 @@ pub fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn breadcrumbs_of_a_windows_path() {
+        let crumbs = breadcrumbs(Path::new("C:\\Users\\Bob"));
+        assert_eq!(
+            crumbs,
+            [
+                ("C:".to_string(), PathBuf::from("C:\\")),
+                ("Users".to_string(), PathBuf::from("C:\\Users")),
+                ("Bob".to_string(), PathBuf::from("C:\\Users\\Bob")),
+            ]
+        );
+        let root = breadcrumbs(Path::new("D:\\"));
+        assert_eq!(root, [("D:".to_string(), PathBuf::from("D:\\"))]);
+    }
 
     #[test]
     fn parse_empty_is_none() {

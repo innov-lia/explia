@@ -9,14 +9,16 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::containers::menu::{MenuButton, MenuConfig};
 use eframe::egui::{self, PopupCloseBehavior};
 
-use crate::favorites::{self, Favorites};
+use crate::favorites::Favorites;
 use crate::fs_nav::{self, Entry, Location};
+use crate::launch;
 use crate::places::{self, Drive, DriveKind};
-use crate::preview::{self, PreviewContent, TextPreview};
-use crate::view::{self, COMMON_EXTENSIONS, ExtensionFilter, SortKey, SortOrder};
+use crate::preview::{self, ArchivePreview, PreviewContent, TextPreview};
+use crate::settings::Settings;
+use crate::view::{self, Category, ExtensionFilter, SortKey, SortOrder};
 
-/// Part de l'écran occupée par la fenêtre au démarrage.
-const WINDOW_SCREEN_RATIO: f32 = 0.6;
+/// Part de l'écran occupée par la fenêtre à la première ouverture.
+pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
 /// Largeur du volet d'aperçu agrandi, en part de la largeur disponible.
 const PREVIEW_EXPANDED_RATIO: f32 = 0.65;
 /// Largeur de la colonne « Taille ».
@@ -48,6 +50,10 @@ enum PreviewState {
         path: PathBuf,
         preview: TextPreview,
     },
+    Archive {
+        path: PathBuf,
+        preview: ArchivePreview,
+    },
     Failed {
         path: PathBuf,
         message: String,
@@ -60,12 +66,27 @@ enum Action {
     Select(Entry),
     AddFavorite(PathBuf),
     RemoveFavorite(PathBuf),
+    /// Ouvre un fichier avec son application associée (ou lance un exécutable).
+    Open(PathBuf),
+    /// Lance un exécutable en tant qu'administrateur (fenêtre UAC).
+    OpenAsAdmin(PathBuf),
+    /// Passe la barre d'adresse en mode saisie.
+    EditAddress,
 }
 
 pub struct ExpliaApp {
     ctx: egui::Context,
+    /// Fichier de réglages ; `None` si le dossier de configuration est introuvable.
+    settings_file: Option<PathBuf>,
+    /// Dernier état écrit dans le fichier (hors taille de fenêtre, voir `save_settings_if_changed`).
+    saved_settings: Settings,
+    /// Taille intérieure actuelle de la fenêtre, en points.
+    window_size: Option<(f32, f32)>,
     location: Location,
     address: String,
+    /// Barre d'adresse en mode saisie (sinon : fil d'Ariane cliquable).
+    address_editing: bool,
+    focus_address: bool,
     error: Option<String>,
     drives: Vec<Drive>,
     /// Taille totale des lecteurs : absente tant que le calcul est en cours,
@@ -94,27 +115,36 @@ pub struct ExpliaApp {
 }
 
 impl ExpliaApp {
-    pub fn new(ctx: egui::Context) -> Self {
+    pub fn new(ctx: egui::Context, settings: Settings, settings_file: Option<PathBuf>) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
         let location = Location::ThisPc;
         let mut app = Self {
             ctx,
+            settings_file,
+            window_size: settings.window_size,
+            address_editing: false,
+            focus_address: false,
             address: location.display(),
             location,
             error: None,
             drives: places::detect_drives(),
             drive_sizes: HashMap::new(),
-            favorites: Favorites::load(favorites::default_file()),
+            favorites: Favorites::from_paths(settings.favorites.clone()),
             entries: Vec::new(),
             visible: Vec::new(),
-            sort_key: SortKey::Name,
-            sort_order: SortOrder::Ascending,
-            filter: ExtensionFilter::default(),
-            show_preview: true,
-            preview_expanded: false,
-            skip_folder_sizes: false,
+            sort_key: settings.sort_key,
+            sort_order: settings.sort_order,
+            filter: ExtensionFilter::new(
+                settings.categories.clone(),
+                settings.custom_extensions.clone(),
+            ),
+            show_preview: settings.show_preview,
+            preview_expanded: settings.preview_expanded,
+            skip_folder_sizes: settings.skip_folder_sizes,
             folder_generation: Arc::new(AtomicU64::new(0)),
-            window_sized: false,
+            // Une taille mémorisée est appliquée dès la création de la fenêtre (voir `main`).
+            window_sized: settings.window_size.is_some(),
+            saved_settings: settings,
             selected: None,
             preview: PreviewState::None,
             event_tx,
@@ -189,8 +219,8 @@ impl ExpliaApp {
         }
     }
 
-    /// Fenêtre à 60 % de l'écran, centrée ; effectué une seule fois, dès que la taille
-    /// de l'écran est connue.
+    /// Première ouverture (aucune taille mémorisée) : fenêtre à 80 % de l'écran, centrée.
+    /// Effectué une seule fois, dès que la taille de l'écran est connue.
     fn size_window_once(&mut self, ctx: &egui::Context) {
         if self.window_sized {
             return;
@@ -198,12 +228,15 @@ impl ExpliaApp {
         let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) else {
             return;
         };
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
-            monitor * WINDOW_SCREEN_RATIO,
-        ));
-        if let Some(center) = egui::ViewportCommand::center_on_screen(ctx) {
-            ctx.send_viewport_cmd(center);
-        }
+        let size = monitor * WINDOW_SCREEN_RATIO;
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        // Centrage calculé avec la nouvelle taille (`center_on_screen` utiliserait l'ancienne),
+        // légèrement remonté pour laisser la place à la barre de titre et à la barre des tâches.
+        let margin = (monitor - size) / 2.0;
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            margin.x,
+            (margin.y - 24.0).max(0.0),
+        )));
         self.window_sized = true;
     }
 
@@ -341,14 +374,9 @@ impl ExpliaApp {
                     }
                 }
                 Ok(PreviewContent::Text(preview)) => PreviewState::Text { path, preview },
+                Ok(PreviewContent::Archive(preview)) => PreviewState::Archive { path, preview },
                 Err(message) => PreviewState::Failed { path, message },
             };
-        }
-    }
-
-    fn save_favorites(&mut self) {
-        if let Err(err) = self.favorites.save() {
-            self.error = Some(format!("Impossible d'enregistrer les favoris : {err}"));
         }
     }
 
@@ -357,18 +385,72 @@ impl ExpliaApp {
             Action::Go(location) => self.navigate(location),
             Action::Select(entry) => self.select(ctx, entry),
             Action::AddFavorite(path) => {
-                if self.favorites.add(path) {
-                    self.save_favorites();
-                }
+                self.favorites.add(path);
             }
-            Action::RemoveFavorite(path) => {
-                self.favorites.remove(&path);
-                self.save_favorites();
+            Action::RemoveFavorite(path) => self.favorites.remove(&path),
+            Action::Open(path) => self.report_launch(launch::open(&path)),
+            Action::OpenAsAdmin(path) => self.report_launch(launch::open_as_admin(&path)),
+            Action::EditAddress => {
+                self.address_editing = true;
+                self.focus_address = true;
             }
         }
     }
 
-    /// Première ligne : dossier parent, Ce PC, barre d'adresse.
+    fn report_launch(&mut self, result: Result<(), String>) {
+        self.error = result.err();
+    }
+
+    /// Réglages courants, tels qu'ils seront écrits dans le fichier.
+    fn current_settings(&self) -> Settings {
+        Settings {
+            window_size: self.window_size,
+            sort_key: self.sort_key,
+            sort_order: self.sort_order,
+            show_preview: self.show_preview,
+            preview_expanded: self.preview_expanded,
+            skip_folder_sizes: self.skip_folder_sizes,
+            categories: self.filter.categories().to_vec(),
+            custom_extensions: self.filter.custom().to_string(),
+            favorites: self.favorites.paths().to_vec(),
+        }
+    }
+
+    fn write_settings(&mut self, settings: Settings) {
+        let Some(file) = &self.settings_file else {
+            return;
+        };
+        if let Err(err) = settings.save(file) {
+            self.error = Some(format!("Impossible d'enregistrer les réglages : {err}"));
+        }
+        self.saved_settings = settings;
+    }
+
+    /// Enregistre les réglages dès qu'un d'eux change. La taille de la fenêtre est
+    /// ignorée ici (elle varie en continu pendant un redimensionnement) : elle est
+    /// écrite à la fermeture, et avec les autres réglages quand ceux-ci changent.
+    fn save_settings_if_changed(&mut self) {
+        let current = self.current_settings();
+        let mut without_window = current.clone();
+        without_window.window_size = self.saved_settings.window_size;
+        if without_window != self.saved_settings {
+            self.write_settings(current);
+        }
+    }
+
+    /// Suit la taille de la fenêtre (sauf si elle est maximisée ou en plein écran).
+    fn track_window_size(&mut self, ctx: &egui::Context) {
+        ctx.input(|input| {
+            let viewport = input.viewport();
+            let resizable_state =
+                viewport.maximized != Some(true) && viewport.fullscreen != Some(true);
+            if let (Some(rect), true) = (viewport.inner_rect, resizable_state) {
+                self.window_size = Some((rect.width(), rect.height()));
+            }
+        });
+    }
+
+    /// Première ligne : dossier parent, Ce PC, fil d'Ariane (ou saisie du chemin).
     fn address_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         ui.horizontal(|ui| {
@@ -382,14 +464,92 @@ impl ExpliaApp {
             if ui.button("🖥 Ce PC").clicked() {
                 action = Some(Action::Go(Location::ThisPc));
             }
-            let edit = ui.add(
-                egui::TextEdit::singleline(&mut self.address)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("Saisir un chemin Windows, par exemple C:\\Users"),
-            );
-            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.submit_address();
+            if self.address_editing {
+                self.address_edit(ui);
+            } else {
+                let crumb_action = self.breadcrumb_bar(ui);
+                action = crumb_action.or(action.take());
             }
+        });
+        action
+    }
+
+    /// Mode saisie : Entrée valide, Échap ou clic ailleurs annule.
+    fn address_edit(&mut self, ui: &mut egui::Ui) {
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut self.address)
+                .desired_width(f32::INFINITY)
+                .hint_text("Saisir un chemin Windows, par exemple C:\\Users"),
+        );
+        if self.focus_address {
+            edit.request_focus();
+            self.focus_address = false;
+            return;
+        }
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        if edit.lost_focus() {
+            if enter {
+                self.submit_address();
+            } else if escape || !edit.has_focus() {
+                self.address = self.location.display();
+            }
+            self.address_editing = false;
+        }
+    }
+
+    /// Fil d'Ariane : un bouton par niveau du chemin ; un clic sur l'espace libre
+    /// (ou sur le crayon) passe en mode saisie.
+    fn breadcrumb_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        let crumbs = match &self.location {
+            Location::ThisPc => Vec::new(),
+            Location::Dir(path) => fs_nav::breadcrumbs(path),
+        };
+        let height = ui.spacing().interact_size.y;
+        let frame = egui::Frame::new()
+            .fill(ui.visuals().extreme_bg_color)
+            .corner_radius(ui.visuals().widgets.inactive.corner_radius)
+            .inner_margin(egui::Margin::symmetric(4, 0));
+        frame.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.set_height(height);
+            ui.horizontal(|ui| {
+                if ui
+                    .small_button("✏")
+                    .on_hover_text("Modifier le chemin")
+                    .clicked()
+                {
+                    action = Some(Action::EditAddress);
+                }
+                egui::ScrollArea::horizontal()
+                    .id_salt("breadcrumb")
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .stick_to_right(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let this_pc = ui.add(egui::Button::new("Ce PC").frame(false));
+                            if this_pc.clicked() {
+                                action = Some(Action::Go(Location::ThisPc));
+                            }
+                            for (label, path) in &crumbs {
+                                ui.weak(">");
+                                let button = ui.add(egui::Button::new(label).frame(false));
+                                if button.clicked() {
+                                    action = Some(Action::Go(Location::Dir(path.clone())));
+                                }
+                            }
+                            // Espace libre : un clic passe en mode saisie.
+                            let rest = ui.allocate_response(
+                                egui::vec2(ui.available_width().max(24.0), height),
+                                egui::Sense::click(),
+                            );
+                            if rest.clicked() {
+                                action = Some(Action::EditAddress);
+                            }
+                        });
+                    });
+            });
         });
         action
     }
@@ -431,11 +591,20 @@ impl ExpliaApp {
                     self.filter.clear();
                     changed = true;
                 }
+                ui.horizontal(|ui| {
+                    ui.label("Custom");
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(self.filter.custom_mut())
+                            .desired_width(110.0)
+                            .hint_text("ex. mkv, pdf"),
+                    );
+                    changed |= edit.changed();
+                });
                 ui.separator();
-                for (index, (label, _)) in COMMON_EXTENSIONS.iter().enumerate() {
-                    let mut on = self.filter.is_selected(index);
-                    if ui.checkbox(&mut on, *label).changed() {
-                        self.filter.set(index, on);
+                for category in Category::ALL {
+                    let mut on = self.filter.has_category(category);
+                    if ui.checkbox(&mut on, category.label()).changed() {
+                        self.filter.set_category(category, on);
                         changed = true;
                     }
                 }
@@ -573,6 +742,10 @@ impl ExpliaApp {
                         "📁"
                     } else if preview::is_supported_image(&entry.path) {
                         "🖼"
+                    } else if preview::is_video(&entry.path) {
+                        "🎬"
+                    } else if preview::is_zip(&entry.path) {
+                        "🗜"
                     } else {
                         "📄"
                     };
@@ -582,13 +755,18 @@ impl ExpliaApp {
                         &format!("{icon} {}", entry.name),
                         &self.entry_size_text(entry),
                     );
-                    if response.double_clicked() && entry.is_dir {
-                        action = Some(Action::Go(Location::Dir(entry.path.clone())));
+                    if response.double_clicked() {
+                        // Dossier : on entre ; fichier : on l'ouvre avec son application.
+                        action = Some(if entry.is_dir {
+                            Action::Go(Location::Dir(entry.path.clone()))
+                        } else {
+                            Action::Open(entry.path.clone())
+                        });
                     } else if response.clicked() {
                         action = Some(Action::Select(entry.clone()));
                     }
-                    if entry.is_dir {
-                        response.context_menu(|ui| {
+                    response.context_menu(|ui| {
+                        if entry.is_dir {
                             if self.favorites.contains(&entry.path) {
                                 if ui.button("Retirer des favoris").clicked() {
                                     action = Some(Action::RemoveFavorite(entry.path.clone()));
@@ -598,17 +776,35 @@ impl ExpliaApp {
                                 action = Some(Action::AddFavorite(entry.path.clone()));
                                 ui.close();
                             }
-                        });
-                    }
+                        } else {
+                            let label = if launch::is_executable(&entry.path) {
+                                "Exécuter"
+                            } else {
+                                "Ouvrir"
+                            };
+                            if ui.button(label).clicked() {
+                                action = Some(Action::Open(entry.path.clone()));
+                                ui.close();
+                            }
+                            if launch::is_executable(&entry.path)
+                                && ui.button("Exécuter en tant qu'administrateur").clicked()
+                            {
+                                action = Some(Action::OpenAsAdmin(entry.path.clone()));
+                                ui.close();
+                            }
+                        }
+                    });
                 }
             });
         action
     }
 
     /// Volet d'aperçu. Renvoie `true` si l'utilisateur a cliqué sur la flèche
-    /// « < » / « > » pour agrandir ou réduire le volet.
-    fn preview_panel(&self, ui: &mut egui::Ui) -> bool {
+    /// « < » / « > » pour agrandir ou réduire le volet, et l'action éventuelle
+    /// demandée (ouvrir le fichier).
+    fn preview_panel(&self, ui: &mut egui::Ui) -> (bool, Option<Action>) {
         let mut toggle = false;
+        let mut action = None;
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let (arrow, hint) = if self.preview_expanded {
@@ -622,7 +818,7 @@ impl ExpliaApp {
         ui.separator();
         let Some(selected) = &self.selected else {
             ui.weak("Sélectionnez un élément.");
-            return toggle;
+            return (toggle, None);
         };
         // La taille d'un dossier peut arriver après la sélection : on relit l'entrée à jour.
         let entry = self
@@ -637,15 +833,43 @@ impl ExpliaApp {
             if !size.is_empty() {
                 ui.label(format!("Taille : {size}"));
             }
-            return toggle;
+            return (toggle, None);
         }
         ui.label(preview::kind_description(&entry.path));
         ui.label(format!("Taille : {}", self.entry_size_text(entry)));
+        ui.add_space(4.0);
+        let is_video = preview::is_video(&entry.path);
+        let is_executable = launch::is_executable(&entry.path);
+        ui.horizontal_wrapped(|ui| {
+            let label = if is_video {
+                "▶ Lire"
+            } else if is_executable {
+                "▶ Exécuter"
+            } else {
+                "Ouvrir"
+            };
+            if ui
+                .button(label)
+                .on_hover_text("Ouvre le fichier avec l'application par défaut de Windows")
+                .clicked()
+            {
+                action = Some(Action::Open(entry.path.clone()));
+            }
+            if is_executable
+                && ui
+                    .button("🛡 Exécuter en administrateur")
+                    .on_hover_text("Windows demandera une confirmation (UAC)")
+                    .clicked()
+            {
+                action = Some(Action::OpenAsAdmin(entry.path.clone()));
+            }
+        });
         if !preview::is_previewable(&entry.path) {
             ui.add_space(12.0);
-            ui.label(egui::RichText::new("📄").size(64.0));
+            let icon = if is_video { "🎬" } else { "📄" };
+            ui.label(egui::RichText::new(icon).size(64.0));
             ui.weak("Pas d'aperçu pour ce type de fichier.");
-            return toggle;
+            return (toggle, action);
         }
         ui.add_space(8.0);
         match &self.preview {
@@ -690,6 +914,29 @@ impl ExpliaApp {
                         );
                     });
             }
+            PreviewState::Archive { path, preview } if *path == entry.path => {
+                let shown = preview.entries.len();
+                if preview.total > shown {
+                    ui.weak(format!("{shown} premiers éléments sur {}", preview.total));
+                } else {
+                    ui.weak(format!("{} élément(s)", preview.total));
+                }
+                ui.add_space(4.0);
+                let row_height = table_row_height(ui) + ui.spacing().item_spacing.y;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show_rows(ui, row_height, shown, |ui, range| {
+                        for item in &preview.entries[range] {
+                            let icon = if item.is_dir { "📁" } else { "📄" };
+                            let size = if item.is_dir {
+                                String::new()
+                            } else {
+                                fs_nav::format_size(item.size)
+                            };
+                            table_row(ui, false, &format!("{icon} {}", item.name), &size);
+                        }
+                    });
+            }
             PreviewState::Failed { path, message } if *path == entry.path => {
                 ui.colored_label(
                     ui.visuals().error_fg_color,
@@ -698,7 +945,7 @@ impl ExpliaApp {
             }
             _ => {}
         }
-        toggle
+        (toggle, action)
     }
 
     fn status_text(&self) -> String {
@@ -857,7 +1104,7 @@ impl eframe::App for ExpliaApp {
             } else {
                 ("preview", 300.0)
             };
-            let toggle = egui::Panel::right(id)
+            let (toggle, preview_action) = egui::Panel::right(id)
                 .default_size(width)
                 .resizable(true)
                 .show(ui, |ui| self.preview_panel(ui))
@@ -865,6 +1112,7 @@ impl eframe::App for ExpliaApp {
             if toggle {
                 self.preview_expanded = !self.preview_expanded;
             }
+            action = preview_action.or(action.take());
         }
         egui::CentralPanel::default().show(ui, |ui| {
             action = self.central(ui).or(action.take());
@@ -873,5 +1121,13 @@ impl eframe::App for ExpliaApp {
         if let Some(action) = action {
             self.apply(&ctx, action);
         }
+        self.track_window_size(&ctx);
+        self.save_settings_if_changed();
+    }
+
+    /// À la fermeture : mémorise aussi la taille de la fenêtre.
+    fn on_exit(&mut self) {
+        let settings = self.current_settings();
+        self.write_settings(settings);
     }
 }

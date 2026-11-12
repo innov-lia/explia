@@ -11,66 +11,164 @@ pub enum SortKey {
     Type,
 }
 
+impl SortKey {
+    pub fn id(self) -> &'static str {
+        match self {
+            SortKey::Name => "name",
+            SortKey::Size => "size",
+            SortKey::Type => "type",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "name" => Some(SortKey::Name),
+            "size" => Some(SortKey::Size),
+            "type" => Some(SortKey::Type),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortOrder {
     Ascending,
     Descending,
 }
 
-/// Extensions courantes proposées dans le menu « Extension » :
-/// libellé affiché et extensions correspondantes (en minuscules).
-pub const COMMON_EXTENSIONS: &[(&str, &[&str])] = &[
-    (".png", &["png"]),
-    (".jpg / .jpeg", &["jpg", "jpeg"]),
-    (".bmp", &["bmp"]),
-    (".gif", &["gif"]),
-    (".pdf", &["pdf"]),
-    (".txt", &["txt"]),
-    (".doc / .docx", &["doc", "docx"]),
-    (".xls / .xlsx", &["xls", "xlsx"]),
-    (".ppt / .pptx", &["ppt", "pptx"]),
-    (".zip", &["zip"]),
-    (".mp3", &["mp3"]),
-    (".mp4", &["mp4"]),
-    (".exe", &["exe"]),
-];
-
-/// Filtre par extension : « tout » tant que rien n'est coché, sinon uniquement
-/// les extensions cochées. Les dossiers restent toujours visibles.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtensionFilter {
-    selected: Vec<bool>,
-}
-
-impl Default for ExtensionFilter {
-    fn default() -> Self {
-        Self {
-            selected: vec![false; COMMON_EXTENSIONS.len()],
+impl SortOrder {
+    pub fn id(self) -> &'static str {
+        match self {
+            SortOrder::Ascending => "asc",
+            SortOrder::Descending => "desc",
         }
     }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "asc" => Some(SortOrder::Ascending),
+            "desc" => Some(SortOrder::Descending),
+            _ => None,
+        }
+    }
+}
+
+/// Catégorie d'extensions proposée dans le menu « Extension ».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    Image,
+    Documents,
+    Code,
+}
+
+impl Category {
+    pub const ALL: [Category; 3] = [Category::Image, Category::Documents, Category::Code];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Category::Image => "image",
+            Category::Documents => "documents",
+            Category::Code => "code",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.id() == id)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::Image => "Image",
+            Category::Documents => "Documents",
+            Category::Code => "Code",
+        }
+    }
+
+    /// Extensions (en minuscules) de la catégorie.
+    pub fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Category::Image => &[
+                "png", "jpg", "jpeg", "bmp", "gif", "webp", "ico", "tif", "tiff", "svg", "heic",
+            ],
+            Category::Documents => &[
+                "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf",
+                "txt", "md", "csv",
+            ],
+            Category::Code => &[
+                "rs", "py", "js", "ts", "jsx", "tsx", "c", "h", "cpp", "hpp", "cs", "java", "go",
+                "rb", "php", "html", "css", "scss", "json", "xml", "yaml", "yml", "toml", "sql",
+                "sh", "bat", "ps1", "lua", "kt", "swift",
+            ],
+        }
+    }
+}
+
+/// Filtre par extension : « tout » tant qu'aucune catégorie n'est cochée et qu'aucune
+/// extension personnalisée n'est saisie ; sinon, uniquement ce qui correspond à l'une
+/// des catégories cochées ou des extensions personnalisées. Les dossiers restent
+/// toujours visibles.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtensionFilter {
+    categories: Vec<Category>,
+    /// Texte saisi par l'utilisateur, par exemple « mkv, .pdf ».
+    custom: String,
+}
+
+/// Extrait les extensions d'un texte libre (séparées par virgule, point-virgule ou espace).
+pub fn parse_custom_extensions(text: &str) -> Vec<String> {
+    text.split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .map(|part| part.trim().trim_start_matches(['*', '.']).to_lowercase())
+        .filter(|part| !part.is_empty())
+        .collect()
 }
 
 impl ExtensionFilter {
-    pub fn is_all(&self) -> bool {
-        !self.selected.iter().any(|&on| on)
+    pub fn new(categories: Vec<Category>, custom: String) -> Self {
+        let mut filter = Self {
+            categories: Vec::new(),
+            custom,
+        };
+        for category in categories {
+            filter.set_category(category, true);
+        }
+        filter
     }
 
-    pub fn count(&self) -> usize {
-        self.selected.iter().filter(|&&on| on).count()
+    pub fn categories(&self) -> &[Category] {
+        &self.categories
     }
 
-    pub fn is_selected(&self, index: usize) -> bool {
-        self.selected.get(index).copied().unwrap_or(false)
+    pub fn custom(&self) -> &str {
+        &self.custom
     }
 
-    pub fn set(&mut self, index: usize, on: bool) {
-        if let Some(slot) = self.selected.get_mut(index) {
-            *slot = on;
+    pub fn custom_mut(&mut self) -> &mut String {
+        &mut self.custom
+    }
+
+    pub fn has_category(&self, category: Category) -> bool {
+        self.categories.contains(&category)
+    }
+
+    pub fn set_category(&mut self, category: Category, on: bool) {
+        self.categories.retain(|c| *c != category);
+        if on {
+            self.categories.push(category);
         }
     }
 
+    pub fn is_all(&self) -> bool {
+        self.categories.is_empty() && parse_custom_extensions(&self.custom).is_empty()
+    }
+
+    /// Nombre de critères actifs (catégories cochées, plus un si une extension est saisie).
+    pub fn count(&self) -> usize {
+        self.categories.len() + usize::from(!parse_custom_extensions(&self.custom).is_empty())
+    }
+
     pub fn clear(&mut self) {
-        self.selected.fill(false);
+        self.categories.clear();
+        self.custom.clear();
     }
 
     pub fn matches(&self, entry: &Entry) -> bool {
@@ -78,10 +176,10 @@ impl ExtensionFilter {
             return true;
         }
         let ext = extension_of(&entry.path);
-        COMMON_EXTENSIONS
+        self.categories
             .iter()
-            .zip(&self.selected)
-            .any(|((_, exts), &on)| on && exts.contains(&ext.as_str()))
+            .any(|c| c.extensions().contains(&ext.as_str()))
+            || parse_custom_extensions(&self.custom).contains(&ext)
     }
 }
 
@@ -181,6 +279,29 @@ mod tests {
     }
 
     #[test]
+    fn ids_round_trip() {
+        for key in [SortKey::Name, SortKey::Size, SortKey::Type] {
+            assert_eq!(SortKey::from_id(key.id()), Some(key));
+        }
+        for order in [SortOrder::Ascending, SortOrder::Descending] {
+            assert_eq!(SortOrder::from_id(order.id()), Some(order));
+        }
+        for category in Category::ALL {
+            assert_eq!(Category::from_id(category.id()), Some(category));
+        }
+        assert_eq!(SortKey::from_id("?"), None);
+    }
+
+    #[test]
+    fn parses_custom_extensions() {
+        assert_eq!(
+            parse_custom_extensions(" .MKV, *.pdf ; mp4  "),
+            ["mkv", "pdf", "mp4"]
+        );
+        assert!(parse_custom_extensions(" , . ").is_empty());
+    }
+
+    #[test]
     fn empty_filter_shows_everything() {
         let filter = ExtensionFilter::default();
         assert!(filter.is_all());
@@ -189,17 +310,30 @@ mod tests {
     }
 
     #[test]
-    fn filter_keeps_only_checked_extensions_and_all_folders() {
+    fn category_filter_keeps_matching_files_and_all_folders() {
         let mut filter = ExtensionFilter::default();
-        filter.set(1, true); // .jpg / .jpeg
+        filter.set_category(Category::Image, true);
         assert!(!filter.is_all());
         assert_eq!(filter.count(), 1);
         assert!(filter.matches(&file("a.JPG", 1)));
-        assert!(filter.matches(&file("a.jpeg", 1)));
-        assert!(!filter.matches(&file("a.png", 1)));
+        assert!(filter.matches(&file("a.png", 1)));
+        assert!(!filter.matches(&file("a.pdf", 1)));
         assert!(!filter.matches(&file("noext", 1)));
         assert!(filter.matches(&dir("dossier")));
+        filter.set_category(Category::Image, false);
+        assert!(filter.is_all());
+    }
+
+    #[test]
+    fn custom_extensions_combine_with_categories() {
+        let mut filter = ExtensionFilter::new(vec![Category::Code], ".mkv, avi".to_string());
+        assert_eq!(filter.count(), 2);
+        assert!(filter.matches(&file("main.rs", 1)));
+        assert!(filter.matches(&file("film.MKV", 1)));
+        assert!(filter.matches(&file("film.avi", 1)));
+        assert!(!filter.matches(&file("photo.png", 1)));
         filter.clear();
-        assert!(filter.matches(&file("a.png", 1)));
+        assert!(filter.is_all());
+        assert!(filter.matches(&file("photo.png", 1)));
     }
 }

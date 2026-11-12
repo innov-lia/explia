@@ -70,8 +70,12 @@ l'utilisation.
 
 * Le MVP est **en lecture seule** : aucune suppression, aucun
 renommage, aucun déplacement, aucune copie, aucune écriture de
-fichier. **Seule exception, autorisée par l'utilisateur** : l'application
-enregistre la liste des favoris dans `%APPDATA%\ExPLIA\favoris.txt`.
+fichier. **Exceptions autorisées par l'utilisateur** :
+  * l'application enregistre ses réglages (taille de la fenêtre, options,
+  favoris) dans `%APPDATA%\ExPLIA\settings.txt`, et rien d'autre ;
+  * sur geste explicite de l'utilisateur (double-clic ou menu), elle peut
+  ouvrir un fichier avec son application associée ou lancer un exécutable,
+  y compris en administrateur via la fenêtre UAC de Windows.
 Aucun autre fichier ne doit être écrit.
 * Ne jamais lancer de commande destructive ou modifier des fichiers en
 dehors du dépôt.

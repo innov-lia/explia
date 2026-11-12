@@ -1,16 +1,10 @@
-//! Favoris de l'utilisateur.
-//!
-//! Seul fichier écrit par ExPLIA : `%APPDATA%\ExPLIA\favoris.txt`
-//! (un chemin par ligne). Les fichiers de l'utilisateur ne sont jamais modifiés.
+//! Liste des favoris de l'utilisateur (sauvegardée avec les réglages, voir `settings`).
 
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default)]
 pub struct Favorites {
     paths: Vec<PathBuf>,
-    file: Option<PathBuf>,
 }
 
 /// Clé de comparaison : insensible à la casse et au séparateur final (Windows).
@@ -20,33 +14,13 @@ fn key(path: &Path) -> String {
         .to_lowercase()
 }
 
-pub fn parse(text: &str) -> Vec<PathBuf> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(PathBuf::from)
-        .collect()
-}
-
-pub fn serialize(paths: &[PathBuf]) -> String {
-    paths.iter().map(|p| format!("{}\n", p.display())).collect()
-}
-
-/// Emplacement du fichier de favoris, s'il est déterminable.
-pub fn default_file() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join("ExPLIA").join("favoris.txt"))
-}
-
 impl Favorites {
-    /// Charge les favoris ; un fichier absent ou illisible donne une liste vide.
-    pub fn load(file: Option<PathBuf>) -> Self {
+    /// Construit la liste en ignorant les doublons.
+    pub fn from_paths(paths: Vec<PathBuf>) -> Self {
         let mut favorites = Self::default();
-        if let Some(text) = file.as_ref().and_then(|f| fs::read_to_string(f).ok()) {
-            for path in parse(&text) {
-                favorites.add(path);
-            }
+        for path in paths {
+            favorites.add(path);
         }
-        favorites.file = file;
         favorites
     }
 
@@ -72,30 +46,11 @@ impl Favorites {
         let wanted = key(path);
         self.paths.retain(|p| key(p) != wanted);
     }
-
-    /// Enregistre la liste dans le fichier de favoris.
-    pub fn save(&self) -> io::Result<()> {
-        let Some(file) = &self.file else {
-            return Err(io::Error::other("dossier de configuration introuvable"));
-        };
-        if let Some(dir) = file.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        fs::write(file, serialize(&self.paths))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_ignores_blank_lines() {
-        assert_eq!(
-            parse("C:\\a\n\n  D:\\b  \r\n"),
-            vec![PathBuf::from("C:\\a"), PathBuf::from("D:\\b")]
-        );
-    }
 
     #[test]
     fn add_is_case_insensitive_and_deduplicated() {
@@ -116,30 +71,12 @@ mod tests {
     }
 
     #[test]
-    fn save_and_load_round_trip() {
-        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test-favoris")
-            .join("favoris.txt");
-        let mut fav = Favorites::load(Some(file.clone()));
-        fav.add(PathBuf::from("C:\\Projets"));
-        fav.add(PathBuf::from("D:\\Photos"));
-        fav.save().unwrap();
-        let reloaded = Favorites::load(Some(file.clone()));
-        assert_eq!(reloaded.paths(), fav.paths());
-        let _ = fs::remove_file(file);
-    }
-
-    #[test]
-    fn save_without_file_is_an_error() {
-        assert!(Favorites::default().save().is_err());
-    }
-
-    #[test]
-    fn load_missing_file_gives_empty_list() {
-        let missing = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("absent.txt");
-        assert!(Favorites::load(Some(missing)).paths().is_empty());
+    fn from_paths_drops_duplicates() {
+        let fav = Favorites::from_paths(vec![
+            PathBuf::from("C:\\a"),
+            PathBuf::from("c:\\A"),
+            PathBuf::from("D:\\b"),
+        ]);
+        assert_eq!(fav.paths().len(), 2);
     }
 }

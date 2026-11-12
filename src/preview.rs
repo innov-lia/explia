@@ -67,11 +67,31 @@ pub struct TextPreview {
     pub truncated: bool,
 }
 
+/// Nombre maximal d'éléments listés pour une archive.
+pub const MAX_ARCHIVE_ENTRIES: usize = 5000;
+
+/// Un élément d'une archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveEntry {
+    pub name: String,
+    pub size: u64,
+    pub is_dir: bool,
+}
+
+/// Contenu d'une archive ZIP (liste seulement : rien n'est extrait).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivePreview {
+    pub entries: Vec<ArchiveEntry>,
+    /// Nombre total d'éléments dans l'archive (peut dépasser `entries.len()`).
+    pub total: usize,
+}
+
 /// Contenu d'aperçu produit pour un fichier.
 #[derive(Debug, Clone)]
 pub enum PreviewContent {
     Image(ImagePreview),
     Text(TextPreview),
+    Archive(ArchivePreview),
 }
 
 fn lowercase_extension(path: &Path) -> Option<String> {
@@ -95,9 +115,24 @@ pub fn is_text_file(path: &Path) -> bool {
     lowercase_extension(path).is_some_and(|ext| TEXT_EXTENSIONS.contains(&ext.as_str()))
 }
 
-/// Vrai si un aperçu (image ou texte) peut être généré pour ce fichier.
+/// Archives ZIP dont on peut lister le contenu.
+pub fn is_zip(path: &Path) -> bool {
+    lowercase_extension(path).is_some_and(|ext| ext == "zip")
+}
+
+/// Vidéos courantes : ouvertes avec le lecteur par défaut de Windows.
+pub fn is_video(path: &Path) -> bool {
+    lowercase_extension(path).is_some_and(|ext| {
+        matches!(
+            ext.as_str(),
+            "mp4" | "mkv" | "avi" | "mov" | "webm" | "wmv" | "m4v"
+        )
+    })
+}
+
+/// Vrai si un aperçu (image, texte ou contenu d'archive) peut être généré pour ce fichier.
 pub fn is_previewable(path: &Path) -> bool {
-    is_supported_image(path) || is_text_file(path)
+    is_supported_image(path) || is_text_file(path) || is_zip(path)
 }
 
 /// Description du type d'un fichier d'après son extension.
@@ -105,6 +140,8 @@ pub fn kind_description(path: &Path) -> String {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) if is_supported_image(path) => format!("Image {}", ext.to_uppercase()),
         Some(ext) if is_text_file(path) => format!("Texte {}", ext.to_uppercase()),
+        Some(ext) if is_video(path) => format!("Vidéo {}", ext.to_uppercase()),
+        Some(ext) if is_zip(path) => format!("Archive {}", ext.to_uppercase()),
         Some(ext) => format!("Fichier {}", ext.to_uppercase()),
         None => "Fichier".to_string(),
     }
@@ -132,12 +169,37 @@ pub fn load_text_preview(path: &Path) -> Result<TextPreview, String> {
     decode_text(&bytes, len > MAX_TEXT_BYTES as u64)
 }
 
-/// Génère l'aperçu adapté au fichier (image ou texte).
+/// Liste le contenu d'une archive ZIP sans rien extraire.
+pub fn list_zip<R: Read + Seek>(reader: R) -> Result<ArchivePreview, String> {
+    let mut archive = zip::ZipArchive::new(reader).map_err(|e| e.to_string())?;
+    let total = archive.len();
+    let mut entries = Vec::new();
+    for index in 0..total.min(MAX_ARCHIVE_ENTRIES) {
+        // `by_index_raw` lit seulement l'en-tête : pas de décompression, pas de mot de passe.
+        let file = archive.by_index_raw(index).map_err(|e| e.to_string())?;
+        entries.push(ArchiveEntry {
+            name: file.name().map_err(|e| e.to_string())?.into_owned(),
+            size: file.size(),
+            is_dir: file.is_dir(),
+        });
+    }
+    Ok(ArchivePreview { entries, total })
+}
+
+/// Ouvre un fichier ZIP en lecture seule et en liste le contenu.
+pub fn load_zip_preview(path: &Path) -> Result<ArchivePreview, String> {
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    list_zip(BufReader::new(file))
+}
+
+/// Génère l'aperçu adapté au fichier (image, texte ou archive).
 pub fn load_preview(path: &Path) -> Result<PreviewContent, String> {
     if is_supported_image(path) {
         load_image_preview(path).map(PreviewContent::Image)
     } else if is_text_file(path) {
         load_text_preview(path).map(PreviewContent::Text)
+    } else if is_zip(path) {
+        load_zip_preview(path).map(PreviewContent::Archive)
     } else {
         Err("Aperçu non pris en charge pour ce type de fichier".to_string())
     }
@@ -212,7 +274,61 @@ mod tests {
             assert!(!is_text_file(Path::new(name)), "{name}");
         }
         assert!(is_previewable(Path::new("a.png")));
-        assert!(!is_previewable(Path::new("a.zip")));
+        assert!(is_previewable(Path::new("a.ZIP")));
+        assert!(!is_previewable(Path::new("a.exe")));
+    }
+
+    #[test]
+    fn videos_are_recognized_but_not_previewed() {
+        for name in ["film.mp4", "film.MKV", "a.avi"] {
+            assert!(is_video(Path::new(name)), "{name}");
+            assert!(!is_previewable(Path::new(name)), "{name}");
+        }
+        assert_eq!(kind_description(Path::new("film.mkv")), "Vidéo MKV");
+    }
+
+    fn sample_zip(files: usize) -> Vec<u8> {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.add_directory("docs/", options).unwrap();
+        for i in 0..files {
+            writer
+                .start_file(format!("docs/fichier{i}.txt"), options)
+                .unwrap();
+            writer.write_all(b"bonjour").unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn lists_zip_content_without_extracting() {
+        let preview = list_zip(Cursor::new(sample_zip(2))).unwrap();
+        assert_eq!(preview.total, 3);
+        assert_eq!(
+            preview.entries[0],
+            ArchiveEntry {
+                name: "docs/".to_string(),
+                size: 0,
+                is_dir: true
+            }
+        );
+        assert_eq!(preview.entries[1].name, "docs/fichier0.txt");
+        assert_eq!(preview.entries[1].size, 7);
+        assert!(!preview.entries[1].is_dir);
+    }
+
+    #[test]
+    fn zip_listing_is_capped() {
+        let preview = list_zip(Cursor::new(sample_zip(MAX_ARCHIVE_ENTRIES + 10))).unwrap();
+        assert_eq!(preview.entries.len(), MAX_ARCHIVE_ENTRIES);
+        assert_eq!(preview.total, MAX_ARCHIVE_ENTRIES + 11);
+    }
+
+    #[test]
+    fn invalid_zip_is_an_error() {
+        assert!(list_zip(Cursor::new(b"pas un zip".to_vec())).is_err());
     }
 
     #[test]
