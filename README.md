@@ -9,6 +9,7 @@ Rapide, natif, écrit en Rust — un seul `explia.exe`, rien à installer.
 [![Version](https://img.shields.io/github/v/release/innov-lia/explia?include_prereleases&label=version)](https://github.com/innov-lia/explia/releases)
 ![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows)
 ![Rust](https://img.shields.io/badge/Rust-2024-B7410E?logo=rust)
+[![Licence MIT](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
 [![Étoiles](https://img.shields.io/github/stars/innov-lia/explia?style=social)](https://github.com/innov-lia/explia/stargazers)
 
 [**Télécharger**](https://github.com/innov-lia/explia/releases) · [Fonctionnalités](#fonctionnalités) · [Raccourcis](#raccourcis-clavier) · [Compiler](#pour-les-développeurs) · [English](#in-english)
@@ -170,6 +171,10 @@ ExPLIA n'embarque aucun lecteur. Pour lire les vidéos et les sons **dans ExPLIA
 
 Les retours sont les bienvenus : [signalez un bug](https://github.com/innov-lia/explia/issues/new?template=bug_report.md), [proposez une idée](https://github.com/innov-lia/explia/issues/new?template=feature_request.md), ou lisez [CONTRIBUTING.md](CONTRIBUTING.md) pour proposer du code. Et si ExPLIA vous est utile, **une étoile ⭐ fait toute la différence**.
 
+## Licence
+
+ExPLIA est distribué sous [licence MIT](LICENSE) : vous pouvez l'utiliser, le modifier et le redistribuer librement, en conservant la mention de copyright.
+
 ## In English
 
 **ExPLIA is a fast, modern file explorer for Windows 10/11, written in Rust** (`egui`/`eframe`), shipped as a single portable `explia.exe`.
@@ -183,7 +188,7 @@ Les retours sont les bienvenus : [signalez un bug](https://github.com/innov-lia/
 - `>_` Open **PowerShell** (or an admin PowerShell) right in the folder; tabs; full keyboard navigation.
 - 🔒 No telemetry, no network access; deletions always go to the Recycle Bin after confirmation.
 
-The interface is in French for now. ⭐ **If you like it, please star the repo!**
+Released under the [MIT License](LICENSE). The interface is in French for now. ⭐ **If you like it, please star the repo!**
 
 ## Pour les développeurs
 

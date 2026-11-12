@@ -2,7 +2,9 @@
 name = "explia"
 version = "0.1.0"
 edition = "2024"
-description = "ExPLIA : explorateur de fichiers Windows en lecture seule"
+description = "ExPLIA : explorateur de fichiers Windows nouvelle génération"
+license = "MIT"
+repository = "https://github.com/innov-lia/explia"
 
 [dependencies]
 eframe = "0.37.0"
