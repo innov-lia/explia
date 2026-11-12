@@ -1,0 +1,17 @@
+[package]
+name = "explia"
+version = "0.1.0"
+edition = "2024"
+description = "ExPLIA : explorateur de fichiers Windows en lecture seule"
+
+[dependencies]
+eframe = "0.37.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp"] }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }
