@@ -67,6 +67,20 @@ pub fn levels_below(root: &Path, path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Niveaux affichés par la vue en colonnes pour `path`. Dans le dossier de l'utilisateur, les
+/// niveaux jusqu'à `home` compris (`C:`, `Users`, nom) sont omis : la barre latérale (onglet
+/// Home) montre déjà le contenu de `home`. Le dossier affiché lui-même est toujours gardé.
+pub fn column_levels(path: &Path, home: Option<&Path>) -> Vec<(String, PathBuf)> {
+    let crumbs = breadcrumbs(path);
+    match home {
+        Some(home) if path.starts_with(home) => crumbs
+            .into_iter()
+            .filter(|(_, level)| level == path || !home.starts_with(level))
+            .collect(),
+        _ => crumbs,
+    }
+}
+
 /// Construit l'entrée décrivant un chemin (nom, type, taille, dates). `None` s'il est illisible.
 pub fn entry_from_path(path: &Path) -> Option<Entry> {
     let own = fs::symlink_metadata(path).ok()?;
@@ -285,6 +299,34 @@ mod tests {
         );
         assert!(levels_below(root, Path::new("C:\\Data\\f.txt")).is_empty());
         assert!(levels_below(root, Path::new("D:\\x\\f.txt")).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn column_levels_skip_the_path_up_to_home() {
+        let home = Path::new("C:\\Users\\Bob");
+        let levels = |path: &str| -> Vec<PathBuf> {
+            column_levels(Path::new(path), Some(home))
+                .into_iter()
+                .map(|(_, p)| p)
+                .collect()
+        };
+        assert_eq!(
+            levels("C:\\Users\\Bob\\Documents"),
+            [PathBuf::from("C:\\Users\\Bob\\Documents")]
+        );
+        assert_eq!(
+            levels("C:\\Users\\Bob\\Documents\\Codex"),
+            [
+                PathBuf::from("C:\\Users\\Bob\\Documents"),
+                PathBuf::from("C:\\Users\\Bob\\Documents\\Codex")
+            ]
+        );
+        // Le dossier de l'utilisateur lui-même : une seule colonne, son contenu.
+        assert_eq!(levels("C:\\Users\\Bob"), [PathBuf::from("C:\\Users\\Bob")]);
+        // Hors de Home : tout le chemin, depuis le lecteur.
+        assert_eq!(levels("D:\\Data\\x").len(), 3);
+        assert_eq!(levels("C:\\Users").len(), 2);
     }
 
     #[cfg(windows)]

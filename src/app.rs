@@ -2805,7 +2805,9 @@ impl ExpliaApp {
         let Location::Dir(current) = self.location.clone() else {
             return None;
         };
-        let crumbs = fs_nav::breadcrumbs(&current);
+        // Dans Home, les colonnes commencent sous le dossier de l'utilisateur (la barre latérale
+        // montre déjà son contenu) : pas de colonnes C:, Users, nom.
+        let crumbs = fs_nav::column_levels(&current, self.home.as_deref());
         // Listings des dossiers traversés (le dernier est le dossier courant : `self.visible`).
         for (_, path) in crumbs.iter().take(crumbs.len().saturating_sub(1)) {
             if !self.column_cache.contains_key(path)
