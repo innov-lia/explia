@@ -263,6 +263,9 @@ enum PreviewState {
 /// Action demandée par l'interface pendant une frame, appliquée ensuite.
 enum Action {
     Go(Location),
+    /// Clic sur un dossier de la barre latérale : l'ouvre, et les flèches ↑ / ↓ parcourent
+    /// ensuite la liste de l'onglet.
+    SidebarGo(PathBuf),
     /// Change d'onglet dans le classeur de la barre latérale.
     SidebarTab(SidebarTab),
     Select(Entry),
@@ -393,9 +396,9 @@ pub struct ExpliaApp {
     /// Onglet affiché dans la barre latérale.
     sidebar_tab: SidebarTab,
     /// Le clavier pilote la liste des lecteurs : ↑ / ↓ changent de lecteur, → revient au dossier.
-    drives_focus: bool,
+    sidebar_focus: bool,
     /// Lecteur choisi au clavier (index dans `drives`).
-    drive_cursor: Option<usize>,
+    sidebar_cursor: Option<usize>,
     /// Dossier de l'utilisateur courant (onglet « Home »).
     home: Option<PathBuf>,
     /// Sous-dossiers du dossier de l'utilisateur.
@@ -523,8 +526,8 @@ impl ExpliaApp {
             tabs_side: settings.tabs_side,
             preview_side: settings.preview_side,
             sidebar_tab: SidebarTab::Pc,
-            drives_focus: false,
-            drive_cursor: None,
+            sidebar_focus: false,
+            sidebar_cursor: None,
             home: places::user_home().filter(|home| home.is_dir()),
             home_dirs: Vec::new(),
             favorites: Favorites::from_paths(settings.favorites.clone()),
@@ -634,8 +637,8 @@ impl ExpliaApp {
     /// Affiche un onglet du classeur ; son contenu est relu (lecteurs, dossiers).
     fn set_sidebar_tab(&mut self, tab: SidebarTab) {
         self.sidebar_tab = tab;
-        self.drives_focus = false;
-        self.drive_cursor = None;
+        self.sidebar_focus = false;
+        self.sidebar_cursor = None;
         match tab {
             SidebarTab::Pc | SidebarTab::Network => self.refresh_drives(),
             SidebarTab::Home => self.refresh_home_dirs(),
@@ -1109,7 +1112,7 @@ impl ExpliaApp {
             Location::ThisPc => {
                 self.set_sidebar_tab(SidebarTab::Pc);
                 // Les flèches ↑ / ↓ changent alors de lecteur.
-                self.drives_focus = true;
+                self.sidebar_focus = true;
                 self.address = self.location.display();
                 return;
             }
@@ -1141,8 +1144,8 @@ impl ExpliaApp {
         }
         self.error = None;
         self.notice = None;
-        self.drives_focus = false;
-        self.drive_cursor = None;
+        self.sidebar_focus = false;
+        self.sidebar_cursor = None;
         // La recherche et les résultats valent pour le dossier affiché : un nouveau dossier
         // repart sans filtre.
         self.close_results();
@@ -1191,21 +1194,62 @@ impl ExpliaApp {
         }
     }
 
-    /// Passe au lecteur précédent (`delta` < 0) ou suivant (`delta` > 0) et l'ouvre ; le clavier
-    /// continue de piloter la liste des lecteurs.
-    fn step_drive(&mut self, delta: i32) {
-        let current = self.drive_cursor.or(match &self.location {
-            Location::Dir(path) => self.drives.iter().position(|d| path.starts_with(&d.path)),
+    /// Dossiers de la liste de l'onglet actif, dans l'ordre affiché (navigation aux flèches).
+    fn sidebar_items(&self) -> Vec<PathBuf> {
+        match self.sidebar_tab {
+            SidebarTab::Pc => self.drives.iter().map(|d| d.path.clone()).collect(),
+            SidebarTab::Network => self
+                .drives
+                .iter()
+                .filter(|d| d.kind == DriveKind::Network)
+                .map(|d| d.path.clone())
+                .collect(),
+            SidebarTab::Home => self
+                .home
+                .iter()
+                .cloned()
+                .chain(
+                    self.home_dirs
+                        .iter()
+                        .filter(|e| self.show_hidden || !e.hidden)
+                        .map(|e| e.path.clone()),
+                )
+                .collect(),
+            SidebarTab::Favorites => self.favorites.paths().to_vec(),
+            SidebarTab::Apps => Vec::new(),
+        }
+    }
+
+    /// Dossier choisi aux flèches dans la barre latérale, quand elle a la main.
+    fn sidebar_cursor_path(&self) -> Option<PathBuf> {
+        if !self.sidebar_focus {
+            return None;
+        }
+        self.sidebar_cursor
+            .and_then(|index| self.sidebar_items().get(index).cloned())
+    }
+
+    /// Passe à l'élément précédent (`delta` < 0) ou suivant (`delta` > 0) de la liste de la barre
+    /// latérale (lecteurs, dossiers de Home, favoris) et l'ouvre ; le clavier garde la main.
+    fn step_sidebar(&mut self, delta: i32) {
+        let items = self.sidebar_items();
+        let current = self.sidebar_cursor.or(match &self.location {
+            Location::Dir(path) => items.iter().position(|p| p == path).or_else(|| {
+                // Lecteurs : le dossier affiché peut être n'importe où sur le lecteur.
+                matches!(self.sidebar_tab, SidebarTab::Pc | SidebarTab::Network)
+                    .then(|| items.iter().position(|root| path.starts_with(root)))
+                    .flatten()
+            }),
             Location::ThisPc => None,
         });
-        let Some(next) = view::step_index(current, self.drives.len(), delta) else {
+        let Some(next) = view::step_index(current, items.len(), delta) else {
             return;
         };
-        let root = self.drives[next].path.clone();
-        self.navigate(Location::Dir(root));
-        self.drives_focus = true;
-        // Même si le lecteur n'est pas prêt (erreur), le curseur avance : on peut passer au suivant.
-        self.drive_cursor = Some(next);
+        self.navigate(Location::Dir(items[next].clone()));
+        self.sidebar_focus = true;
+        // Même si le dossier n'est pas accessible (erreur), le curseur avance : on peut passer
+        // au suivant.
+        self.sidebar_cursor = Some(next);
     }
 
     /// Maj+clic : sélectionne la plage entre l'ancre (dernier élément choisi) et `entry`.
@@ -1262,7 +1306,7 @@ impl ExpliaApp {
     /// Ajoute ou retire une ligne de la multi-sélection. Un seul type à la fois :
     /// on ne mélange pas dossiers et fichiers.
     fn toggle_multi(&mut self, entry: Entry) {
-        self.drives_focus = false;
+        self.sidebar_focus = false;
         self.confirm_delete = false;
         // Comme dans l'Explorateur : le premier Ctrl+clic garde l'élément déjà sélectionné.
         if self.multi.is_empty()
@@ -1554,7 +1598,7 @@ impl ExpliaApp {
     }
 
     fn select(&mut self, ctx: &egui::Context, entry: Entry) {
-        self.drives_focus = false;
+        self.sidebar_focus = false;
         // Choisir un autre élément arrête la lecture en cours.
         if !matches!(&self.player, PlayerSlot::None) {
             let same = match &self.player {
@@ -1729,18 +1773,13 @@ impl ExpliaApp {
 
     fn apply(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::Go(location) => {
-                let drive_root = match &location {
-                    Location::Dir(path) => self.drives.iter().position(|d| d.path == *path),
-                    Location::ThisPc => None,
-                };
-                self.navigate(location);
-                // Un clic sur un lecteur donne aussi la main aux flèches ↑ / ↓.
-                if drive_root.is_some()
-                    && matches!(self.sidebar_tab, SidebarTab::Pc | SidebarTab::Network)
-                {
-                    self.drives_focus = true;
-                    self.drive_cursor = drive_root;
+            Action::Go(location) => self.navigate(location),
+            Action::SidebarGo(path) => {
+                let index = self.sidebar_items().iter().position(|p| *p == path);
+                self.navigate(Location::Dir(path));
+                if index.is_some() {
+                    self.sidebar_focus = true;
+                    self.sidebar_cursor = index;
                 }
             }
             Action::SidebarTab(tab) => self.set_sidebar_tab(tab),
@@ -2597,8 +2636,9 @@ impl ExpliaApp {
     fn drives_list(&self, ui: &mut egui::Ui, network_only: bool) -> Option<Action> {
         let mut action = None;
         ui.heading(if network_only { "Réseau" } else { "Ce PC" });
+        let cursor = self.sidebar_cursor_path();
         let mut any = false;
-        for (index, drive) in self.drives.iter().enumerate() {
+        for drive in &self.drives {
             if network_only && drive.kind != DriveKind::Network {
                 continue;
             }
@@ -2607,12 +2647,9 @@ impl ExpliaApp {
             let here =
                 matches!(&self.location, Location::Dir(path) if path.starts_with(&drive.path));
             // Pilotée au clavier : le lecteur choisi par les flèches est en surbrillance.
-            let highlighted = match self.drive_cursor {
-                Some(cursor) if self.drives_focus => cursor == index,
-                _ => here,
-            };
+            let highlighted = cursor.as_ref().map_or(here, |c| *c == drive.path);
             if drive_entry(ui, drive, info, highlighted, self.show_drive_usage).clicked() {
-                action = Some(Action::Go(Location::Dir(drive.path.clone())));
+                action = Some(Action::SidebarGo(drive.path.clone()));
             }
         }
         if !any {
@@ -2632,26 +2669,33 @@ impl ExpliaApp {
             ui.weak("Dossier de l'utilisateur introuvable.");
             return None;
         };
-        ui.heading("Home");
-        let here = self.location == Location::Dir(home.clone());
+        // Le titre est le dossier de l'utilisateur lui-même : un clic l'ouvre.
+        let cursor = self.sidebar_cursor_path();
+        let marked = |path: &PathBuf| {
+            cursor
+                .as_ref()
+                .map_or(self.location == Location::Dir(path.clone()), |c| c == path)
+        };
         if ui
-            .selectable_label(here, format!("🏠 {}", favorite_name(home)))
+            .selectable_label(
+                marked(home),
+                egui::RichText::new(format!("🏠 {}", favorite_name(home))).heading(),
+            )
             .on_hover_text(home.display().to_string())
             .clicked()
         {
-            action = Some(Action::Go(Location::Dir(home.clone())));
+            action = Some(Action::SidebarGo(home.clone()));
         }
         for entry in &self.home_dirs {
             if entry.hidden && !self.show_hidden {
                 continue;
             }
-            let here = self.location == Location::Dir(entry.path.clone());
             if ui
-                .selectable_label(here, format!("📁 {}", entry.name))
+                .selectable_label(marked(&entry.path), format!("📁 {}", entry.name))
                 .on_hover_text(entry.path.display().to_string())
                 .clicked()
             {
-                action = Some(Action::Go(Location::Dir(entry.path.clone())));
+                action = Some(Action::SidebarGo(entry.path.clone()));
             }
         }
         action
@@ -2716,13 +2760,16 @@ impl ExpliaApp {
         if self.favorites.paths().is_empty() {
             ui.weak("Clic droit sur un dossier pour l'ajouter.");
         }
+        let cursor = self.sidebar_cursor_path();
         for path in self.favorites.paths() {
-            let here = self.location == Location::Dir(path.clone());
+            let here = cursor
+                .as_ref()
+                .map_or(self.location == Location::Dir(path.clone()), |c| c == path);
             let response = ui
                 .selectable_label(here, format!("⭐ {}", favorite_name(path)))
                 .on_hover_text(path.display().to_string());
             if response.clicked() {
-                action = Some(Action::Go(Location::Dir(path.clone())));
+                action = Some(Action::SidebarGo(path.clone()));
             }
             response.context_menu(|ui| {
                 if ui.button("Retirer des favoris").clicked() {
@@ -3539,14 +3586,15 @@ impl ExpliaApp {
             return None;
         }
         let vertical = if down { 1 } else { -1 };
-        // La liste des lecteurs a la main (flèche gauche au plus haut, ou clic sur un lecteur) :
-        // ↑ / ↓ changent de lecteur, → rend la main au dossier.
-        if self.drives_focus {
+        // La barre latérale a la main (clic sur un lecteur, un dossier de Home ou un favori, ou
+        // flèche gauche au plus haut d'un lecteur) : ↑ / ↓ changent d'élément, → rend la main
+        // au dossier.
+        if self.sidebar_focus {
             if up || down {
-                self.step_drive(vertical);
+                self.step_sidebar(vertical);
             } else if right || (enter && gallery) {
-                self.drives_focus = false;
-                self.drive_cursor = None;
+                self.sidebar_focus = false;
+                self.sidebar_cursor = None;
                 self.scroll_to_index = Some(0);
                 return self.visible.first().cloned().map(Action::Select);
             }
@@ -5220,5 +5268,39 @@ mod tests {
         assert_eq!(app.tabs.len(), 2);
         assert_eq!(app.active_tab, 1);
         assert_eq!(app.location, Location::Dir(tree.0.clone()));
+    }
+
+    #[test]
+    fn arrows_walk_through_the_home_list_after_a_click_in_it() {
+        let tree = TempTree::new("home-arrows");
+        tree.dir("Apple");
+        tree.dir("build");
+        tree.dir("Contacts");
+        let (mut app, ctx) = app_in(&tree);
+        app.home = Some(tree.0.clone());
+        app.set_sidebar_tab(SidebarTab::Home);
+        assert_eq!(
+            app.sidebar_items(),
+            [
+                tree.0.clone(),
+                tree.0.join("Apple"),
+                tree.0.join("build"),
+                tree.0.join("Contacts")
+            ]
+        );
+        app.apply(&ctx, Action::SidebarGo(tree.0.join("build")));
+        assert!(app.sidebar_focus);
+        app.step_sidebar(1);
+        assert_eq!(app.location, Location::Dir(tree.0.join("Contacts")));
+        app.step_sidebar(-1);
+        app.step_sidebar(-1);
+        assert_eq!(app.location, Location::Dir(tree.0.join("Apple")));
+        // Le titre (le dossier de l'utilisateur) est le premier élément.
+        app.step_sidebar(-1);
+        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        assert_eq!(app.sidebar_cursor_path(), Some(tree.0.clone()));
+        // Un clic dans la zone centrale ne donne pas la main à la barre latérale.
+        app.apply(&ctx, Action::Go(Location::Dir(tree.0.join("Apple"))));
+        assert!(!app.sidebar_focus);
     }
 }

@@ -19,7 +19,8 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 - **Recherche** (à droite de la barre d'adresse, **Ctrl+F** pour y aller, **Échap** pour l'effacer) : filtre en direct les fichiers **et dossiers** du dossier affiché. Un mot est cherché dans le nom (`rapport`, `.exe`) ; `*` et `?` sont des jokers sur le nom entier (`*.exe`, `img_??.png`) ; plusieurs motifs se séparent par `,` ou `;` (`*.mkv, *.avi`). Majuscules et minuscules sont indifférentes. Avec la case **Récursive** (à gauche de la barre de recherche, **cochée par défaut**), la recherche parcourt aussi les sous-dossiers, en arrière-plan : les résultats (5 000 au plus) apparaissent au fur et à mesure dans la liste, avec leur dossier d'origine, jusqu'au bouton « ✕ Fermer » ; décochée, elle filtre seulement le dossier affiché. Les liens et jonctions ne sont jamais suivis. La recherche s'efface quand on change de dossier.
 - **Barre latérale en « classeur »** : toujours à gauche de la fenêtre ; les onglets (intercalaires) sont par défaut sur le bord gauche de la liste de l'onglet actif :
   - **Ce PC** : les lecteurs détectés (`C:`, `D:`, …) avec leur nom de volume et, sous chacun, une **barre d'occupation** avec le pourcentage à l'intérieur (verte, orange à partir de 75 %, rouge à partir de 90 %). L'infobulle donne le type, le format, le total, l'espace utilisé et libre. **Option > Occupation des disques** masque ou affiche ces barres.
-  - **Home** : le dossier de l'utilisateur et ses sous-dossiers.
+  - **Home** : le titre est le dossier de l'utilisateur (🏠 et son nom, un clic l'ouvre), suivi de ses sous-dossiers.
+- **Flèches dans la barre latérale** : après un clic sur un lecteur, un dossier de Home ou un favori, **↑ / ↓** passent à l'élément précédent / suivant de la liste et l'ouvrent ; **→** rend la main au contenu du dossier.
   - **Favoris** : vide par défaut, uniquement les dossiers que vous ajoutez par clic droit « Ajouter aux favoris » ; clic droit « Retirer des favoris ».
   - **Applications** : ExPLIA lui-même en tête, puis les applications que vous ajoutez (clic droit sur un exécutable `.exe`, `.bat`, `.cmd`, `.msi` ou `.com` > « Ajouter aux applications »). Un clic lance l'application ; clic droit : lancer en administrateur (fenêtre UAC), afficher dans son dossier, retirer des applications.
   - **Réseau** : les lecteurs réseau connectés (lettres de lecteur mappées). La navigation dans les serveurs et partages réseau n'est pas prise en charge.
@@ -72,7 +73,7 @@ Vos réglages sont enregistrés automatiquement dans `%APPDATA%\ExPLIA\settings.
 | --- | --- |
 | **↑ / ↓** | Ligne précédente / suivante (la liste défile) ; **Maj+↑/↓** étend la sélection |
 | **←** | Dossier parent, en resélectionnant le dossier quitté ; au plus haut d'un lecteur : liste des lecteurs |
-| **↑ / ↓** (liste des lecteurs) | Lecteur précédent / suivant, ouvert aussitôt ; **→** revient au dossier |
+| **↑ / ↓** (barre latérale) | Après un clic sur un lecteur, un dossier de Home ou un favori : élément précédent / suivant, ouvert aussitôt ; **→** revient au dossier |
 | **→** | Entre dans le dossier sélectionné et sélectionne son premier élément |
 | **Retour arrière** | Dossier parent (tous les affichages) |
 | **Grille d'images** | ↑ ↓ ← → se déplacent dans la grille, **Entrée** ouvre |
