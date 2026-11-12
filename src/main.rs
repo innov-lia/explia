@@ -9,6 +9,7 @@ mod preview;
 mod view;
 
 fn main() -> eframe::Result {
+    places::suppress_drive_error_dialogs();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("ExPLIA")
@@ -19,6 +20,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "ExPLIA",
         options,
-        Box::new(|_cc| Ok(Box::new(app::ExpliaApp::new()))),
+        Box::new(|cc| Ok(Box::new(app::ExpliaApp::new(cc.egui_ctx.clone())))),
     )
 }

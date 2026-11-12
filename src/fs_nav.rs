@@ -9,7 +9,8 @@ pub struct Entry {
     pub name: String,
     pub path: PathBuf,
     pub is_dir: bool,
-    pub size: u64,
+    /// Taille en octets. Pour un dossier : `None` tant qu'elle n'est pas calculée.
+    pub size: Option<u64>,
 }
 
 /// Où se trouve l'utilisateur : l'accueil (liste des lecteurs) ou un dossier.
@@ -73,7 +74,11 @@ pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
             name: item.file_name().to_string_lossy().into_owned(),
             path: item_path,
             is_dir,
-            size: meta.as_ref().filter(|m| m.is_file()).map_or(0, |m| m.len()),
+            size: if is_dir {
+                None
+            } else {
+                Some(meta.as_ref().map_or(0, |m| m.len()))
+            },
         });
     }
     entries.sort_by(|a, b| {
@@ -82,6 +87,38 @@ pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(entries)
+}
+
+/// Taille totale des fichiers d'un dossier, sous-dossiers compris.
+///
+/// Les liens symboliques et jonctions ne sont pas suivis (pas de boucle, pas de
+/// double comptage) et les éléments illisibles sont ignorés. `is_cancelled` est
+/// consulté régulièrement ; s'il renvoie `true`, le calcul s'arrête et rend `None`.
+pub fn dir_size(path: &Path, is_cancelled: &dyn Fn() -> bool) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for item in read.flatten() {
+            if is_cancelled() {
+                return None;
+            }
+            let Ok(file_type) = item.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push(item.path());
+            } else if let Ok(meta) = item.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    Some(total)
 }
 
 /// Taille lisible en unités françaises (o, Ko, Mo, Go, To).
@@ -155,6 +192,26 @@ mod tests {
     fn list_missing_dir_is_error_not_panic() {
         let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("dossier-inexistant");
         assert!(list_dir(&missing).is_err());
+    }
+
+    #[test]
+    fn dir_size_sums_files_recursively() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let expected: u64 = list_dir(&src).unwrap().iter().filter_map(|e| e.size).sum();
+        let size = dir_size(&src, &|| false).unwrap();
+        assert!(size >= expected && size > 0);
+    }
+
+    #[test]
+    fn dir_size_can_be_cancelled() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(dir_size(root, &|| true), None);
+    }
+
+    #[test]
+    fn dir_size_of_missing_dir_is_zero_not_panic() {
+        let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("dossier-inexistant");
+        assert_eq!(dir_size(&missing, &|| false), Some(0));
     }
 
     #[test]

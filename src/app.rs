@@ -1,14 +1,17 @@
 //! Interface graphique (egui / eframe).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use eframe::egui::containers::menu::{MenuButton, MenuConfig};
 use eframe::egui::{self, PopupCloseBehavior};
 
 use crate::favorites::{self, Favorites};
 use crate::fs_nav::{self, Entry, Location};
-use crate::places::{self, Drive, DriveKind, Place};
+use crate::places::{self, Drive, DriveKind};
 use crate::preview::{self, PreviewContent, TextPreview};
 use crate::view::{self, COMMON_EXTENSIONS, ExtensionFilter, SortKey, SortOrder};
 
@@ -16,8 +19,22 @@ use crate::view::{self, COMMON_EXTENSIONS, ExtensionFilter, SortKey, SortOrder};
 const WINDOW_SCREEN_RATIO: f32 = 0.6;
 /// Largeur du volet d'aperçu agrandi, en part de la largeur disponible.
 const PREVIEW_EXPANDED_RATIO: f32 = 0.65;
+/// Largeur de la colonne « Taille ».
+const SIZE_COLUMN_WIDTH: f32 = 110.0;
+/// Nombre maximal de threads qui calculent les tailles de dossiers.
+const MAX_SIZE_WORKERS: usize = 4;
 
-type PreviewResult = (PathBuf, Result<PreviewContent, String>);
+/// Résultat renvoyé à l'interface par un thread de travail.
+enum Event {
+    Preview(PathBuf, Result<PreviewContent, String>),
+    DriveSize(PathBuf, Option<u64>),
+    /// Taille d'un dossier ; `generation` identifie le listing concerné.
+    FolderSize {
+        generation: u64,
+        path: PathBuf,
+        size: u64,
+    },
+}
 
 enum PreviewState {
     None,
@@ -46,11 +63,14 @@ enum Action {
 }
 
 pub struct ExpliaApp {
+    ctx: egui::Context,
     location: Location,
     address: String,
     error: Option<String>,
     drives: Vec<Drive>,
-    places: Vec<Place>,
+    /// Taille totale des lecteurs : absente tant que le calcul est en cours,
+    /// `None` si le lecteur n'est pas prêt.
+    drive_sizes: HashMap<PathBuf, Option<u64>>,
     favorites: Favorites,
     /// Contenu brut du dossier courant.
     entries: Vec<Entry>,
@@ -62,23 +82,28 @@ pub struct ExpliaApp {
     show_preview: bool,
     /// Volet d'aperçu agrandi (flèche « < » / « > »).
     preview_expanded: bool,
+    /// Option : ne pas calculer la taille des dossiers.
+    skip_folder_sizes: bool,
+    /// Identifie le listing courant ; l'incrémenter annule les calculs en cours.
+    folder_generation: Arc<AtomicU64>,
     window_sized: bool,
     selected: Option<Entry>,
     preview: PreviewState,
-    preview_tx: Sender<PreviewResult>,
-    preview_rx: Receiver<PreviewResult>,
+    event_tx: Sender<Event>,
+    event_rx: Receiver<Event>,
 }
 
 impl ExpliaApp {
-    pub fn new() -> Self {
-        let (preview_tx, preview_rx) = mpsc::channel();
+    pub fn new(ctx: egui::Context) -> Self {
+        let (event_tx, event_rx) = mpsc::channel();
         let location = Location::ThisPc;
-        Self {
+        let mut app = Self {
+            ctx,
             address: location.display(),
             location,
             error: None,
             drives: places::detect_drives(),
-            places: places::quick_places(),
+            drive_sizes: HashMap::new(),
             favorites: Favorites::load(favorites::default_file()),
             entries: Vec::new(),
             visible: Vec::new(),
@@ -87,15 +112,84 @@ impl ExpliaApp {
             filter: ExtensionFilter::default(),
             show_preview: true,
             preview_expanded: false,
+            skip_folder_sizes: false,
+            folder_generation: Arc::new(AtomicU64::new(0)),
             window_sized: false,
             selected: None,
             preview: PreviewState::None,
-            preview_tx,
-            preview_rx,
+            event_tx,
+            event_rx,
+        };
+        app.start_drive_sizes();
+        app
+    }
+
+    /// Calcule la taille des lecteurs dans un thread (un lecteur réseau peut être lent).
+    fn start_drive_sizes(&mut self) {
+        self.drive_sizes.clear();
+        let roots: Vec<PathBuf> = self.drives.iter().map(|d| d.path.clone()).collect();
+        let tx = self.event_tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            for root in roots {
+                let size = places::drive_total_size(&root);
+                let _ = tx.send(Event::DriveSize(root, size));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// Lance le calcul de la taille des sous-dossiers du dossier affiché.
+    /// Tout calcul précédent est annulé.
+    fn start_folder_sizes(&mut self) {
+        let generation = self.folder_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.skip_folder_sizes {
+            return;
+        }
+        let folders: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|e| e.is_dir && e.size.is_none())
+            .map(|e| e.path.clone())
+            .collect();
+        if folders.is_empty() {
+            return;
+        }
+        let queue = Arc::new(Mutex::new(folders));
+        let workers = std::thread::available_parallelism()
+            .map_or(2, |n| n.get())
+            .min(MAX_SIZE_WORKERS);
+        for _ in 0..workers {
+            let queue = Arc::clone(&queue);
+            let current = Arc::clone(&self.folder_generation);
+            let tx = self.event_tx.clone();
+            let ctx = self.ctx.clone();
+            std::thread::spawn(move || {
+                let cancelled = || current.load(Ordering::Relaxed) != generation;
+                loop {
+                    let Some(path) = queue.lock().ok().and_then(|mut q| q.pop()) else {
+                        return;
+                    };
+                    let Some(size) = fs_nav::dir_size(&path, &cancelled) else {
+                        return;
+                    };
+                    if tx
+                        .send(Event::FolderSize {
+                            generation,
+                            path,
+                            size,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    ctx.request_repaint();
+                }
+            });
         }
     }
 
-    /// Fenêtre à 80 % de l'écran, centrée ; effectué une seule fois, dès que la taille
+    /// Fenêtre à 60 % de l'écran, centrée ; effectué une seule fois, dès que la taille
     /// de l'écran est connue.
     fn size_window_once(&mut self, ctx: &egui::Context) {
         if self.window_sized {
@@ -130,9 +224,15 @@ impl ExpliaApp {
             Location::ThisPc => {
                 self.drives = places::detect_drives();
                 self.entries.clear();
+                // Annule un éventuel calcul de tailles de dossiers.
+                self.folder_generation.fetch_add(1, Ordering::SeqCst);
+                self.start_drive_sizes();
             }
             Location::Dir(path) => match fs_nav::list_dir(path) {
-                Ok(entries) => self.entries = entries,
+                Ok(entries) => {
+                    self.entries = entries;
+                    self.start_folder_sizes();
+                }
                 Err(err) => {
                     self.error = Some(format!(
                         "Impossible d'ouvrir « {} » : {err}",
@@ -174,22 +274,57 @@ impl ExpliaApp {
             // Le décodage se fait hors du thread d'interface.
             let path = entry.path.clone();
             self.preview = PreviewState::Loading(path.clone());
-            let tx = self.preview_tx.clone();
+            let tx = self.event_tx.clone();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
                 let result = preview::load_preview(&path);
-                let _ = tx.send((path, result));
+                let _ = tx.send(Event::Preview(path, result));
                 ctx.request_repaint();
             });
         }
         self.selected = Some(entry);
     }
 
-    fn poll_preview(&mut self, ctx: &egui::Context) {
-        while let Ok((path, result)) = self.preview_rx.try_recv() {
+    /// Traite les résultats des threads de travail.
+    fn poll_events(&mut self, ctx: &egui::Context) {
+        let mut sizes_changed = false;
+        while let Ok(event) = self.event_rx.try_recv() {
+            match event {
+                Event::Preview(path, result) => self.on_preview(ctx, path, result),
+                Event::DriveSize(path, size) => {
+                    self.drive_sizes.insert(path, size);
+                }
+                Event::FolderSize {
+                    generation,
+                    path,
+                    size,
+                } => {
+                    // Ignore les résultats d'un listing déjà quitté.
+                    if generation != self.folder_generation.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    if let Some(entry) = self.entries.iter_mut().find(|e| e.path == path) {
+                        entry.size = Some(size);
+                        sizes_changed = true;
+                    }
+                }
+            }
+        }
+        if sizes_changed {
+            self.recompute_visible();
+        }
+    }
+
+    fn on_preview(
+        &mut self,
+        ctx: &egui::Context,
+        path: PathBuf,
+        result: Result<PreviewContent, String>,
+    ) {
+        {
             // Ignore les résultats d'une sélection déjà abandonnée.
             if !matches!(&self.preview, PreviewState::Loading(p) if *p == path) {
-                continue;
+                return;
             }
             self.preview = match result {
                 Ok(PreviewContent::Image(img)) => {
@@ -259,9 +394,10 @@ impl ExpliaApp {
         action
     }
 
-    /// Seconde ligne : Trier | Afficher | Extension.
+    /// Seconde ligne : Trier | Afficher | Extension | Option.
     fn options_bar(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
+        let mut sizes_option_changed = false;
         ui.horizontal(|ui| {
             menu(ui, "Trier", |ui| {
                 for (key, label) in [
@@ -304,7 +440,24 @@ impl ExpliaApp {
                     }
                 }
             });
+            ui.separator();
+            menu(ui, "Option", |ui| {
+                sizes_option_changed |= ui
+                    .checkbox(
+                        &mut self.skip_folder_sizes,
+                        "Pas de calcul de taille de dossier",
+                    )
+                    .changed();
+            });
         });
+        if sizes_option_changed {
+            if self.skip_folder_sizes {
+                // Annule les calculs en cours ; les tailles déjà connues restent affichées.
+                self.folder_generation.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.start_folder_sizes();
+            }
+        }
         if changed {
             self.recompute_visible();
         }
@@ -319,15 +472,6 @@ impl ExpliaApp {
             .clicked()
         {
             action = Some(Action::Go(Location::ThisPc));
-        }
-        for place in &self.places {
-            let here = self.location == Location::Dir(place.path.clone());
-            if ui
-                .selectable_label(here, format!("📁 {}", place.name))
-                .clicked()
-            {
-                action = Some(Action::Go(Location::Dir(place.path.clone())));
-            }
         }
         for path in self.favorites.paths() {
             let here = self.location == Location::Dir(path.clone());
@@ -375,25 +519,37 @@ impl ExpliaApp {
         if self.drives.is_empty() {
             ui.label("Aucun lecteur détecté.");
         }
+        table_header(ui);
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
                 for drive in &self.drives {
-                    let label = format!(
+                    let name = format!(
                         "{}  {}   —   {}",
                         drive_icon(drive.kind),
                         drive.label(),
                         drive.kind_name()
                     );
-                    if ui
-                        .add_sized([ui.available_width(), 32.0], egui::Button::new(label))
-                        .clicked()
-                    {
+                    let size = match self.drive_sizes.get(&drive.path) {
+                        None => "…".to_string(),
+                        Some(None) => "—".to_string(),
+                        Some(Some(bytes)) => fs_nav::format_size(*bytes),
+                    };
+                    if table_row(ui, false, &name, &size).clicked() {
                         action = Some(Action::Go(Location::Dir(drive.path.clone())));
                     }
                 }
             });
         action
+    }
+
+    /// Texte de la colonne « Taille » d'une entrée de dossier.
+    fn entry_size_text(&self, entry: &Entry) -> String {
+        match entry.size {
+            Some(bytes) => fs_nav::format_size(bytes),
+            None if entry.is_dir && !self.skip_folder_sizes => "Calcul…".to_string(),
+            None => String::new(),
+        }
     }
 
     fn listing_view(&self, ui: &mut egui::Ui) -> Option<Action> {
@@ -406,7 +562,8 @@ impl ExpliaApp {
             ui.label("Aucun élément ne correspond au filtre d'extension.");
             return None;
         }
-        let row_height = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+        table_header(ui);
+        let row_height = table_row_height(ui) + ui.spacing().item_spacing.y;
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, self.visible.len(), |ui, range| {
@@ -419,8 +576,12 @@ impl ExpliaApp {
                     } else {
                         "📄"
                     };
-                    let response =
-                        ui.selectable_label(is_selected, format!("{icon} {}", entry.name));
+                    let response = table_row(
+                        ui,
+                        is_selected,
+                        &format!("{icon} {}", entry.name),
+                        &self.entry_size_text(entry),
+                    );
                     if response.double_clicked() && entry.is_dir {
                         action = Some(Action::Go(Location::Dir(entry.path.clone())));
                     } else if response.clicked() {
@@ -459,17 +620,27 @@ impl ExpliaApp {
             ui.heading("Aperçu");
         });
         ui.separator();
-        let Some(entry) = &self.selected else {
+        let Some(selected) = &self.selected else {
             ui.weak("Sélectionnez un élément.");
             return toggle;
         };
+        // La taille d'un dossier peut arriver après la sélection : on relit l'entrée à jour.
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.path == selected.path)
+            .unwrap_or(selected);
         ui.label(egui::RichText::new(&entry.name).strong());
         if entry.is_dir {
             ui.label("Dossier");
+            let size = self.entry_size_text(entry);
+            if !size.is_empty() {
+                ui.label(format!("Taille : {size}"));
+            }
             return toggle;
         }
         ui.label(preview::kind_description(&entry.path));
-        ui.label(format!("Taille : {}", fs_nav::format_size(entry.size)));
+        ui.label(format!("Taille : {}", self.entry_size_text(entry)));
         if !preview::is_previewable(&entry.path) {
             ui.add_space(12.0);
             ui.label(egui::RichText::new("📄").size(64.0));
@@ -552,6 +723,87 @@ fn menu(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)
         .ui(ui, add_contents);
 }
 
+fn table_row_height(ui: &egui::Ui) -> f32 {
+    ui.text_style_height(&egui::TextStyle::Body) + 2.0 * ui.spacing().button_padding.y
+}
+
+/// En-tête du tableau : « Nom » à gauche, « Taille » alignée à droite.
+fn table_header(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), table_row_height(ui)),
+        egui::Sense::hover(),
+    );
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().strong_text_color();
+    let pad = ui.spacing().button_padding.x;
+    let painter = ui.painter();
+    painter.text(
+        egui::pos2(rect.left() + pad, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Nom",
+        font.clone(),
+        color,
+    );
+    painter.text(
+        egui::pos2(rect.right() - pad, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        "Taille",
+        font,
+        color,
+    );
+    ui.separator();
+}
+
+/// Ligne du tableau : nom à gauche, taille alignée à droite. Renvoie la réponse au clic.
+fn table_row(ui: &mut egui::Ui, selected: bool, name: &str, size: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), table_row_height(ui)),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let corner = visuals.widgets.inactive.corner_radius;
+        let (background, text_color) = if selected {
+            (
+                Some(visuals.selection.bg_fill),
+                visuals.selection.stroke.color,
+            )
+        } else if response.hovered() {
+            (
+                Some(visuals.widgets.hovered.weak_bg_fill),
+                visuals.text_color(),
+            )
+        } else {
+            (None, visuals.text_color())
+        };
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let pad = ui.spacing().button_padding.x;
+        let painter = ui.painter();
+        if let Some(fill) = background {
+            painter.rect_filled(rect, corner, fill);
+        }
+        let name_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + pad, rect.top()),
+            egui::pos2(rect.right() - SIZE_COLUMN_WIDTH - pad, rect.bottom()),
+        );
+        painter.with_clip_rect(name_rect).text(
+            egui::pos2(name_rect.left(), rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            name,
+            font.clone(),
+            text_color,
+        );
+        painter.text(
+            egui::pos2(rect.right() - pad, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            size,
+            font,
+            text_color,
+        );
+    }
+    response
+}
+
 fn favorite_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -572,7 +824,7 @@ impl eframe::App for ExpliaApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.size_window_once(&ctx);
-        self.poll_preview(&ctx);
+        self.poll_events(&ctx);
         let mut action = None;
 
         egui::Panel::top("toolbar").show(ui, |ui| {

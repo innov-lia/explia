@@ -1,6 +1,6 @@
-//! Emplacements système : lecteurs logiques et dossiers usuels (lecture seule).
+//! Lecteurs logiques de la machine (lecture seule).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriveKind {
@@ -38,13 +38,6 @@ impl Drive {
     }
 }
 
-/// Dossier d'accès rapide (Bureau, Documents, Téléchargements).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Place {
-    pub name: &'static str,
-    pub path: PathBuf,
-}
-
 /// Convertit le masque renvoyé par `GetLogicalDrives` en lettres de lecteur.
 pub fn letters_from_mask(mask: u32) -> Vec<char> {
     (0..26u8)
@@ -53,31 +46,31 @@ pub fn letters_from_mask(mask: u32) -> Vec<char> {
         .collect()
 }
 
-/// Dossiers d'accès rapide qui existent réellement sur la machine.
-pub fn quick_places() -> Vec<Place> {
-    imp::quick_places()
-        .into_iter()
-        .filter(|p| p.path.is_dir())
-        .collect()
-}
-
 /// Lecteurs logiques détectés.
 pub fn detect_drives() -> Vec<Drive> {
     imp::detect_drives()
 }
 
+/// Taille totale d'un lecteur en octets. Peut être lent (lecteur réseau) :
+/// à appeler hors du thread d'interface. `None` si le lecteur n'est pas prêt.
+pub fn drive_total_size(root: &Path) -> Option<u64> {
+    imp::drive_total_size(root)
+}
+
+/// Évite les boîtes de dialogue système quand un lecteur est vide (CD, lecteur amovible).
+pub fn suppress_drive_error_dialogs() {
+    imp::suppress_drive_error_dialogs();
+}
+
 #[cfg(windows)]
 mod imp {
-    use super::{Drive, DriveKind, Place, letters_from_mask};
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
-    use std::path::PathBuf;
-    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
-    use windows_sys::Win32::System::Com::CoTaskMemFree;
-    use windows_sys::Win32::UI::Shell::{
-        FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, SHGetKnownFolderPath,
+    use super::{Drive, DriveKind, letters_from_mask};
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
     };
-    use windows_sys::core::GUID;
+    use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetErrorMode};
 
     // Valeurs de retour documentées de `GetDriveTypeW`.
     const DRIVE_REMOVABLE: u32 = 2;
@@ -113,57 +106,32 @@ mod imp {
             .collect()
     }
 
-    fn known_folder(id: &GUID) -> Option<PathBuf> {
-        let mut raw: *mut u16 = std::ptr::null_mut();
-        // SAFETY: `id` est valide, `raw` reçoit une chaîne allouée par le shell
-        // que l'on libère avec `CoTaskMemFree` après copie.
-        let hr = unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut raw) };
-        let path = if hr >= 0 && !raw.is_null() {
-            let mut len = 0usize;
-            // SAFETY: la chaîne renvoyée est terminée par un zéro.
-            unsafe {
-                while *raw.add(len) != 0 {
-                    len += 1;
-                }
-                Some(PathBuf::from(OsString::from_wide(
-                    std::slice::from_raw_parts(raw, len),
-                )))
-            }
-        } else {
-            None
+    pub fn drive_total_size(root: &Path) -> Option<u64> {
+        let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut total: u64 = 0;
+        // SAFETY: `wide` est terminée par un zéro ; `total` est un `u64` valide en écriture ;
+        // les autres pointeurs de sortie sont optionnels et laissés nuls.
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                std::ptr::null_mut(),
+                &mut total,
+                std::ptr::null_mut(),
+            )
         };
-        // SAFETY: `CoTaskMemFree` accepte un pointeur nul ou alloué par le shell.
-        unsafe { CoTaskMemFree(raw.cast()) };
-        path
+        (ok != 0).then_some(total)
     }
 
-    pub fn quick_places() -> Vec<Place> {
-        let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
-        let fallback = |name: &str| home.as_ref().map(|h| h.join(name));
-        [
-            (
-                "Bureau",
-                known_folder(&FOLDERID_Desktop).or_else(|| fallback("Desktop")),
-            ),
-            (
-                "Documents",
-                known_folder(&FOLDERID_Documents).or_else(|| fallback("Documents")),
-            ),
-            (
-                "Téléchargements",
-                known_folder(&FOLDERID_Downloads).or_else(|| fallback("Downloads")),
-            ),
-        ]
-        .into_iter()
-        .filter_map(|(name, path)| path.map(|path| Place { name, path }))
-        .collect()
+    pub fn suppress_drive_error_dialogs() {
+        // SAFETY: ne modifie que le mode d'erreur du processus courant.
+        unsafe { SetErrorMode(SEM_FAILCRITICALERRORS) };
     }
 }
 
 #[cfg(not(windows))]
 mod imp {
-    use super::{Drive, DriveKind, Place};
-    use std::path::PathBuf;
+    use super::{Drive, DriveKind};
+    use std::path::{Path, PathBuf};
 
     pub fn detect_drives() -> Vec<Drive> {
         vec![Drive {
@@ -172,22 +140,11 @@ mod imp {
         }]
     }
 
-    pub fn quick_places() -> Vec<Place> {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return Vec::new();
-        };
-        [
-            ("Bureau", "Desktop"),
-            ("Documents", "Documents"),
-            ("Téléchargements", "Downloads"),
-        ]
-        .into_iter()
-        .map(|(name, dir)| Place {
-            name,
-            path: home.join(dir),
-        })
-        .collect()
+    pub fn drive_total_size(_root: &Path) -> Option<u64> {
+        None
     }
+
+    pub fn suppress_drive_error_dialogs() {}
 }
 
 #[cfg(test)]
@@ -212,7 +169,16 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn detects_at_least_one_drive() {
-        assert!(!detect_drives().is_empty());
+    fn detects_at_least_one_drive_with_a_size() {
+        let drives = detect_drives();
+        assert!(!drives.is_empty());
+        let system_drive = Path::new("C:\\");
+        assert!(drive_total_size(system_drive).is_some_and(|size| size > 0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn size_of_missing_path_is_none() {
+        assert_eq!(drive_total_size(Path::new("Z:\\inexistant-explia\\")), None);
     }
 }

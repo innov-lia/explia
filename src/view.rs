@@ -98,7 +98,12 @@ pub fn sort_entries(entries: &mut [Entry], key: SortKey, order: SortOrder) {
         let by_name = || a.name.to_lowercase().cmp(&b.name.to_lowercase());
         let ordering = match key {
             SortKey::Name => by_name(),
-            SortKey::Size => a.size.cmp(&b.size).then_with(by_name),
+            // Un dossier dont la taille n'est pas encore connue compte pour 0.
+            SortKey::Size => a
+                .size
+                .unwrap_or(0)
+                .cmp(&b.size.unwrap_or(0))
+                .then_with(by_name),
             SortKey::Type => extension_of(&a.path)
                 .cmp(&extension_of(&b.path))
                 .then_with(by_name),
@@ -121,7 +126,7 @@ mod tests {
             name: name.to_string(),
             path: PathBuf::from(name),
             is_dir: false,
-            size,
+            size: Some(size),
         }
     }
 
@@ -130,7 +135,7 @@ mod tests {
             name: name.to_string(),
             path: PathBuf::from(name),
             is_dir: true,
-            size: 0,
+            size: None,
         }
     }
 
@@ -154,6 +159,18 @@ mod tests {
         assert_eq!(names(&v), ["b", "c", "a"]);
         sort_entries(&mut v, SortKey::Size, SortOrder::Descending);
         assert_eq!(names(&v), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn sort_by_size_uses_computed_folder_sizes() {
+        let mut big = dir("big");
+        big.size = Some(500);
+        let mut small = dir("small");
+        small.size = Some(5);
+        let unknown = dir("unknown");
+        let mut v = vec![big, unknown, small];
+        sort_entries(&mut v, SortKey::Size, SortOrder::Descending);
+        assert_eq!(names(&v), ["big", "small", "unknown"]);
     }
 
     #[test]
