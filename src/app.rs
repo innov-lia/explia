@@ -81,6 +81,8 @@ enum Action {
     LongPress(Entry),
     /// Clic sur une ligne pendant la multi-sélection : l'ajoute ou la retire.
     ToggleMulti(Entry),
+    /// Maj+clic : sélectionne tout entre le dernier élément choisi et celui-ci.
+    SelectRange(Entry),
     /// Quitte la multi-sélection.
     ClearMulti,
     /// Demande confirmation avant de supprimer la sélection.
@@ -127,6 +129,8 @@ pub struct ExpliaApp {
     selected: Option<Entry>,
     /// Multi-sélection : un seul type à la fois (tous dossiers, ou tous fichiers).
     multi: Vec<Entry>,
+    /// Dernier élément choisi : point de départ d'une sélection Maj+clic.
+    anchor: Option<PathBuf>,
     /// Attente de confirmation de la suppression de la multi-sélection.
     confirm_delete: bool,
     /// Un clic maintenu vient d'être traité : le relâchement ne doit pas compter comme un clic.
@@ -171,6 +175,7 @@ impl ExpliaApp {
             saved_settings: settings,
             selected: None,
             multi: Vec::new(),
+            anchor: None,
             confirm_delete: false,
             long_press_done: false,
             notice: None,
@@ -310,9 +315,40 @@ impl ExpliaApp {
         self.location = target;
         self.selected = None;
         self.multi.clear();
+        self.anchor = None;
         self.confirm_delete = false;
         self.preview = PreviewState::None;
         self.recompute_visible();
+    }
+
+    /// Maj+clic : sélectionne la plage entre l'ancre (dernier élément choisi) et `entry`.
+    fn select_range(&mut self, entry: Entry) {
+        let anchor = self
+            .anchor
+            .clone()
+            .or_else(|| self.selected.as_ref().map(|s| s.path.clone()));
+        let Some(anchor) = anchor else {
+            // Rien de choisi avant : Maj+clic démarre simplement la sélection.
+            self.toggle_multi(entry);
+            return;
+        };
+        match view::select_range(&self.visible, &anchor, &entry.path) {
+            Ok(range) => {
+                self.confirm_delete = false;
+                self.selected = None;
+                self.preview = PreviewState::None;
+                self.error = None;
+                self.anchor = Some(anchor);
+                self.multi = range;
+            }
+            Err(view::RangeError::MixedTypes) => {
+                self.error = Some(
+                    "Sélection d'un seul type à la fois : dossiers ou fichiers, pas les deux."
+                        .to_string(),
+                );
+            }
+            Err(view::RangeError::NotFound) => self.toggle_multi(entry),
+        }
     }
 
     /// Relit le dossier affiché (après une suppression, par exemple).
@@ -352,6 +388,7 @@ impl ExpliaApp {
             return;
         }
         self.error = None;
+        self.anchor = Some(entry.path.clone());
         self.multi.push(entry);
     }
 
@@ -405,6 +442,7 @@ impl ExpliaApp {
                 ctx.request_repaint();
             });
         }
+        self.anchor = Some(entry.path.clone());
         self.selected = Some(entry);
     }
 
@@ -489,6 +527,7 @@ impl ExpliaApp {
                 self.toggle_multi(entry);
             }
             Action::ToggleMulti(entry) => self.toggle_multi(entry),
+            Action::SelectRange(entry) => self.select_range(entry),
             Action::ClearMulti => {
                 self.multi.clear();
                 self.confirm_delete = false;
@@ -895,10 +934,13 @@ impl ExpliaApp {
                     if response.long_touched() {
                         action = Some(Action::LongPress(entry.clone()));
                     }
-                    let ctrl_click = response.clicked() && ui.input(|i| i.modifiers.command);
-                    if ctrl_click {
+                    let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                    if response.clicked() && ctrl {
                         // Ctrl+clic : ajoute ou retire la ligne de la sélection multiple.
                         action = Some(Action::ToggleMulti(entry.clone()));
+                    } else if response.clicked() && shift {
+                        // Maj+clic : sélectionne toute la plage depuis le dernier élément choisi.
+                        action = Some(Action::SelectRange(entry.clone()));
                     } else if self.long_press_done {
                         // Le relâchement qui suit un clic maintenu n'est pas un clic.
                     } else if response.double_clicked() && !multi_mode {
@@ -1179,7 +1221,7 @@ impl ExpliaApp {
                         self.entries.len()
                     )
                 };
-                format!("{count}   |   Sélection multiple : clic maintenu ou Ctrl+clic")
+                format!("{count}   |   Sélection multiple : clic maintenu, Ctrl+clic ou Maj+clic")
             }
         }
     }
