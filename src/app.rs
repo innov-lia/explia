@@ -1579,12 +1579,30 @@ impl ExpliaApp {
             .and_then(|path| self.nav_list().iter().position(|e| e.path == *path))
     }
 
+    /// Le dossier affiché est dans le dossier de l'utilisateur (« Home »).
+    fn in_home(&self) -> bool {
+        match (&self.location, &self.home) {
+            (Location::Dir(path), Some(home)) => path.starts_with(home),
+            _ => false,
+        }
+    }
+
+    /// Les colonnes « lecteurs » et « navigation » à gauche de la grille ne s'affichent que hors
+    /// de Home : dans Home, le chemin et la barre latérale (onglet Home) suffisent.
+    fn grid_side_columns(&self) -> bool {
+        !self.in_home()
+    }
+
     /// Le fichier figure dans la grille : les images en mode « Images », les vidéos en mode
     /// « Vidéos ». Hors grille, tout est affiché (les dossiers sont dans la colonne de navigation).
     fn in_grid(&self, entry: &Entry) -> bool {
+        // Sans colonne de navigation (dossier de Home), les dossiers sont des tuiles de la grille.
+        let folder = entry.is_dir && !self.grid_side_columns();
         match self.view_mode {
-            ViewMode::Gallery => !entry.is_dir && preview::is_supported_image(&entry.path),
-            ViewMode::Videos => !entry.is_dir && preview::is_video(&entry.path),
+            ViewMode::Gallery => {
+                folder || (!entry.is_dir && preview::is_supported_image(&entry.path))
+            }
+            ViewMode::Videos => folder || (!entry.is_dir && preview::is_video(&entry.path)),
             ViewMode::List | ViewMode::Columns => true,
         }
     }
@@ -2119,9 +2137,13 @@ impl ExpliaApp {
         action
     }
 
-    /// Mode « grille d'images » : trois zones côte à côte, toujours présentes — les lecteurs,
-    /// une colonne de navigation (`..` et sous-dossiers), puis la grille de miniatures.
+    /// Mode « grille » : hors de Home, trois zones côte à côte — les lecteurs, une colonne de
+    /// navigation (`..` et sous-dossiers), puis la grille. Dans Home, la grille seule (avec les
+    /// dossiers en tuiles pour pouvoir y entrer).
     fn gallery_layout(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        if !self.grid_side_columns() {
+            return self.gallery_view(ui);
+        }
         let mut action = None;
         let height = ui.available_height();
         let gap = ui.spacing().item_spacing.x * 2.0 + 1.0;
