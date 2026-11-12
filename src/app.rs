@@ -1925,6 +1925,10 @@ impl ExpliaApp {
                 width
             }
         };
+        // La dernière colonne porte aussi les informations de la liste (taille, dates…).
+        let info_columns = self.active_columns();
+        let info_width: f32 = info_columns.iter().map(|column| column.width()).sum();
+        let current_width = current_width + info_width;
         // Largeur de chaque colonne : adaptée à son contenu ; si la place le permet, la dernière
         // colonne occupe le reste de la largeur disponible.
         let mut widths: Vec<f32> = crumbs
@@ -1977,6 +1981,17 @@ impl ExpliaApp {
                             ui.set_width(widths[level]);
                             ui.set_height(height);
                             ui.add(egui::Label::new(egui::RichText::new(name).weak()).truncate());
+                            if is_last {
+                                table_header(ui, &info_columns);
+                            } else {
+                                // Même hauteur que l'en-tête de la dernière colonne : les lignes
+                                // des colonnes restent alignées.
+                                ui.allocate_exact_size(
+                                    egui::vec2(1.0, row_height),
+                                    egui::Sense::hover(),
+                                );
+                                ui.separator();
+                            }
                             let mut area = egui::ScrollArea::vertical()
                                 .id_salt(("column", level))
                                 .auto_shrink([false; 2]);
@@ -1995,7 +2010,8 @@ impl ExpliaApp {
                                             && let Some(state) = rename.as_mut()
                                             && state.path == entry.path
                                         {
-                                            if let Some(rename_action) = rename_row(ui, state, 0.0)
+                                            if let Some(rename_action) =
+                                                rename_row(ui, state, info_width)
                                             {
                                                 action = Some(rename_action);
                                             }
@@ -2010,13 +2026,23 @@ impl ExpliaApp {
                                             next_dir.is_some_and(|next| *next == entry.path)
                                         };
                                         let icon = if entry.is_dir { "📁" } else { "📄" };
+                                        let cells: Vec<String> = if is_last {
+                                            info_columns
+                                                .iter()
+                                                .map(|column| self.entry_cell(entry, *column))
+                                                .collect()
+                                        } else {
+                                            Vec::new()
+                                        };
+                                        let row_columns: &[Column] =
+                                            if is_last { &info_columns } else { &[] };
                                         let response = table_row(
                                             ui,
                                             highlighted,
                                             entry.hidden,
                                             &format!("{icon} {}", entry.name),
-                                            &[],
-                                            &[],
+                                            row_columns,
+                                            &cells,
                                         );
                                         let (ctrl, shift) =
                                             ui.input(|i| (i.modifiers.command, i.modifiers.shift));
