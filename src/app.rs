@@ -24,6 +24,8 @@ pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
 const PREVIEW_EXPANDED_RATIO: f32 = 0.65;
 /// Durée du clic maintenu qui démarre la multi-sélection, en secondes.
 const LONG_PRESS_SECONDS: f64 = 0.5;
+/// Déplacement maximal du pointeur, en points, pendant un clic maintenu.
+const LONG_PRESS_TOLERANCE: f32 = 12.0;
 /// Largeur de la colonne « Taille ».
 const SIZE_COLUMN_WIDTH: f32 = 110.0;
 /// Nombre maximal de threads qui calculent les tailles de dossiers.
@@ -835,6 +837,11 @@ impl ExpliaApp {
         let row_height = table_row_height(ui) + ui.spacing().item_spacing.y;
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
+            // Un clic maintenu ne doit pas faire défiler la liste.
+            .scroll_source(
+                egui::scroll_area::ScrollSource::SCROLL_BAR
+                    | egui::scroll_area::ScrollSource::MOUSE_WHEEL,
+            )
             .show_rows(ui, row_height, self.visible.len(), |ui, range| {
                 for entry in &self.visible[range] {
                     let is_selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path)
@@ -858,17 +865,41 @@ impl ExpliaApp {
                     );
                     let multi_mode = !self.multi.is_empty();
                     // Clic maintenu : démarre la multi-sélection (ou ajoute la ligne).
-                    if response.is_pointer_button_down_on() && !self.long_press_done {
-                        let held = ui.input(|i| i.pointer.press_start_time().map(|t| i.time - t));
-                        if held.is_some_and(|seconds| seconds >= LONG_PRESS_SECONDS) {
-                            action = Some(Action::LongPress(entry.clone()));
-                        } else {
-                            // Réveille l'interface pour détecter la fin du délai.
-                            ui.ctx()
-                                .request_repaint_after(std::time::Duration::from_millis(100));
+                    // La détection se fait sur la position du pointeur, avec une tolérance
+                    // pour les mouvements de la main, sans dépendre de l'état du widget.
+                    if !self.long_press_done {
+                        let held = ui.input(|i| {
+                            if !i.pointer.primary_down() {
+                                return None;
+                            }
+                            let origin = i.pointer.press_origin()?;
+                            let position = i.pointer.latest_pos()?;
+                            let started = i.pointer.press_start_time()?;
+                            let on_this_row = response.rect.contains(origin)
+                                && origin.distance(position) <= LONG_PRESS_TOLERANCE;
+                            on_this_row.then_some(i.time - started)
+                        });
+                        match held {
+                            Some(seconds) if seconds >= LONG_PRESS_SECONDS => {
+                                action = Some(Action::LongPress(entry.clone()));
+                            }
+                            Some(_) => {
+                                // Réveille l'interface pour détecter la fin du délai.
+                                ui.ctx()
+                                    .request_repaint_after(std::time::Duration::from_millis(100));
+                            }
+                            None => {}
                         }
                     }
-                    if self.long_press_done {
+                    // Appui long sur écran tactile.
+                    if response.long_touched() {
+                        action = Some(Action::LongPress(entry.clone()));
+                    }
+                    let ctrl_click = response.clicked() && ui.input(|i| i.modifiers.command);
+                    if ctrl_click {
+                        // Ctrl+clic : ajoute ou retire la ligne de la sélection multiple.
+                        action = Some(Action::ToggleMulti(entry.clone()));
+                    } else if self.long_press_done {
                         // Le relâchement qui suit un clic maintenu n'est pas un clic.
                     } else if response.double_clicked() && !multi_mode {
                         // Dossier : on entre ; fichier : on l'ouvre avec son application.
@@ -1138,14 +1169,18 @@ impl ExpliaApp {
     fn status_text(&self) -> String {
         match &self.location {
             Location::ThisPc => format!("{} lecteur(s)", self.drives.len()),
-            Location::Dir(_) if self.visible.len() == self.entries.len() => {
-                format!("{} élément(s)", self.entries.len())
+            Location::Dir(_) => {
+                let count = if self.visible.len() == self.entries.len() {
+                    format!("{} élément(s)", self.entries.len())
+                } else {
+                    format!(
+                        "{} élément(s) affiché(s) sur {}",
+                        self.visible.len(),
+                        self.entries.len()
+                    )
+                };
+                format!("{count}   |   Sélection multiple : clic maintenu ou Ctrl+clic")
             }
-            Location::Dir(_) => format!(
-                "{} élément(s) affiché(s) sur {}",
-                self.visible.len(),
-                self.entries.len()
-            ),
         }
     }
 }
