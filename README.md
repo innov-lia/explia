@@ -49,6 +49,8 @@ ExPLIA n'embarque aucun lecteur. Pour lire les vidéos et les sons **dans ExPLIA
 cargo run --release
 ```
 
+L'exécutable est produit dans `target\release\explia.exe`. Le fichier `.cargo/config.toml` du dépôt lie le runtime C de Microsoft **statiquement** (`-C target-feature=+crt-static`) : `explia.exe` fonctionne donc sur un Windows qui n'a pas le « Visual C++ Redistributable », sans autre action de votre part. Ne définissez pas la variable d'environnement `RUSTFLAGS` en compilant, car elle remplace ce réglage.
+
 ## Vérifications
 
 ```bash

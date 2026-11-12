@@ -1,0 +1,4 @@
+# Édition de liens statique du runtime C (CRT) de Microsoft : l'exécutable ne dépend pas du
+# « Visual C++ Redistributable » et démarre sur un Windows qui ne l'a pas installé.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
