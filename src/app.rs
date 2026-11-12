@@ -2252,7 +2252,14 @@ impl ExpliaApp {
                             wanted.push(entry.path.clone());
                         }
                         let response = gallery_tile(ui, entry, selected, thumb);
-                        if response.double_clicked() {
+                        let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                        if response.clicked() && ctrl {
+                            // Ctrl+clic : ajoute ou retire la tuile de la sélection multiple.
+                            action = Some(Action::ToggleMulti(entry.clone()));
+                        } else if response.clicked() && shift {
+                            // Maj+clic : sélectionne la plage depuis la dernière tuile choisie.
+                            action = Some(Action::SelectRange(entry.clone()));
+                        } else if response.double_clicked() {
                             action = Some(if entry.is_dir {
                                 Action::Go(Location::Dir(entry.path.clone()))
                             } else {

@@ -42,7 +42,7 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 - **Lecture audio et vidéo intégrée** (⚠ **VLC requis**, voir ci-dessous) : « ▶ Lire », double-clic ou Entrée sur un fichier audio ou vidéo le lit dans le volet, avec lecture / pause (bouton ou **Espace**), arrêt, barre de position et volume. « ↗ Lecteur externe » (ou clic droit) l'ouvre dans l'application par défaut de Windows.
 
 ### Sélection et actions
-- **Sélection multiple** : **clic maintenu** (0,5 s) sur une ligne pour démarrer, puis un clic sur chaque ligne à ajouter ou retirer ; **Ctrl+clic** ajoute ou retire une ligne (liste et colonnes « style Mac ») ; **Maj+clic** (ou **Maj+↑/↓**) sélectionne la plage. Un seul type à la fois : uniquement des dossiers, ou uniquement des fichiers.
+- **Sélection multiple** : **clic maintenu** (0,5 s) sur une ligne pour démarrer, puis un clic sur chaque ligne à ajouter ou retirer ; **Ctrl+clic** ajoute ou retire une ligne (liste, colonnes « style Mac » et grilles) ; **Maj+clic** (ou **Maj+↑/↓**) sélectionne la plage. Un seul type à la fois : uniquement des dossiers, ou uniquement des fichiers.
 - **Volet « Actions »** : un clic sur un dossier (ou une multi-sélection) transforme l'aperçu du volet de détail en actions ; sur un fichier, les boutons s'ajoutent sous l'aperçu.
 - **Renommer** : **F2**, bouton « Renommer » ou clic droit, directement dans la liste ou la dernière colonne de la vue en colonnes (Entrée valide, Échap annule ; l'extension n'est pas sélectionnée). Les noms interdits par Windows sont refusés et un élément existant n'est jamais écrasé.
 - **Supprimer** : **Suppr** ou bouton « Supprimer », vers la **corbeille de Windows** (récupérable). Le bouton devient « Confirmer » **à la même place** (un second clic au même endroit valide ; « Annuler » est juste à côté) ; au clavier, **Suppr** puis **Entrée**, Échap annule. Un double-clic accidentel est ignoré pendant 0,6 s.
@@ -88,7 +88,7 @@ ExPLIA n'embarque aucun lecteur. Pour lire les vidéos et les sons **dans ExPLIA
 
 - Préversion (0.1.0), testée sur Windows 11 uniquement ; exécutable non signé.
 - Lecture intégrée vérifiée avec une vidéo AVI ; MP4 et MKV réels, et le son avec réglage du volume, ne sont pas encore testés.
-- La ligne `..` existe dans la liste et dans la colonne de navigation de la grille d'images (pas dans la vue en colonnes, où les niveaux précédents sont visibles) ; Ctrl+clic fonctionne dans la liste et les colonnes, pas dans la grille d'images. Dans la grille, **←** déplace la sélection : utilisez Retour arrière pour remonter.
+- La ligne `..` existe dans la liste et dans la colonne de navigation de la grille d'images (pas dans la vue en colonnes, où les niveaux précédents sont visibles) ; Ctrl+clic et Maj+clic fonctionnent dans la liste, les colonnes et les grilles. Dans la grille, **←** déplace la sélection : utilisez Retour arrière pour remonter.
 - Pas encore disponible : copier / couper / coller et déplacer, créer un dossier ou un fichier, recherche, onglets, historique précédent / suivant.
 
 ## Pour les développeurs
