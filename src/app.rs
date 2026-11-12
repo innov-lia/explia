@@ -20,7 +20,7 @@ use crate::player::{self, Player, PlayerState};
 use crate::preview::{self, ArchivePreview, ImagePreview, PreviewContent, TextPreview};
 use crate::settings::Settings;
 use crate::trash;
-use crate::view::{self, Category, Columns, ExtensionFilter, Side, SortKey, SortOrder, ViewMode};
+use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
 
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
 pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
@@ -54,11 +54,13 @@ const COLUMN_VIEW_MIN_WIDTH: f32 = 150.0;
 const COLUMN_VIEW_MAX_WIDTH: f32 = 340.0;
 /// Largeur des onglets (« intercalaires ») du classeur de la barre latérale.
 const SIDEBAR_TAB_WIDTH: f32 = 26.0;
-/// Marge intérieure du panneau de la barre latérale, à droite des onglets.
-const SIDEBAR_MARGIN: f32 = 8.0;
+/// Largeur d'ouverture de la barre latérale, en points.
+const SIDEBAR_DEFAULT_WIDTH: f32 = 250.0;
 /// Hauteur de la barre d'occupation d'un lecteur.
 const DRIVE_BAR_HEIGHT: f32 = 16.0;
 /// Largeurs des deux colonnes à gauche de la grille d'images : lecteurs et navigation.
+/// Largeur de la barre de recherche, en haut de la zone centrale.
+const SEARCH_WIDTH: f32 = 300.0;
 const GALLERY_DRIVES_WIDTH: f32 = 170.0;
 const GALLERY_NAV_WIDTH: f32 = 210.0;
 /// Agrandissement du texte et des boutons des barres du haut, en points.
@@ -284,9 +286,6 @@ pub struct ExpliaApp {
     drive_infos: HashMap<PathBuf, Option<DriveInfo>>,
     /// Option : barre d'occupation et pourcentage des lecteurs.
     show_drive_usage: bool,
-    /// Bord droit du bouton « Extension » : la barre latérale s'ouvre à cette largeur,
-    /// pour que ses onglets s'alignent sur lui.
-    extension_right: Option<f32>,
     /// Disposition : côté de la barre latérale, de ses onglets et du volet de détail.
     sidebar_side: Side,
     tabs_side: Side,
@@ -312,7 +311,10 @@ pub struct ExpliaApp {
     visible: Vec<Entry>,
     sort_key: SortKey,
     sort_order: SortOrder,
-    filter: ExtensionFilter,
+    /// Recherche (barre au-dessus de la liste) : motifs de noms, voir `view::matches_query`.
+    search: String,
+    /// Donne le focus à la barre de recherche à la prochaine image (Ctrl+F).
+    focus_search: bool,
     show_preview: bool,
     /// Volet d'aperçu agrandi (flèche « < » / « > »).
     preview_expanded: bool,
@@ -395,7 +397,6 @@ impl ExpliaApp {
             drives: Vec::new(),
             drive_infos: HashMap::new(),
             show_drive_usage: settings.show_drive_usage,
-            extension_right: None,
             sidebar_side: settings.sidebar_side,
             tabs_side: settings.tabs_side,
             preview_side: settings.preview_side,
@@ -411,10 +412,8 @@ impl ExpliaApp {
             visible: Vec::new(),
             sort_key: settings.sort_key,
             sort_order: settings.sort_order,
-            filter: ExtensionFilter::new(
-                settings.categories.clone(),
-                settings.custom_extensions.clone(),
-            ),
+            search: String::new(),
+            focus_search: false,
             show_preview: settings.show_preview,
             preview_expanded: settings.preview_expanded,
             skip_folder_sizes: settings.skip_folder_sizes,
@@ -591,10 +590,14 @@ impl ExpliaApp {
     }
 
     /// Applique le filtre d'extension, le masquage des éléments cachés et le tri à une liste.
-    fn filtered_and_sorted(&self, entries: &[Entry]) -> Vec<Entry> {
+    /// `with_search` : applique aussi la recherche (dossier affiché, pas les colonnes parentes).
+    fn filtered_and_sorted(&self, entries: &[Entry], with_search: bool) -> Vec<Entry> {
         let mut list: Vec<Entry> = entries
             .iter()
-            .filter(|entry| (self.show_hidden || !entry.hidden) && self.filter.matches(entry))
+            .filter(|entry| {
+                (self.show_hidden || !entry.hidden)
+                    && (!with_search || view::matches_query(&entry.name, &self.search))
+            })
             .cloned()
             .collect();
         view::sort_entries(&mut list, self.sort_key, self.sort_order);
@@ -602,7 +605,7 @@ impl ExpliaApp {
     }
 
     fn recompute_visible(&mut self) {
-        self.visible = self.filtered_and_sorted(&self.entries);
+        self.visible = self.filtered_and_sorted(&self.entries, true);
     }
 
     /// Famille multimédia d'un fichier si une colonne affichée a besoin de la lire.
@@ -734,6 +737,8 @@ impl ExpliaApp {
         self.notice = None;
         self.drives_focus = false;
         self.drive_cursor = None;
+        // La recherche vaut pour le dossier affiché : un nouveau dossier repart sans filtre.
+        self.search.clear();
         self.address = target.display();
         self.location = target;
         self.selected = None;
@@ -1298,8 +1303,6 @@ impl ExpliaApp {
             view_mode: self.view_mode,
             show_hidden: self.show_hidden,
             columns: self.columns,
-            categories: self.filter.categories().to_vec(),
-            custom_extensions: self.filter.custom().to_string(),
             favorites: self.favorites.paths().to_vec(),
             applications: self.applications.paths().to_vec(),
             sidebar_side: self.sidebar_side,
@@ -1342,21 +1345,52 @@ impl ExpliaApp {
         });
     }
 
-    /// Première ligne : Ce PC, fil d'Ariane (ou saisie du chemin).
-    fn address_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+    /// Haut de la zone centrale : Ce PC, fil d'Ariane (ou saisie du chemin) et barre de recherche.
+    fn location_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         ui.horizontal(|ui| {
+            enlarge_toolbar(ui);
             if ui.button("🖥 Ce PC").clicked() {
                 action = Some(Action::Go(Location::ThisPc));
             }
-            if self.address_editing {
-                self.address_edit(ui);
-            } else {
-                let crumb_action = self.breadcrumb_bar(ui);
-                action = crumb_action.or(action.take());
-            }
+            let spacing = ui.spacing().item_spacing.x;
+            let search_width = SEARCH_WIDTH.min(ui.available_width() * 0.4);
+            let address_width = (ui.available_width() - search_width - spacing).max(80.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(address_width, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    if self.address_editing {
+                        self.address_edit(ui);
+                    } else {
+                        let crumb_action = self.breadcrumb_bar(ui);
+                        action = crumb_action.or(action.take());
+                    }
+                },
+            );
+            self.search_box(ui, search_width);
         });
         action
+    }
+
+    /// Barre de recherche : filtre le dossier affiché par nom (voir `view::matches_query`).
+    /// Ctrl+F lui donne le focus ; Échap l'efface.
+    fn search_box(&mut self, ui: &mut egui::Ui, width: f32) {
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .desired_width(width)
+                .hint_text("🔍 Rechercher : nom, *.exe, a*.txt…"),
+        );
+        if std::mem::take(&mut self.focus_search) {
+            edit.request_focus();
+        }
+        if edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.search.clear();
+            edit.surrender_focus();
+            self.recompute_visible();
+        } else if edit.changed() {
+            self.recompute_visible();
+        }
     }
 
     /// Mode saisie : Entrée valide, Échap ou clic ailleurs annule.
@@ -1441,32 +1475,12 @@ impl ExpliaApp {
 
     /// Seconde ligne : Trier | Afficher | Extension | Option.
     fn options_bar(&mut self, ui: &mut egui::Ui) {
-        let mut changed = false;
         let mut sizes_option_changed = false;
         let mut columns_changed = false;
         let mut new_view_mode = None;
         let mut toggle_hidden = false;
         let mut hidden_shown = self.show_hidden;
         ui.horizontal(|ui| {
-            menu(ui, "Trier", |ui| {
-                for (key, label) in [
-                    (SortKey::Name, "Nom"),
-                    (SortKey::Size, "Taille"),
-                    (SortKey::Type, "Type"),
-                    (SortKey::Modified, "Date de modification"),
-                    (SortKey::Created, "Date de création"),
-                ] {
-                    changed |= ui.radio_value(&mut self.sort_key, key, label).changed();
-                }
-                ui.separator();
-                for (order, label) in [
-                    (SortOrder::Ascending, "Croissant"),
-                    (SortOrder::Descending, "Décroissant"),
-                ] {
-                    changed |= ui.radio_value(&mut self.sort_order, order, label).changed();
-                }
-            });
-            ui.separator();
             menu(ui, "Afficher", |ui| {
                 ui.weak("Colonnes");
                 for (flag, label) in [
@@ -1514,37 +1528,6 @@ impl ExpliaApp {
                 }
             });
             ui.separator();
-            let title = if self.filter.is_all() {
-                "Extension".to_string()
-            } else {
-                format!("Extension ({})", self.filter.count())
-            };
-            let extension = menu(ui, &title, |ui| {
-                let mut all = self.filter.is_all();
-                if ui.checkbox(&mut all, "Tout").clicked() {
-                    self.filter.clear();
-                    changed = true;
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Custom");
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(self.filter.custom_mut())
-                            .desired_width(110.0)
-                            .hint_text("ex. mkv, pdf"),
-                    );
-                    changed |= edit.changed();
-                });
-                ui.separator();
-                for category in Category::ALL {
-                    let mut on = self.filter.has_category(category);
-                    if ui.checkbox(&mut on, category.label()).changed() {
-                        self.filter.set_category(category, on);
-                        changed = true;
-                    }
-                }
-            });
-            self.extension_right = Some(extension.rect.right());
-            ui.separator();
             menu(ui, "Option", |ui| {
                 sizes_option_changed |= ui
                     .checkbox(
@@ -1578,11 +1561,6 @@ impl ExpliaApp {
             let ctx = ui.ctx().clone();
             self.apply(&ctx, Action::ToggleHidden);
         }
-        if changed {
-            self.recompute_visible();
-            // Les colonnes de la vue « style Mac » dépendent du tri et du filtre.
-            self.invalidate_columns();
-        }
     }
 
     /// Position, dans la liste affichée, de la ligne courante (curseur ou sélection).
@@ -1611,19 +1589,16 @@ impl ExpliaApp {
     /// Panneau de la barre latérale, à gauche ou à droite selon la disposition.
     fn sidebar_panel(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        // Largeur d'ouverture : à gauche avec les onglets à droite, le bord droit des onglets
-        // s'aligne sur le bouton « Extension ».
-        let width = match (self.extension_right, self.sidebar_side, self.tabs_side) {
-            (Some(right), Side::Left, Side::Right) => right + SIDEBAR_MARGIN,
-            _ => 240.0,
-        };
         let panel = match self.sidebar_side {
             Side::Left => egui::Panel::left("sidebar-left"),
             Side::Right => egui::Panel::right("sidebar-right"),
         };
-        panel.default_size(width).resizable(true).show(ui, |ui| {
-            action = self.sidebar(ui);
-        });
+        panel
+            .default_size(SIDEBAR_DEFAULT_WIDTH)
+            .resizable(true)
+            .show(ui, |ui| {
+                action = self.sidebar(ui);
+            });
         action
     }
 
@@ -1944,7 +1919,7 @@ impl ExpliaApp {
             if !self.column_cache.contains_key(path)
                 && let Ok(list) = fs_nav::list_dir(path)
             {
-                let processed = self.filtered_and_sorted(&list);
+                let processed = self.filtered_and_sorted(&list, false);
                 self.column_widths
                     .insert(path.clone(), column_width_for(ui, &processed));
                 self.column_cache.insert(path.clone(), processed);
@@ -2370,7 +2345,7 @@ impl ExpliaApp {
         let empty_message = if self.entries.is_empty() {
             Some("Ce dossier est vide.")
         } else if self.visible.is_empty() {
-            Some("Aucun élément ne correspond au filtre d'extension.")
+            Some("Aucun élément ne correspond à la recherche.")
         } else {
             None
         };
@@ -3659,6 +3634,10 @@ impl eframe::App for ExpliaApp {
             }
         }
         let mut action = None;
+        // Ctrl+F : va dans la barre de recherche.
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+            self.focus_search = true;
+        }
 
         // Raccourcis (jamais pendant une saisie) : F2 renomme ; Suppr demande la suppression,
         // puis Entrée la confirme (Échap l'annule).
@@ -3694,8 +3673,6 @@ impl eframe::App for ExpliaApp {
         egui::Panel::top("toolbar").show(ui, |ui| {
             enlarge_toolbar(ui);
             ui.add_space(4.0);
-            action = self.address_bar(ui).or(action.take());
-            ui.add_space(2.0);
             self.options_bar(ui);
             ui.add_space(4.0);
         });
@@ -3713,6 +3690,8 @@ impl eframe::App for ExpliaApp {
         action = self.sidebar_panel(ui).or(action.take());
         action = self.detail_panel(ui).or(action.take());
         egui::CentralPanel::default().show(ui, |ui| {
+            action = self.location_bar(ui).or(action.take());
+            ui.add_space(4.0);
             action = self.central(ui).or(action.take());
         });
 

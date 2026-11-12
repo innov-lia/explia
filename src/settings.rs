@@ -8,7 +8,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::view::{Category, Columns, Side, SortKey, SortOrder, ViewMode};
+use crate::view::{Columns, Side, SortKey, SortOrder, ViewMode};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -25,8 +25,6 @@ pub struct Settings {
     /// Afficher les dossiers et fichiers cachés.
     pub show_hidden: bool,
     pub columns: Columns,
-    pub categories: Vec<Category>,
-    pub custom_extensions: String,
     pub favorites: Vec<PathBuf>,
     /// Disposition : côté de la barre latérale, de ses onglets et du volet de détail.
     pub sidebar_side: Side,
@@ -49,8 +47,6 @@ impl Default for Settings {
             view_mode: ViewMode::List,
             show_hidden: false,
             columns: Columns::default(),
-            categories: Vec::new(),
-            custom_extensions: String::new(),
             favorites: Vec::new(),
             sidebar_side: Side::Left,
             tabs_side: Side::Right,
@@ -108,13 +104,6 @@ impl Settings {
                 }
                 "show_hidden" => settings.show_hidden = value == "true",
                 "columns" => settings.columns = Columns::from_ids(value),
-                "categories" => {
-                    settings.categories = value
-                        .split(',')
-                        .filter_map(|id| Category::from_id(id.trim()))
-                        .collect();
-                }
-                "custom_extensions" => settings.custom_extensions = value.to_string(),
                 "favorite" if !value.is_empty() => settings.favorites.push(PathBuf::from(value)),
                 "sidebar_side" => {
                     if let Some(side) = Side::from_id(value) {
@@ -162,11 +151,6 @@ impl Settings {
         text += &format!("tabs_side={}\n", self.tabs_side.id());
         text += &format!("preview_side={}\n", self.preview_side.id());
         text += &format!("columns={}\n", self.columns.ids().join(","));
-        let categories: Vec<&str> = self.categories.iter().map(|c| c.id()).collect();
-        text += &format!("categories={}\n", categories.join(","));
-        // Une extension personnalisée ne contient jamais de saut de ligne.
-        let custom = self.custom_extensions.replace(['\r', '\n'], " ");
-        text += &format!("custom_extensions={custom}\n");
         for favorite in &self.favorites {
             text += &format!("favorite={}\n", favorite.display());
         }
@@ -225,8 +209,6 @@ mod tests {
                 duration: true,
                 ..Columns::default()
             },
-            categories: vec![Category::Image, Category::Code],
-            custom_extensions: "mkv, .pdf".to_string(),
             favorites: vec![PathBuf::from("C:\\Projets"), PathBuf::from("D:\\Photos")],
             sidebar_side: Side::Right,
             tabs_side: Side::Left,
@@ -276,12 +258,6 @@ mod tests {
             Settings::parse("columns=\n").columns.ids(),
             Vec::<&str>::new()
         );
-    }
-
-    #[test]
-    fn unknown_categories_are_ignored() {
-        let parsed = Settings::parse("categories=image,video,code\n");
-        assert_eq!(parsed.categories, [Category::Image, Category::Code]);
     }
 
     #[test]
