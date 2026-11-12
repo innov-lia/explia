@@ -100,6 +100,8 @@ enum Action {
     CancelDelete,
     /// Envoie la sélection à la corbeille.
     ConfirmDelete,
+    /// Entre dans un dossier au clavier (flèche droite) : son premier élément est sélectionné.
+    EnterFolder(PathBuf),
     /// Passe une ligne en mode renommage (F2, menu contextuel, bouton « Renommer »).
     StartRename(Entry),
     CommitRename {
@@ -172,6 +174,16 @@ pub struct ExpliaApp {
     renaming: Option<RenameState>,
     /// Instant (secondes) où « Supprimer » a été demandé : sert à armer « Confirmer ».
     delete_asked_at: Option<f64>,
+    /// Dernière ligne atteinte (clic ou flèches) : point de départ des flèches.
+    cursor: Option<PathBuf>,
+    /// Ligne à rendre visible au prochain dessin de la liste (navigation au clavier).
+    scroll_to_index: Option<usize>,
+    /// Dernier état de défilement de la liste : (décalage, hauteur visible), en points.
+    last_scroll: (f32, f32),
+    /// Après l'entrée dans un dossier au clavier (flèche droite) : sélectionne son premier élément.
+    select_first_after_nav: bool,
+    /// Lecteur en surbrillance dans la vue « Ce PC » (flèches).
+    drive_cursor: Option<usize>,
     preview: PreviewState,
     event_tx: Sender<Event>,
     event_rx: Receiver<Event>,
@@ -217,6 +229,11 @@ impl ExpliaApp {
             notice: None,
             renaming: None,
             delete_asked_at: None,
+            cursor: None,
+            scroll_to_index: None,
+            last_scroll: (0.0, 0.0),
+            select_first_after_nav: false,
+            drive_cursor: None,
             preview: PreviewState::None,
             event_tx,
             event_rx,
@@ -331,6 +348,12 @@ impl ExpliaApp {
 
     /// Change d'emplacement. En cas d'erreur, on reste sur l'emplacement actuel.
     fn navigate(&mut self, target: Location) {
+        let select_first = std::mem::take(&mut self.select_first_after_nav);
+        // Dossier quitté : si on remonte d'un niveau, on le resélectionne (comme l'Explorateur).
+        let came_from = match &self.location {
+            Location::Dir(path) => Some(path.clone()),
+            Location::ThisPc => None,
+        };
         match &target {
             Location::ThisPc => {
                 self.drives = places::detect_drives();
@@ -361,9 +384,35 @@ impl ExpliaApp {
         self.selected = None;
         self.clear_multi();
         self.anchor = None;
+        self.cursor = None;
+        self.scroll_to_index = None;
+        self.drive_cursor = None;
         self.renaming = None;
         self.preview = PreviewState::None;
         self.recompute_visible();
+        // Remontée d'un niveau : le dossier quitté redevient la ligne courante.
+        if let Some(previous) = came_from {
+            match &self.location {
+                Location::Dir(now) if previous.parent() == Some(now.as_path()) => {
+                    if let Some(index) = self.visible.iter().position(|e| e.path == previous) {
+                        self.cursor = Some(previous.clone());
+                        self.anchor = Some(previous);
+                        self.selected = Some(self.visible[index].clone());
+                        self.scroll_to_index = Some(index);
+                    }
+                }
+                Location::ThisPc if previous.parent().is_none() => {
+                    self.drive_cursor = self.drives.iter().position(|d| d.path == previous);
+                }
+                _ => {}
+            }
+        }
+        // Entrée dans un dossier au clavier : on sélectionne son premier élément.
+        if select_first && let Some(first) = self.visible.first().cloned() {
+            let ctx = self.ctx.clone();
+            self.select(&ctx, first);
+            self.scroll_to_index = Some(0);
+        }
     }
 
     /// Maj+clic : sélectionne la plage entre l'ancre (dernier élément choisi) et `entry`.
@@ -384,6 +433,7 @@ impl ExpliaApp {
                 self.preview = PreviewState::None;
                 self.error = None;
                 self.anchor = Some(anchor);
+                self.cursor = Some(entry.path.clone());
                 self.multi = range;
             }
             Err(view::RangeError::MixedTypes) => {
@@ -447,6 +497,7 @@ impl ExpliaApp {
         }
         self.error = None;
         self.anchor = Some(entry.path.clone());
+        self.cursor = Some(entry.path.clone());
         self.multi.push(entry);
     }
 
@@ -556,6 +607,7 @@ impl ExpliaApp {
             });
         }
         self.anchor = Some(entry.path.clone());
+        self.cursor = Some(entry.path.clone());
         self.selected = Some(entry);
     }
 
@@ -657,6 +709,10 @@ impl ExpliaApp {
             }
             Action::CancelDelete => self.confirm_delete = false,
             Action::ConfirmDelete => self.delete_selection(),
+            Action::EnterFolder(path) => {
+                self.select_first_after_nav = true;
+                self.navigate(Location::Dir(path));
+            }
             Action::StartRename(entry) => self.start_rename(&entry),
             Action::CommitRename { path, new_name } => self.commit_rename(ctx, path, &new_name),
             Action::CancelRename => self.renaming = None,
@@ -964,7 +1020,7 @@ impl ExpliaApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                for drive in &self.drives {
+                for (index, drive) in self.drives.iter().enumerate() {
                     let name = format!(
                         "{}  {}   —   {}",
                         drive_icon(drive.kind),
@@ -976,7 +1032,8 @@ impl ExpliaApp {
                         Some(None) => "—".to_string(),
                         Some(Some(bytes)) => fs_nav::format_size(*bytes),
                     };
-                    if table_row(ui, false, &name, &size).clicked() {
+                    let highlighted = self.drive_cursor == Some(index);
+                    if table_row(ui, highlighted, &name, &size).clicked() {
                         action = Some(Action::Go(Location::Dir(drive.path.clone())));
                     }
                 }
@@ -1004,141 +1061,218 @@ impl ExpliaApp {
             return None;
         }
         table_header(ui);
-        let row_height = table_row_height(ui) + ui.spacing().item_spacing.y;
+        // `show_rows` veut la hauteur d'une ligne SANS l'espacement (il l'ajoute lui-même) ;
+        // le pas réel entre deux lignes sert au calcul du défilement.
+        let row_height = table_row_height(ui);
+        let row_pitch = row_height + ui.spacing().item_spacing.y;
         // État modifié pendant le dessin de la liste : sorti de `self` le temps de la frame.
         let mut rename = self.renaming.take();
-        egui::ScrollArea::vertical()
+        let mut area = egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             // Un clic maintenu ne doit pas faire défiler la liste.
             .scroll_source(
                 egui::scroll_area::ScrollSource::SCROLL_BAR
                     | egui::scroll_area::ScrollSource::MOUSE_WHEEL,
-            )
-            .show_rows(ui, row_height, self.visible.len(), |ui, range| {
-                for entry in &self.visible[range] {
-                    // Ligne en cours de renommage : champ de saisie à la place du libellé.
-                    if let Some(state) = rename.as_mut()
-                        && state.path == entry.path
-                    {
-                        if let Some(rename_action) = rename_row(ui, state) {
-                            action = Some(rename_action);
-                        }
-                        continue;
+            );
+        // Navigation au clavier : la ligne atteinte doit rester visible.
+        if let Some(index) = self.scroll_to_index.take() {
+            // Une seconde image est nécessaire : les lignes affichées dépendent du décalage appliqué.
+            ui.ctx().request_repaint();
+            let (offset, view_height) = self.last_scroll;
+            area = area.vertical_scroll_offset(view::scroll_offset_for(
+                index,
+                row_pitch,
+                offset,
+                view_height,
+            ));
+        }
+        let output = area.show_rows(ui, row_height, self.visible.len(), |ui, range| {
+            for entry in &self.visible[range] {
+                // Ligne en cours de renommage : champ de saisie à la place du libellé.
+                if let Some(state) = rename.as_mut()
+                    && state.path == entry.path
+                {
+                    if let Some(rename_action) = rename_row(ui, state) {
+                        action = Some(rename_action);
                     }
-                    let is_selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path)
-                        || self.multi.iter().any(|m| m.path == entry.path);
-                    let icon = if entry.is_dir {
-                        "📁"
-                    } else if preview::is_supported_image(&entry.path) {
-                        "🖼"
-                    } else if preview::is_video(&entry.path) {
-                        "🎬"
-                    } else if preview::is_zip(&entry.path) {
-                        "🗜"
+                    continue;
+                }
+                let is_selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path)
+                    || self.multi.iter().any(|m| m.path == entry.path);
+                let icon = if entry.is_dir {
+                    "📁"
+                } else if preview::is_supported_image(&entry.path) {
+                    "🖼"
+                } else if preview::is_video(&entry.path) {
+                    "🎬"
+                } else if preview::is_zip(&entry.path) {
+                    "🗜"
+                } else {
+                    "📄"
+                };
+                let response = table_row(
+                    ui,
+                    is_selected,
+                    &format!("{icon} {}", entry.name),
+                    &self.entry_size_text(entry),
+                );
+                // Après un clic maintenu : chaque clic ajoute ou retire une ligne.
+                // Avec Ctrl/Maj : un clic simple remplace la sélection (comportement habituel).
+                let multi_mode = self.multi_toggle_mode && !self.multi.is_empty();
+                // Clic maintenu : démarre la multi-sélection (ou ajoute la ligne).
+                // La détection se fait sur la position du pointeur, avec une tolérance
+                // pour les mouvements de la main, sans dépendre de l'état du widget.
+                if !self.long_press_done {
+                    let held = ui.input(|i| {
+                        if !i.pointer.primary_down() {
+                            return None;
+                        }
+                        let origin = i.pointer.press_origin()?;
+                        let position = i.pointer.latest_pos()?;
+                        let started = i.pointer.press_start_time()?;
+                        let on_this_row = response.rect.contains(origin)
+                            && origin.distance(position) <= LONG_PRESS_TOLERANCE;
+                        on_this_row.then_some(i.time - started)
+                    });
+                    match held {
+                        Some(seconds) if seconds >= LONG_PRESS_SECONDS => {
+                            action = Some(Action::LongPress(entry.clone()));
+                        }
+                        Some(_) => {
+                            // Réveille l'interface pour détecter la fin du délai.
+                            ui.ctx()
+                                .request_repaint_after(std::time::Duration::from_millis(100));
+                        }
+                        None => {}
+                    }
+                }
+                // Appui long sur écran tactile.
+                if response.long_touched() {
+                    action = Some(Action::LongPress(entry.clone()));
+                }
+                let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                if response.clicked() && ctrl {
+                    // Ctrl+clic : ajoute ou retire la ligne de la sélection multiple.
+                    action = Some(Action::ToggleMulti(entry.clone()));
+                } else if response.clicked() && shift {
+                    // Maj+clic : sélectionne toute la plage depuis le dernier élément choisi.
+                    action = Some(Action::SelectRange(entry.clone()));
+                } else if self.long_press_done {
+                    // Le relâchement qui suit un clic maintenu n'est pas un clic.
+                } else if response.double_clicked() && !multi_mode {
+                    // Dossier : on entre ; fichier : on l'ouvre avec son application.
+                    action = Some(if entry.is_dir {
+                        Action::Go(Location::Dir(entry.path.clone()))
                     } else {
-                        "📄"
-                    };
-                    let response = table_row(
-                        ui,
-                        is_selected,
-                        &format!("{icon} {}", entry.name),
-                        &self.entry_size_text(entry),
-                    );
-                    // Après un clic maintenu : chaque clic ajoute ou retire une ligne.
-                    // Avec Ctrl/Maj : un clic simple remplace la sélection (comportement habituel).
-                    let multi_mode = self.multi_toggle_mode && !self.multi.is_empty();
-                    // Clic maintenu : démarre la multi-sélection (ou ajoute la ligne).
-                    // La détection se fait sur la position du pointeur, avec une tolérance
-                    // pour les mouvements de la main, sans dépendre de l'état du widget.
-                    if !self.long_press_done {
-                        let held = ui.input(|i| {
-                            if !i.pointer.primary_down() {
-                                return None;
-                            }
-                            let origin = i.pointer.press_origin()?;
-                            let position = i.pointer.latest_pos()?;
-                            let started = i.pointer.press_start_time()?;
-                            let on_this_row = response.rect.contains(origin)
-                                && origin.distance(position) <= LONG_PRESS_TOLERANCE;
-                            on_this_row.then_some(i.time - started)
-                        });
-                        match held {
-                            Some(seconds) if seconds >= LONG_PRESS_SECONDS => {
-                                action = Some(Action::LongPress(entry.clone()));
-                            }
-                            Some(_) => {
-                                // Réveille l'interface pour détecter la fin du délai.
-                                ui.ctx()
-                                    .request_repaint_after(std::time::Duration::from_millis(100));
-                            }
-                            None => {}
-                        }
-                    }
-                    // Appui long sur écran tactile.
-                    if response.long_touched() {
-                        action = Some(Action::LongPress(entry.clone()));
-                    }
-                    let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
-                    if response.clicked() && ctrl {
-                        // Ctrl+clic : ajoute ou retire la ligne de la sélection multiple.
-                        action = Some(Action::ToggleMulti(entry.clone()));
-                    } else if response.clicked() && shift {
-                        // Maj+clic : sélectionne toute la plage depuis le dernier élément choisi.
-                        action = Some(Action::SelectRange(entry.clone()));
-                    } else if self.long_press_done {
-                        // Le relâchement qui suit un clic maintenu n'est pas un clic.
-                    } else if response.double_clicked() && !multi_mode {
-                        // Dossier : on entre ; fichier : on l'ouvre avec son application.
-                        action = Some(if entry.is_dir {
-                            Action::Go(Location::Dir(entry.path.clone()))
-                        } else {
-                            Action::Open(entry.path.clone())
-                        });
-                    } else if response.clicked() {
-                        action = Some(if multi_mode {
-                            Action::ToggleMulti(entry.clone())
-                        } else {
-                            Action::Select(entry.clone())
-                        });
-                    }
-                    response.context_menu(|ui| {
-                        if ui.button("Renommer  (F2)").clicked() {
-                            action = Some(Action::StartRename(entry.clone()));
-                            ui.close();
-                        }
-                        ui.separator();
-                        if entry.is_dir {
-                            if self.favorites.contains(&entry.path) {
-                                if ui.button("Retirer des favoris").clicked() {
-                                    action = Some(Action::RemoveFavorite(entry.path.clone()));
-                                    ui.close();
-                                }
-                            } else if ui.button("Ajouter aux favoris").clicked() {
-                                action = Some(Action::AddFavorite(entry.path.clone()));
-                                ui.close();
-                            }
-                        } else {
-                            let label = if launch::is_executable(&entry.path) {
-                                "Exécuter"
-                            } else {
-                                "Ouvrir"
-                            };
-                            if ui.button(label).clicked() {
-                                action = Some(Action::Open(entry.path.clone()));
-                                ui.close();
-                            }
-                            if launch::is_executable(&entry.path)
-                                && ui.button("Exécuter en tant qu'administrateur").clicked()
-                            {
-                                action = Some(Action::OpenAsAdmin(entry.path.clone()));
-                                ui.close();
-                            }
-                        }
+                        Action::Open(entry.path.clone())
+                    });
+                } else if response.clicked() {
+                    action = Some(if multi_mode {
+                        Action::ToggleMulti(entry.clone())
+                    } else {
+                        Action::Select(entry.clone())
                     });
                 }
-            });
+                response.context_menu(|ui| {
+                    if ui.button("Renommer  (F2)").clicked() {
+                        action = Some(Action::StartRename(entry.clone()));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if entry.is_dir {
+                        if self.favorites.contains(&entry.path) {
+                            if ui.button("Retirer des favoris").clicked() {
+                                action = Some(Action::RemoveFavorite(entry.path.clone()));
+                                ui.close();
+                            }
+                        } else if ui.button("Ajouter aux favoris").clicked() {
+                            action = Some(Action::AddFavorite(entry.path.clone()));
+                            ui.close();
+                        }
+                    } else {
+                        let label = if launch::is_executable(&entry.path) {
+                            "Exécuter"
+                        } else {
+                            "Ouvrir"
+                        };
+                        if ui.button(label).clicked() {
+                            action = Some(Action::Open(entry.path.clone()));
+                            ui.close();
+                        }
+                        if launch::is_executable(&entry.path)
+                            && ui.button("Exécuter en tant qu'administrateur").clicked()
+                        {
+                            action = Some(Action::OpenAsAdmin(entry.path.clone()));
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        });
+        self.last_scroll = (output.state.clamped_offset().y, output.inner_rect.height());
         self.renaming = rename;
         action
+    }
+
+    /// Navigation aux flèches :
+    /// - haut / bas : ligne précédente / suivante (avec Maj : étend la sélection) ;
+    /// - gauche : dossier parent (le dossier quitté est resélectionné) ;
+    /// - droite : entre dans le dossier sélectionné (son premier élément est sélectionné).
+    ///
+    /// Dans la vue « Ce PC », haut / bas déplacent le lecteur en surbrillance et droite l'ouvre.
+    fn arrow_key_action(&mut self, ctx: &egui::Context) -> Option<Action> {
+        let (up, down, left, right, shift) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+                i.modifiers.shift,
+            )
+        });
+        if !(up || down || left || right) {
+            return None;
+        }
+        let vertical = if down { 1 } else { -1 };
+        match &self.location {
+            Location::ThisPc => {
+                if up || down {
+                    self.drive_cursor =
+                        view::step_index(self.drive_cursor, self.drives.len(), vertical);
+                    return None;
+                }
+                if right && let Some(drive) = self.drive_cursor.and_then(|i| self.drives.get(i)) {
+                    return Some(Action::EnterFolder(drive.path.clone()));
+                }
+                None
+            }
+            Location::Dir(_) => {
+                if up || down {
+                    let current = self
+                        .cursor
+                        .as_ref()
+                        .or(self.selected.as_ref().map(|s| &s.path))
+                        .and_then(|path| self.visible.iter().position(|e| e.path == *path));
+                    let next = view::step_index(current, self.visible.len(), vertical)?;
+                    let entry = self.visible[next].clone();
+                    self.scroll_to_index = Some(next);
+                    return Some(if shift {
+                        Action::SelectRange(entry)
+                    } else {
+                        Action::Select(entry)
+                    });
+                }
+                if left {
+                    return self.location.parent().map(Action::Go);
+                }
+                match &self.selected {
+                    Some(entry) if right && entry.is_dir && self.multi.is_empty() => {
+                        Some(Action::EnterFolder(entry.path.clone()))
+                    }
+                    _ => None,
+                }
+            }
+        }
     }
 
     /// Deux boutons côte à côte, de même largeur :
@@ -1230,7 +1364,7 @@ impl ExpliaApp {
         let action = self.edit_controls(ui, &format!("{count} {kind}"), None, true);
         ui.add_space(6.0);
         ui.separator();
-        let row_height = table_row_height(ui) + ui.spacing().item_spacing.y;
+        let row_height = table_row_height(ui);
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, count, |ui, range| {
@@ -1385,7 +1519,7 @@ impl ExpliaApp {
                     ui.weak(format!("{} élément(s)", preview.total));
                 }
                 ui.add_space(4.0);
-                let row_height = table_row_height(ui) + ui.spacing().item_spacing.y;
+                let row_height = table_row_height(ui);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .show_rows(ui, row_height, shown, |ui, range| {
@@ -1615,6 +1749,8 @@ impl eframe::App for ExpliaApp {
                 action = Some(Action::StartRename(entry.clone()));
             } else if delete && !self.delete_targets().is_empty() {
                 action = Some(Action::AskDelete);
+            } else if !self.confirm_delete {
+                action = self.arrow_key_action(&ctx);
             }
         }
 

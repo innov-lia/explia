@@ -183,6 +183,37 @@ impl ExtensionFilter {
     }
 }
 
+/// Déplace une position dans une liste de `len` éléments (flèches haut / bas).
+/// Sans position courante, « bas » va au premier élément et « haut » au dernier.
+/// La position reste dans la liste (pas de retour à la ligne).
+pub fn step_index(current: Option<usize>, len: usize, delta: i32) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let last = len - 1;
+    Some(match current {
+        None if delta >= 0 => 0,
+        None => last,
+        Some(index) => {
+            let moved = index as i64 + i64::from(delta);
+            moved.clamp(0, last as i64) as usize
+        }
+    })
+}
+
+/// Décalage de défilement minimal pour qu'une ligne soit entièrement visible.
+pub fn scroll_offset_for(row: usize, row_height: f32, offset: f32, view_height: f32) -> f32 {
+    let top = row as f32 * row_height;
+    let bottom = top + row_height;
+    if top < offset {
+        top
+    } else if bottom > offset + view_height {
+        (bottom - view_height).max(0.0)
+    } else {
+        offset
+    }
+}
+
 /// Pourquoi une sélection d'une plage a échoué.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RangeError {
@@ -309,6 +340,30 @@ mod tests {
         let mut v = vec![file("z.png", 1), file("a.txt", 1), file("b.png", 1)];
         sort_entries(&mut v, SortKey::Type, SortOrder::Ascending);
         assert_eq!(names(&v), ["b.png", "z.png", "a.txt"]);
+    }
+
+    #[test]
+    fn step_index_moves_and_stays_inside_the_list() {
+        assert_eq!(step_index(None, 0, 1), None);
+        assert_eq!(step_index(None, 5, 1), Some(0));
+        assert_eq!(step_index(None, 5, -1), Some(4));
+        assert_eq!(step_index(Some(2), 5, 1), Some(3));
+        assert_eq!(step_index(Some(2), 5, -1), Some(1));
+        assert_eq!(step_index(Some(0), 5, -1), Some(0));
+        assert_eq!(step_index(Some(4), 5, 1), Some(4));
+        assert_eq!(step_index(Some(0), 1, 1), Some(0));
+    }
+
+    #[test]
+    fn scroll_offset_keeps_the_row_visible() {
+        // Lignes de 20 px, fenêtre de 100 px (5 lignes visibles).
+        assert_eq!(scroll_offset_for(2, 20.0, 0.0, 100.0), 0.0);
+        // Ligne sous la zone visible : on descend juste assez.
+        assert_eq!(scroll_offset_for(7, 20.0, 0.0, 100.0), 60.0);
+        // Ligne au-dessus de la zone visible : on remonte à son bord haut.
+        assert_eq!(scroll_offset_for(1, 20.0, 60.0, 100.0), 20.0);
+        // Déjà visible : rien ne bouge.
+        assert_eq!(scroll_offset_for(5, 20.0, 40.0, 100.0), 40.0);
     }
 
     #[test]
