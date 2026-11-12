@@ -61,6 +61,10 @@ const DRIVE_BAR_HEIGHT: f32 = 16.0;
 /// Largeurs des deux colonnes à gauche de la grille d'images : lecteurs et navigation.
 /// Largeur de la barre de recherche, en haut de la zone centrale.
 const SEARCH_WIDTH: f32 = 300.0;
+/// Libellés des boutons de la barre du volet de détail (mesurés pour sa largeur minimale).
+const OPTION_COLUMNS_LABEL: &str = "▥ Colonnes";
+const OPTION_IMAGES_LABEL: &str = "🖼 Images";
+const OPTION_VIDEOS_LABEL: &str = "🎬 Vidéos";
 const GALLERY_DRIVES_WIDTH: f32 = 170.0;
 const GALLERY_NAV_WIDTH: f32 = 210.0;
 /// Agrandissement du texte et des boutons des barres du haut, en points.
@@ -1420,7 +1424,8 @@ impl ExpliaApp {
         let mut action = None;
         let crumbs = match &self.location {
             Location::ThisPc => Vec::new(),
-            Location::Dir(path) => fs_nav::breadcrumbs(path),
+            // Dans le dossier de l'utilisateur : « Home > Videos » plutôt que C: > Users > nom > Videos.
+            Location::Dir(path) => fs_nav::breadcrumbs_with_home(path, self.home.as_deref()),
         };
         let height = ui.spacing().interact_size.y;
         let frame = egui::Frame::new()
@@ -1611,12 +1616,15 @@ impl ExpliaApp {
         if !self.show_preview && self.multi.is_empty() {
             return None;
         }
+        // Jamais plus étroit que la barre « < Colonnes Images Vidéos » sur une ligne.
+        let min_width = Self::detail_min_width(ui);
         // Deux identifiants distincts : chaque mode garde sa propre largeur.
         let width = if self.preview_expanded {
             ui.available_width() * PREVIEW_EXPANDED_RATIO
         } else {
             300.0
-        };
+        }
+        .max(min_width);
         let panel = match (self.preview_side, self.preview_expanded) {
             (Side::Left, false) => egui::Panel::left("preview-left"),
             (Side::Left, true) => egui::Panel::left("preview-wide-left"),
@@ -1625,6 +1633,7 @@ impl ExpliaApp {
         };
         let (toggle, action) = panel
             .default_size(width)
+            .min_size(min_width)
             .resizable(true)
             .show(ui, |ui| self.preview_panel(ui))
             .inner;
@@ -2785,13 +2794,40 @@ impl ExpliaApp {
         (toggle, option_action.or(content_action))
     }
 
+    /// Largeur minimale du volet de détail : la flèche et les boutons Colonnes, Images et Vidéos
+    /// tiennent sur une seule ligne.
+    fn detail_min_width(ui: &egui::Ui) -> f32 {
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let padding = ui.spacing().button_padding.x * 2.0;
+        let gap = ui.spacing().item_spacing.x;
+        let labels = [
+            "<",
+            OPTION_COLUMNS_LABEL,
+            OPTION_IMAGES_LABEL,
+            OPTION_VIDEOS_LABEL,
+        ];
+        let buttons: f32 = labels
+            .iter()
+            .map(|label| {
+                let galley = ui.painter().layout_no_wrap(
+                    (*label).to_string(),
+                    font.clone(),
+                    egui::Color32::WHITE,
+                );
+                galley.size().x + padding
+            })
+            .sum();
+        // Marges du panneau, poignée de redimensionnement, barre de défilement éventuelle.
+        buttons + gap * (labels.len() - 1) as f32 + 36.0
+    }
+
     /// Barre du haut du volet de détail : flèche d'agrandissement, navigation en colonnes
     /// (style Mac), visionnage d'images et de vidéos (grilles). Les éléments cachés se règlent dans « Afficher ».
     fn option_bar(&self, ui: &mut egui::Ui) -> (bool, Option<Action>) {
         let mut action = None;
         let mut toggle = false;
         ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             // Flèche pour agrandir / réduire le volet : elle pointe vers le centre de la fenêtre
             // quand le volet peut grandir, vers son bord quand il peut rétrécir.
             let grows_left = self.preview_side == Side::Right;
@@ -2810,17 +2846,17 @@ impl ExpliaApp {
             for (mode, label, hint) in [
                 (
                     ViewMode::Columns,
-                    "▥ Colonnes",
+                    OPTION_COLUMNS_LABEL,
                     "Navigation en colonnes, comme sur Mac : un niveau du chemin par colonne",
                 ),
                 (
                     ViewMode::Gallery,
-                    "🖼 Images",
+                    OPTION_IMAGES_LABEL,
                     "Visionnage d'images : les images du dossier en grille de miniatures",
                 ),
                 (
                     ViewMode::Videos,
-                    "🎬 Vidéos",
+                    OPTION_VIDEOS_LABEL,
                     "Visionnage de vidéos : les vidéos du dossier en grille",
                 ),
             ] {

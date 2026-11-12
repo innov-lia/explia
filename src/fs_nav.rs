@@ -199,9 +199,59 @@ pub fn format_size(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit]).replace('.', ",")
 }
 
+/// Comme `breadcrumbs`, mais un chemin situé dans le dossier de l'utilisateur (`home`) commence
+/// par « Home » au lieu de `C:` > `Users` > nom : `Home`, `Videos` pour `C:\Users\Bob\Videos`.
+pub fn breadcrumbs_with_home(path: &Path, home: Option<&Path>) -> Vec<(String, PathBuf)> {
+    let Some(home) = home else {
+        return breadcrumbs(path);
+    };
+    let Ok(relative) = path.strip_prefix(home) else {
+        return breadcrumbs(path);
+    };
+    let mut crumbs = vec![("Home".to_string(), home.to_path_buf())];
+    let mut current = home.to_path_buf();
+    for component in relative.components() {
+        if let std::path::Component::Normal(name) = component {
+            current.push(name);
+            crumbs.push((name.to_string_lossy().into_owned(), current.clone()));
+        }
+    }
+    crumbs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn breadcrumbs_inside_home_start_with_home() {
+        let home = Path::new("C:\\Users\\Bob");
+        let deep = Path::new("C:\\Users\\Bob\\Videos\\2026");
+        assert_eq!(
+            breadcrumbs_with_home(deep, Some(home)),
+            [
+                ("Home".to_string(), PathBuf::from("C:\\Users\\Bob")),
+                (
+                    "Videos".to_string(),
+                    PathBuf::from("C:\\Users\\Bob\\Videos")
+                ),
+                (
+                    "2026".to_string(),
+                    PathBuf::from("C:\\Users\\Bob\\Videos\\2026")
+                ),
+            ]
+        );
+        // Le dossier de l'utilisateur lui-même : « Home » seul.
+        assert_eq!(breadcrumbs_with_home(home, Some(home)).len(), 1);
+        // Hors du dossier de l'utilisateur (ou sans dossier connu) : chemin complet.
+        let other = Path::new("D:\\Data");
+        assert_eq!(breadcrumbs_with_home(other, Some(home)), breadcrumbs(other));
+        assert_eq!(breadcrumbs_with_home(other, None), breadcrumbs(other));
+        // `C:\Users\Bobby` n'est pas dans `C:\Users\Bob`.
+        let bobby = Path::new("C:\\Users\\Bobby");
+        assert_eq!(breadcrumbs_with_home(bobby, Some(home)), breadcrumbs(bobby));
+    }
 
     #[cfg(windows)]
     #[test]
