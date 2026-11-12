@@ -230,12 +230,17 @@ pub fn decode_preview<R: BufRead + Seek>(reader: R, max_dim: u32) -> Result<Imag
 
 /// Ouvre un fichier image en lecture seule et en génère l'aperçu.
 pub fn load_image_preview(path: &Path) -> Result<ImagePreview, String> {
+    load_thumbnail(path, THUMBNAIL_SIZE)
+}
+
+/// Ouvre un fichier image en lecture seule et en génère une miniature d'au plus `max_dim` pixels.
+pub fn load_thumbnail(path: &Path, max_dim: u32) -> Result<ImagePreview, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let len = file.metadata().map_err(|e| e.to_string())?.len();
     if len > MAX_IMAGE_FILE_BYTES {
         return Err("Fichier trop volumineux pour l'aperçu".to_string());
     }
-    decode_preview(BufReader::new(file), THUMBNAIL_SIZE)
+    decode_preview(BufReader::new(file), max_dim)
 }
 
 #[cfg(test)]

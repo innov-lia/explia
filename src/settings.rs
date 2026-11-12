@@ -8,7 +8,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::view::{Category, SortKey, SortOrder};
+use crate::view::{Category, Columns, SortKey, SortOrder, ViewMode};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -19,6 +19,10 @@ pub struct Settings {
     pub show_preview: bool,
     pub preview_expanded: bool,
     pub skip_folder_sizes: bool,
+    pub view_mode: ViewMode,
+    /// Afficher les dossiers et fichiers cachés.
+    pub show_hidden: bool,
+    pub columns: Columns,
     pub categories: Vec<Category>,
     pub custom_extensions: String,
     pub favorites: Vec<PathBuf>,
@@ -33,6 +37,9 @@ impl Default for Settings {
             show_preview: true,
             preview_expanded: false,
             skip_folder_sizes: false,
+            view_mode: ViewMode::List,
+            show_hidden: false,
+            columns: Columns::default(),
             categories: Vec::new(),
             custom_extensions: String::new(),
             favorites: Vec::new(),
@@ -80,6 +87,13 @@ impl Settings {
                 "show_preview" => settings.show_preview = value != "false",
                 "preview_expanded" => settings.preview_expanded = value == "true",
                 "skip_folder_sizes" => settings.skip_folder_sizes = value == "true",
+                "view_mode" => {
+                    if let Some(mode) = ViewMode::from_id(value) {
+                        settings.view_mode = mode;
+                    }
+                }
+                "show_hidden" => settings.show_hidden = value == "true",
+                "columns" => settings.columns = Columns::from_ids(value),
                 "categories" => {
                     settings.categories = value
                         .split(',')
@@ -109,6 +123,9 @@ impl Settings {
         text += &format!("show_preview={}\n", self.show_preview);
         text += &format!("preview_expanded={}\n", self.preview_expanded);
         text += &format!("skip_folder_sizes={}\n", self.skip_folder_sizes);
+        text += &format!("view_mode={}\n", self.view_mode.id());
+        text += &format!("show_hidden={}\n", self.show_hidden);
+        text += &format!("columns={}\n", self.columns.ids().join(","));
         let categories: Vec<&str> = self.categories.iter().map(|c| c.id()).collect();
         text += &format!("categories={}\n", categories.join(","));
         // Une extension personnalisée ne contient jamais de saut de ligne.
@@ -160,6 +177,14 @@ mod tests {
             show_preview: false,
             preview_expanded: true,
             skip_folder_sizes: true,
+            view_mode: ViewMode::Gallery,
+            show_hidden: true,
+            columns: Columns {
+                size: false,
+                created: true,
+                duration: true,
+                ..Columns::default()
+            },
             categories: vec![Category::Image, Category::Code],
             custom_extensions: "mkv, .pdf".to_string(),
             favorites: vec![PathBuf::from("C:\\Projets"), PathBuf::from("D:\\Photos")],
@@ -193,6 +218,19 @@ mod tests {
         assert_eq!(
             Settings::parse("window_width=800\nwindow_height=600\n").window_size,
             Some((800.0, 600.0))
+        );
+    }
+
+    #[test]
+    fn missing_columns_line_keeps_the_defaults() {
+        let parsed = Settings::parse("sort_key=name\n");
+        assert_eq!(parsed.columns, Columns::default());
+        assert_eq!(parsed.view_mode, ViewMode::List);
+        assert!(!parsed.show_hidden);
+        // Une ligne « columns= » vide veut dire : aucune colonne optionnelle.
+        assert_eq!(
+            Settings::parse("columns=\n").columns.ids(),
+            Vec::<&str>::new()
         );
     }
 

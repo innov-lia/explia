@@ -3,14 +3,36 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entry {
     pub name: String,
     pub path: PathBuf,
     pub is_dir: bool,
     /// Taille en octets. Pour un dossier : `None` tant qu'elle n'est pas calculée.
     pub size: Option<u64>,
+    /// Élément caché (attribut « caché » de Windows, ou nom commençant par un point ailleurs).
+    pub hidden: bool,
+    pub modified: Option<SystemTime>,
+    pub created: Option<SystemTime>,
+}
+
+/// Vrai si l'élément est caché. `meta` doit décrire l'élément lui-même (sans suivre les liens).
+fn is_hidden(name: &str, meta: Option<&fs::Metadata>) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        /// `FILE_ATTRIBUTE_HIDDEN`.
+        const HIDDEN: u32 = 0x2;
+        let _ = name;
+        meta.is_some_and(|m| m.file_attributes() & HIDDEN != 0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta;
+        name.starts_with('.')
+    }
 }
 
 /// Où se trouve l'utilisateur : l'accueil (liste des lecteurs) ou un dossier.
@@ -103,8 +125,11 @@ pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
         // `fs::metadata` suit les liens (jonctions comprises) ; repli sur l'entrée elle-même.
         let meta = fs::metadata(&item_path).or_else(|_| item.metadata()).ok();
         let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
+        let name = item.file_name().to_string_lossy().into_owned();
+        // L'attribut « caché » se lit sur l'élément lui-même (pas sur la cible d'un lien).
+        let hidden = is_hidden(&name, item.metadata().ok().as_ref());
         entries.push(Entry {
-            name: item.file_name().to_string_lossy().into_owned(),
+            name,
             path: item_path,
             is_dir,
             size: if is_dir {
@@ -112,6 +137,9 @@ pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
             } else {
                 Some(meta.as_ref().map_or(0, |m| m.len()))
             },
+            hidden,
+            modified: meta.as_ref().and_then(|m| m.modified().ok()),
+            created: meta.as_ref().and_then(|m| m.created().ok()),
         });
     }
     entries.sort_by(|a, b| {

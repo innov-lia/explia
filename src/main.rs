@@ -2,10 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod dates;
 mod favorites;
 mod fileops;
 mod fs_nav;
 mod launch;
+mod media;
 mod places;
 mod preview;
 mod settings;

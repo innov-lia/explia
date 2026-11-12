@@ -9,6 +9,7 @@ pub enum SortKey {
     Name,
     Size,
     Type,
+    Modified,
 }
 
 impl SortKey {
@@ -17,6 +18,7 @@ impl SortKey {
             SortKey::Name => "name",
             SortKey::Size => "size",
             SortKey::Type => "type",
+            SortKey::Modified => "modified",
         }
     }
 
@@ -25,8 +27,115 @@ impl SortKey {
             "name" => Some(SortKey::Name),
             "size" => Some(SortKey::Size),
             "type" => Some(SortKey::Type),
+            "modified" => Some(SortKey::Modified),
             _ => None,
         }
+    }
+}
+
+/// Façon d'afficher le contenu d'un dossier.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ViewMode {
+    /// Tableau à colonnes (par défaut).
+    #[default]
+    List,
+    /// Colonnes successives, une par niveau du chemin (navigation « style Mac »).
+    Columns,
+    /// Grille de miniatures (visionnage rapide des images).
+    Gallery,
+}
+
+impl ViewMode {
+    pub fn id(self) -> &'static str {
+        match self {
+            ViewMode::List => "list",
+            ViewMode::Columns => "columns",
+            ViewMode::Gallery => "gallery",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        [ViewMode::List, ViewMode::Columns, ViewMode::Gallery]
+            .into_iter()
+            .find(|mode| mode.id() == id)
+    }
+}
+
+/// Colonnes optionnelles du tableau (menu « Afficher »). La colonne « Nom » est toujours là.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Columns {
+    pub size: bool,
+    pub modified: bool,
+    pub created: bool,
+    /// Dimensions des images.
+    pub dimensions: bool,
+    /// Résolution des vidéos.
+    pub resolution: bool,
+    /// Durée des vidéos et des sons.
+    pub duration: bool,
+}
+
+impl Default for Columns {
+    /// Par défaut : taille et date de modification.
+    fn default() -> Self {
+        Self {
+            size: true,
+            modified: true,
+            created: false,
+            dimensions: false,
+            resolution: false,
+            duration: false,
+        }
+    }
+}
+
+impl Columns {
+    const IDS: [&'static str; 6] = [
+        "size",
+        "modified",
+        "created",
+        "dimensions",
+        "resolution",
+        "duration",
+    ];
+
+    fn flags(&self) -> [bool; 6] {
+        [
+            self.size,
+            self.modified,
+            self.created,
+            self.dimensions,
+            self.resolution,
+            self.duration,
+        ]
+    }
+
+    /// Identifiants des colonnes affichées, pour le fichier de réglages.
+    pub fn ids(&self) -> Vec<&'static str> {
+        Self::IDS
+            .into_iter()
+            .zip(self.flags())
+            .filter_map(|(id, on)| on.then_some(id))
+            .collect()
+    }
+
+    /// Reconstruit les colonnes depuis une liste d'identifiants (ceux qui sont inconnus sont ignorés).
+    pub fn from_ids(text: &str) -> Self {
+        let wanted: Vec<&str> = text.split(',').map(str::trim).collect();
+        let has = |id: &str| wanted.contains(&id);
+        Self {
+            size: has("size"),
+            modified: has("modified"),
+            created: has("created"),
+            dimensions: has("dimensions"),
+            resolution: has("resolution"),
+            duration: has("duration"),
+        }
+    }
+
+    /// Une colonne de métadonnées multimédia (lues dans les fichiers) est-elle affichée ?
+    pub fn needs_media_info(&self) -> bool {
+        self.dimensions || self.resolution || self.duration
     }
 }
 
@@ -269,6 +378,8 @@ pub fn sort_entries(entries: &mut [Entry], key: SortKey, order: SortOrder) {
             SortKey::Type => extension_of(&a.path)
                 .cmp(&extension_of(&b.path))
                 .then_with(by_name),
+            // Un élément sans date compte comme le plus ancien.
+            SortKey::Modified => a.modified.cmp(&b.modified).then_with(by_name),
         };
         let ordering = match order {
             SortOrder::Ascending => ordering,
@@ -289,6 +400,7 @@ mod tests {
             path: PathBuf::from(name),
             is_dir: false,
             size: Some(size),
+            ..Default::default()
         }
     }
 
@@ -298,6 +410,7 @@ mod tests {
             path: PathBuf::from(name),
             is_dir: true,
             size: None,
+            ..Default::default()
         }
     }
 
@@ -403,8 +516,58 @@ mod tests {
     }
 
     #[test]
+    fn sort_by_modified_date() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let dated = |name: &str, secs: u64| Entry {
+            modified: Some(UNIX_EPOCH + Duration::from_secs(secs)),
+            ..file(name, 1)
+        };
+        let mut v = vec![
+            dated("recent", 300),
+            file("sans-date", 1),
+            dated("ancien", 100),
+        ];
+        sort_entries(&mut v, SortKey::Modified, SortOrder::Ascending);
+        assert_eq!(names(&v), ["sans-date", "ancien", "recent"]);
+        sort_entries(&mut v, SortKey::Modified, SortOrder::Descending);
+        assert_eq!(names(&v), ["recent", "ancien", "sans-date"]);
+    }
+
+    #[test]
+    fn columns_default_and_round_trip() {
+        let default = Columns::default();
+        assert_eq!(default.ids(), ["size", "modified"]);
+        assert!(!default.needs_media_info());
+        let custom = Columns {
+            created: true,
+            duration: true,
+            size: false,
+            ..default
+        };
+        assert_eq!(Columns::from_ids(&custom.ids().join(",")), custom);
+        assert!(custom.needs_media_info());
+        // Une liste vide signifie « aucune colonne optionnelle ».
+        assert_eq!(Columns::from_ids("").ids(), Vec::<&str>::new());
+        assert_eq!(Columns::from_ids("size, inconnu").ids(), ["size"]);
+    }
+
+    #[test]
+    fn view_mode_ids_round_trip() {
+        for mode in [ViewMode::List, ViewMode::Columns, ViewMode::Gallery] {
+            assert_eq!(ViewMode::from_id(mode.id()), Some(mode));
+        }
+        assert_eq!(ViewMode::from_id("?"), None);
+        assert_eq!(ViewMode::default(), ViewMode::List);
+    }
+
+    #[test]
     fn ids_round_trip() {
-        for key in [SortKey::Name, SortKey::Size, SortKey::Type] {
+        for key in [
+            SortKey::Name,
+            SortKey::Size,
+            SortKey::Type,
+            SortKey::Modified,
+        ] {
             assert_eq!(SortKey::from_id(key.id()), Some(key));
         }
         for order in [SortOrder::Ascending, SortOrder::Descending] {
