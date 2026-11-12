@@ -46,6 +46,20 @@ pub fn letters_from_mask(mask: u32) -> Vec<char> {
         .collect()
 }
 
+/// Dossier de l'utilisateur courant (`C:\Users\nom` sous Windows).
+pub fn user_home() -> Option<PathBuf> {
+    user_home_from(|name| std::env::var_os(name))
+}
+
+/// Cherche le dossier utilisateur avec la fonction de lecture d'environnement donnée.
+fn user_home_from(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    ["USERPROFILE", "HOME"]
+        .into_iter()
+        .filter_map(get)
+        .map(PathBuf::from)
+        .find(|path| !path.as_os_str().is_empty())
+}
+
 /// Lecteurs logiques détectés.
 pub fn detect_drives() -> Vec<Drive> {
     imp::detect_drives()
@@ -156,6 +170,21 @@ mod tests {
         assert_eq!(letters_from_mask(0), Vec::<char>::new());
         assert_eq!(letters_from_mask(0b101), vec!['A', 'C']);
         assert_eq!(letters_from_mask(1 << 25), vec!['Z']);
+    }
+
+    #[test]
+    fn user_home_prefers_userprofile_and_ignores_empty_values() {
+        let vars = |name: &str| match name {
+            "USERPROFILE" => Some("C:\\Users\\bob".into()),
+            "HOME" => Some("/home/bob".into()),
+            _ => None,
+        };
+        assert_eq!(user_home_from(vars), Some(PathBuf::from("C:\\Users\\bob")));
+        let only_home = |name: &str| (name == "HOME").then(|| "/home/bob".into());
+        assert_eq!(user_home_from(only_home), Some(PathBuf::from("/home/bob")));
+        let empty = |_: &str| Some(std::ffi::OsString::new());
+        assert_eq!(user_home_from(empty), None);
+        assert_eq!(user_home_from(|_| None), None);
     }
 
     #[test]

@@ -12,7 +12,7 @@ Exceptions :
 ## Fonctionnalités
 
 - Fenêtre d'explorateur : barre d'adresse, barre latérale, zone centrale, panneau d'aperçu. Elle s'ouvre à 80 % de l'écran, centrée, puis la taille que vous lui donnez est mémorisée.
-- Accueil « Ce PC » : liste des lecteurs détectés (`C:`, `D:`, …) avec leur taille.
+- Au lancement, ExPLIA ouvre le dossier de l'utilisateur courant (`C:\Users\nom`). La vue « Ce PC » liste les lecteurs détectés (`C:`, `D:`, …) avec leur taille.
 - Colonne « Taille » : taille des fichiers et, par défaut, des dossiers (calculée en arrière-plan, « Calcul… » en attendant ; un dossier inaccessible affiche 0 o).
 - Navigation : double-clic sur un dossier pour l'ouvrir, « Dossier parent », « Ce PC ».
 - Barre d'adresse : fil d'Ariane cliquable (`Ce PC > D: > Projets > …`) pour remonter à n'importe quel niveau. Un clic sur l'espace libre (ou sur le crayon) permet de saisir un chemin Windows (`C:\Users`, `D:`) ou `Ce PC` ; Entrée valide, Échap annule.
@@ -20,7 +20,7 @@ Exceptions :
 - Multi-sélection et suppression : **clic maintenu** (0,5 s) sur une ligne pour démarrer la sélection, puis un clic sur chaque ligne à ajouter ou retirer. **Ctrl+clic** ajoute ou retire une ligne ; **Maj+clic** sélectionne toute la plage entre le dernier élément choisi et celui sur lequel vous cliquez. Un seul type à la fois : uniquement des dossiers, ou uniquement des fichiers. Le volet d'aperçu devient un volet « Actions » : **Supprimer** (envoi à la corbeille, avec confirmation) ou **Désélectionner** (Échap fonctionne aussi).
 - Actions sur un élément : un clic sur un **dossier** transforme le volet « Aperçu » en volet « Actions » (**Renommer**, **Supprimer**) ; sur un fichier, ces boutons s'ajoutent sous l'aperçu. **F2**, le bouton « Renommer » ou le clic droit puis « Renommer » permettent de renommer directement dans la liste (Entrée valide, Échap annule ; l'extension n'est pas sélectionnée). **Suppr** ou le bouton « Supprimer » demande la suppression : le bouton devient « Confirmer » **à la même place** (un second clic au même endroit valide ; « Annuler » est juste à côté). Un double-clic accidentel est ignoré pendant 0,6 s.
 - Ouvrir : double-clic sur un fichier (vidéo `.mp4`/`.mkv`, document, exécutable…) pour l'ouvrir avec l'application par défaut de Windows, qui lit les vidéos. Clic droit sur un exécutable (`.exe`, `.bat`, `.cmd`, `.msi`) : « Exécuter » ou « Exécuter en tant qu'administrateur » (fenêtre UAC). Le volet d'aperçu propose les mêmes boutons.
-- Barre latérale : Favoris (Ce PC, puis les dossiers que vous ajoutez) et lecteurs. Clic droit sur un dossier de la liste : « Ajouter aux favoris » ; clic droit sur un de vos favoris : « Retirer des favoris ».
+- Barre latérale : **Favoris** (vide par défaut : uniquement les dossiers que vous ajoutez), puis la section **Ce PC** (un clic ouvre la vue des lecteurs) avec la liste des lecteurs. Clic droit sur un dossier de la liste : « Ajouter aux favoris » ; clic droit sur un de vos favoris : « Retirer des favoris ».
 - Aperçu (décodé hors du thread d'interface) : images PNG, JPEG, BMP, GIF (première image) et WebP ; fichiers texte courants (`.txt`, `.md`, `.json`, `.csv`, `.rs`, `.log`, …, 64 Ko affichés au maximum) ; contenu des archives `.zip` (liste des fichiers, rien n'est extrait) ; pour les autres fichiers (PDF, Office, vidéos…), type et taille. La flèche `<` devant « Aperçu » agrandit le volet pour tout voir d'un coup, `>` le réduit.
 
 ## Prérequis

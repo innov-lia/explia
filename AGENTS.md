@@ -16,12 +16,15 @@ classique d'explorateur.
 2. **Barre d'adresse** : afficher le chemin courant, permettre de
 saisir un chemin Windows et valider la navigation.
 3. **Vue des emplacements** : afficher les lecteurs disponibles (`C:`,
-`D:`, etc.) au démarrage ou depuis l'accueil.
+`D:`, etc.) depuis « Ce PC ». Au démarrage, ExPLIA ouvre le dossier de
+l'utilisateur courant (décision de l'utilisateur).
 4. **Zone centrale** : afficher les dossiers et fichiers du répertoire
 courant ; permettre d'ouvrir un dossier et de revenir au dossier
 parent.
-5. **Barre latérale** : accès rapide à Ce PC, Bureau, Documents,
-Téléchargements et aux lecteurs détectés.
+5. **Barre latérale** : « Favoris » (vide par défaut, remplis par
+l'utilisateur) puis la section « Ce PC » avec les lecteurs détectés
+(décision de l'utilisateur : plus de raccourcis Bureau, Documents,
+Téléchargements par défaut).
 6. **Aperçu** : afficher une miniature et un aperçu simple des images
 prises en charge (au minimum PNG, JPEG, BMP). Pour les autres types,
 afficher une icône et les informations du fichier.

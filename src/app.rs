@@ -221,7 +221,14 @@ impl ExpliaApp {
             event_tx,
             event_rx,
         };
-        app.start_drive_sizes();
+        // Au lancement : le dossier de l'utilisateur courant (à défaut, la vue « Ce PC »).
+        let start = places::user_home()
+            .filter(|home| home.is_dir())
+            .map_or(Location::ThisPc, Location::Dir);
+        app.navigate(start.clone());
+        if app.location != start {
+            app.navigate(Location::ThisPc);
+        }
         app
     }
 
@@ -895,11 +902,8 @@ impl ExpliaApp {
         let mut action = None;
         ui.add_space(4.0);
         ui.heading("Favoris");
-        if ui
-            .selectable_label(self.location == Location::ThisPc, "🖥 Ce PC")
-            .clicked()
-        {
-            action = Some(Action::Go(Location::ThisPc));
+        if self.favorites.paths().is_empty() {
+            ui.weak("Clic droit sur un dossier pour l'ajouter.");
         }
         for path in self.favorites.paths() {
             let here = self.location == Location::Dir(path.clone());
@@ -917,7 +921,16 @@ impl ExpliaApp {
             });
         }
         ui.separator();
-        ui.heading("Lecteurs");
+        // Le titre de la section est « Ce PC » : un clic ouvre la vue des lecteurs.
+        if ui
+            .selectable_label(
+                self.location == Location::ThisPc,
+                egui::RichText::new("🖥 Ce PC").heading(),
+            )
+            .clicked()
+        {
+            action = Some(Action::Go(Location::ThisPc));
+        }
         for drive in &self.drives {
             let here = self.location == Location::Dir(drive.path.clone());
             if ui
