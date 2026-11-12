@@ -22,6 +22,9 @@ use crate::view::{self, Category, ExtensionFilter, SortKey, SortOrder};
 pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
 /// Largeur du volet d'aperçu agrandi, en part de la largeur disponible.
 const PREVIEW_EXPANDED_RATIO: f32 = 0.65;
+/// Message affiché quand on tente de mélanger dossiers et fichiers.
+const MIXED_TYPES_MESSAGE: &str =
+    "Sélection d'un seul type à la fois : dossiers ou fichiers, pas les deux.";
 /// Durée du clic maintenu qui démarre la multi-sélection, en secondes.
 const LONG_PRESS_SECONDS: f64 = 0.5;
 /// Déplacement maximal du pointeur, en points, pendant un clic maintenu.
@@ -133,6 +136,9 @@ pub struct ExpliaApp {
     anchor: Option<PathBuf>,
     /// Attente de confirmation de la suppression de la multi-sélection.
     confirm_delete: bool,
+    /// Multi-sélection démarrée par un clic maintenu : un simple clic ajoute ou retire
+    /// une ligne. Sinon (Ctrl/Maj), un simple clic remplace la sélection, comme l'Explorateur.
+    multi_toggle_mode: bool,
     /// Un clic maintenu vient d'être traité : le relâchement ne doit pas compter comme un clic.
     long_press_done: bool,
     /// Message d'information (non erroné) affiché dans la barre d'état.
@@ -177,6 +183,7 @@ impl ExpliaApp {
             multi: Vec::new(),
             anchor: None,
             confirm_delete: false,
+            multi_toggle_mode: false,
             long_press_done: false,
             notice: None,
             preview: PreviewState::None,
@@ -314,9 +321,8 @@ impl ExpliaApp {
         self.address = target.display();
         self.location = target;
         self.selected = None;
-        self.multi.clear();
+        self.clear_multi();
         self.anchor = None;
-        self.confirm_delete = false;
         self.preview = PreviewState::None;
         self.recompute_visible();
     }
@@ -342,10 +348,7 @@ impl ExpliaApp {
                 self.multi = range;
             }
             Err(view::RangeError::MixedTypes) => {
-                self.error = Some(
-                    "Sélection d'un seul type à la fois : dossiers ou fichiers, pas les deux."
-                        .to_string(),
-                );
+                self.error = Some(MIXED_TYPES_MESSAGE.to_string());
             }
             Err(view::RangeError::NotFound) => self.toggle_multi(entry),
         }
@@ -372,24 +375,47 @@ impl ExpliaApp {
     /// on ne mélange pas dossiers et fichiers.
     fn toggle_multi(&mut self, entry: Entry) {
         self.confirm_delete = false;
+        // Comme dans l'Explorateur : le premier Ctrl+clic garde l'élément déjà sélectionné.
+        if self.multi.is_empty()
+            && let Some(current) = self.selected.clone()
+        {
+            if current.path == entry.path {
+                // Ctrl+clic sur l'unique élément sélectionné : on le désélectionne.
+                self.selected = None;
+                self.preview = PreviewState::None;
+                return;
+            }
+            if current.is_dir != entry.is_dir {
+                self.error = Some(MIXED_TYPES_MESSAGE.to_string());
+                return;
+            }
+            self.multi.push(current);
+        }
         self.selected = None;
         self.preview = PreviewState::None;
         if let Some(position) = self.multi.iter().position(|e| e.path == entry.path) {
             self.multi.remove(position);
+            if self.multi.is_empty() {
+                self.multi_toggle_mode = false;
+            }
             return;
         }
         if let Some(first) = self.multi.first()
             && first.is_dir != entry.is_dir
         {
-            self.error = Some(
-                "Sélection d'un seul type à la fois : dossiers ou fichiers, pas les deux."
-                    .to_string(),
-            );
+            self.error = Some(MIXED_TYPES_MESSAGE.to_string());
             return;
         }
         self.error = None;
         self.anchor = Some(entry.path.clone());
         self.multi.push(entry);
+    }
+
+    /// Quitte la multi-sélection.
+    fn clear_multi(&mut self) {
+        self.multi.clear();
+        self.multi_toggle_mode = false;
+        self.confirm_delete = false;
     }
 
     fn delete_multi(&mut self) {
@@ -407,7 +433,7 @@ impl ExpliaApp {
             }
         }
         // Dans tous les cas, on relit le dossier : certains éléments ont pu être supprimés.
-        self.multi.clear();
+        self.clear_multi();
         self.refresh_listing();
     }
 
@@ -429,6 +455,8 @@ impl ExpliaApp {
     }
 
     fn select(&mut self, ctx: &egui::Context, entry: Entry) {
+        // Un clic simple remplace toute sélection multiple.
+        self.clear_multi();
         self.preview = PreviewState::None;
         if !entry.is_dir && preview::is_previewable(&entry.path) {
             // Le décodage se fait hors du thread d'interface.
@@ -524,14 +552,20 @@ impl ExpliaApp {
             }
             Action::LongPress(entry) => {
                 self.long_press_done = true;
+                // Un clic maintenu sur l'élément sélectionné démarre la multi-sélection avec lui.
+                if self.multi.is_empty()
+                    && self.selected.as_ref().is_some_and(|s| s.path == entry.path)
+                {
+                    self.selected = None;
+                    self.preview = PreviewState::None;
+                }
                 self.toggle_multi(entry);
+                // Après un clic maintenu, chaque clic ajoute ou retire une ligne.
+                self.multi_toggle_mode = !self.multi.is_empty();
             }
             Action::ToggleMulti(entry) => self.toggle_multi(entry),
             Action::SelectRange(entry) => self.select_range(entry),
-            Action::ClearMulti => {
-                self.multi.clear();
-                self.confirm_delete = false;
-            }
+            Action::ClearMulti => self.clear_multi(),
             Action::AskDelete => self.confirm_delete = !self.multi.is_empty(),
             Action::CancelDelete => self.confirm_delete = false,
             Action::ConfirmDelete => self.delete_multi(),
@@ -902,7 +936,9 @@ impl ExpliaApp {
                         &format!("{icon} {}", entry.name),
                         &self.entry_size_text(entry),
                     );
-                    let multi_mode = !self.multi.is_empty();
+                    // Après un clic maintenu : chaque clic ajoute ou retire une ligne.
+                    // Avec Ctrl/Maj : un clic simple remplace la sélection (comportement habituel).
+                    let multi_mode = self.multi_toggle_mode && !self.multi.is_empty();
                     // Clic maintenu : démarre la multi-sélection (ou ajoute la ligne).
                     // La détection se fait sur la position du pointeur, avec une tolérance
                     // pour les mouvements de la main, sans dépendre de l'état du widget.
@@ -1344,8 +1380,7 @@ impl eframe::App for ExpliaApp {
             && !self.multi.is_empty()
             && ctx.input(|i| i.key_pressed(egui::Key::Escape))
         {
-            self.multi.clear();
-            self.confirm_delete = false;
+            self.clear_multi();
         }
         let mut action = None;
 
