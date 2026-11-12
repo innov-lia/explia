@@ -3,6 +3,7 @@
 
 mod app;
 mod favorites;
+mod fileops;
 mod fs_nav;
 mod launch;
 mod places;

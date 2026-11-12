@@ -78,7 +78,9 @@ fichier. **Exceptions autorisées par l'utilisateur** :
   y compris en administrateur via la fenêtre UAC de Windows ;
   * sur demande explicite et après confirmation dans l'application, elle peut
   envoyer des fichiers ou des dossiers sélectionnés à la **corbeille** de
-  Windows (jamais de suppression définitive de sa propre initiative).
+  Windows (jamais de suppression définitive de sa propre initiative) ;
+  * sur demande explicite de l'utilisateur, elle peut renommer un fichier ou
+  un dossier, dans son dossier d'origine, sans jamais écraser un élément existant.
 Aucun autre fichier ne doit être écrit.
 * Ne jamais lancer de commande destructive ou modifier des fichiers en
 dehors du dépôt.

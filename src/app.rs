@@ -10,6 +10,7 @@ use eframe::egui::containers::menu::{MenuButton, MenuConfig};
 use eframe::egui::{self, PopupCloseBehavior};
 
 use crate::favorites::Favorites;
+use crate::fileops;
 use crate::fs_nav::{self, Entry, Location};
 use crate::launch;
 use crate::places::{self, Drive, DriveKind};
@@ -27,6 +28,10 @@ const MIXED_TYPES_MESSAGE: &str =
     "Sélection d'un seul type à la fois : dossiers ou fichiers, pas les deux.";
 /// Durée du clic maintenu qui démarre la multi-sélection, en secondes.
 const LONG_PRESS_SECONDS: f64 = 0.5;
+/// Un second clic sur l'élément sélectionné démarre le renommage s'il survient entre ces
+/// deux délais (en secondes) : plus tôt, c'est un double-clic ; plus tard, un nouveau clic.
+const RENAME_CLICK_MIN_SECONDS: f64 = 0.45;
+const RENAME_CLICK_MAX_SECONDS: f64 = 3.0;
 /// Déplacement maximal du pointeur, en points, pendant un clic maintenu.
 const LONG_PRESS_TOLERANCE: f32 = 12.0;
 /// Largeur de la colonne « Taille ».
@@ -93,6 +98,24 @@ enum Action {
     CancelDelete,
     /// Envoie la sélection à la corbeille.
     ConfirmDelete,
+    /// Passe une ligne en mode renommage (F2, clic lent, bouton « Renommer »).
+    StartRename(Entry),
+    CommitRename {
+        path: PathBuf,
+        new_name: String,
+    },
+    CancelRename,
+}
+
+/// Renommage en cours, directement dans la liste.
+struct RenameState {
+    path: PathBuf,
+    text: String,
+    /// Longueur (en caractères) du texte sélectionné au départ : le nom sans l'extension.
+    initial_selection: usize,
+    /// Nombre d'images déjà affichées : le focus est demandé à la première,
+    /// la sélection du texte appliquée à la suivante.
+    frames: u32,
 }
 
 pub struct ExpliaApp {
@@ -143,6 +166,11 @@ pub struct ExpliaApp {
     long_press_done: bool,
     /// Message d'information (non erroné) affiché dans la barre d'état.
     notice: Option<String>,
+    /// Renommage en cours (une seule ligne à la fois).
+    renaming: Option<RenameState>,
+    /// Dernier clic sur une ligne (chemin, instant) : un second clic lent sur la ligne
+    /// déjà sélectionnée démarre le renommage, comme dans l'Explorateur.
+    last_row_click: Option<(PathBuf, f64)>,
     preview: PreviewState,
     event_tx: Sender<Event>,
     event_rx: Receiver<Event>,
@@ -186,6 +214,8 @@ impl ExpliaApp {
             multi_toggle_mode: false,
             long_press_done: false,
             notice: None,
+            renaming: None,
+            last_row_click: None,
             preview: PreviewState::None,
             event_tx,
             event_rx,
@@ -323,6 +353,8 @@ impl ExpliaApp {
         self.selected = None;
         self.clear_multi();
         self.anchor = None;
+        self.renaming = None;
+        self.last_row_click = None;
         self.preview = PreviewState::None;
         self.recompute_visible();
     }
@@ -418,8 +450,17 @@ impl ExpliaApp {
         self.confirm_delete = false;
     }
 
-    fn delete_multi(&mut self) {
-        let paths: Vec<PathBuf> = self.multi.iter().map(|e| e.path.clone()).collect();
+    /// Éléments visés par « Supprimer » : la multi-sélection, sinon l'élément sélectionné.
+    fn delete_targets(&self) -> Vec<Entry> {
+        if self.multi.is_empty() {
+            self.selected.iter().cloned().collect()
+        } else {
+            self.multi.clone()
+        }
+    }
+
+    fn delete_selection(&mut self) {
+        let paths: Vec<PathBuf> = self.delete_targets().into_iter().map(|e| e.path).collect();
         let count = paths.len();
         self.confirm_delete = false;
         match trash::move_to_recycle_bin(&paths) {
@@ -434,7 +475,44 @@ impl ExpliaApp {
         }
         // Dans tous les cas, on relit le dossier : certains éléments ont pu être supprimés.
         self.clear_multi();
+        self.selected = None;
+        self.preview = PreviewState::None;
         self.refresh_listing();
+    }
+
+    /// Démarre le renommage de `entry` directement dans la liste.
+    fn start_rename(&mut self, entry: &Entry) {
+        if !matches!(self.location, Location::Dir(_)) {
+            return;
+        }
+        self.error = None;
+        self.confirm_delete = false;
+        self.renaming = Some(RenameState {
+            path: entry.path.clone(),
+            text: entry.name.clone(),
+            initial_selection: fileops::stem_len(&entry.name, entry.is_dir),
+            frames: 0,
+        });
+    }
+
+    /// Applique le renommage ; en cas d'erreur, la saisie reste ouverte pour corriger.
+    fn commit_rename(&mut self, ctx: &egui::Context, path: PathBuf, new_name: &str) {
+        match fileops::rename_in_place(&path, new_name) {
+            Ok(new_path) => {
+                self.renaming = None;
+                self.error = None;
+                if self.favorites.contains(&path) {
+                    self.favorites.remove(&path);
+                    self.favorites.add(new_path.clone());
+                }
+                self.refresh_listing();
+                if let Some(entry) = self.entries.iter().find(|e| e.path == new_path).cloned() {
+                    self.select(ctx, entry);
+                }
+                self.notice = Some(format!("Renommé en « {new_name} »."));
+            }
+            Err(message) => self.error = Some(message),
+        }
     }
 
     fn submit_address(&mut self) {
@@ -566,9 +644,12 @@ impl ExpliaApp {
             Action::ToggleMulti(entry) => self.toggle_multi(entry),
             Action::SelectRange(entry) => self.select_range(entry),
             Action::ClearMulti => self.clear_multi(),
-            Action::AskDelete => self.confirm_delete = !self.multi.is_empty(),
+            Action::AskDelete => self.confirm_delete = !self.delete_targets().is_empty(),
             Action::CancelDelete => self.confirm_delete = false,
-            Action::ConfirmDelete => self.delete_multi(),
+            Action::ConfirmDelete => self.delete_selection(),
+            Action::StartRename(entry) => self.start_rename(&entry),
+            Action::CommitRename { path, new_name } => self.commit_rename(ctx, path, &new_name),
+            Action::CancelRename => self.renaming = None,
         }
     }
 
@@ -849,7 +930,7 @@ impl ExpliaApp {
         action
     }
 
-    fn central(&self, ui: &mut egui::Ui) -> Option<Action> {
+    fn central(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         match &self.location {
             Location::ThisPc => self.drives_view(ui),
             Location::Dir(_) => self.listing_view(ui),
@@ -896,7 +977,7 @@ impl ExpliaApp {
         }
     }
 
-    fn listing_view(&self, ui: &mut egui::Ui) -> Option<Action> {
+    fn listing_view(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         if self.entries.is_empty() {
             ui.label("Ce dossier est vide.");
@@ -908,6 +989,9 @@ impl ExpliaApp {
         }
         table_header(ui);
         let row_height = table_row_height(ui) + ui.spacing().item_spacing.y;
+        // État modifié pendant le dessin de la liste : sorti de `self` le temps de la frame.
+        let mut rename = self.renaming.take();
+        let mut last_click = self.last_row_click.take();
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             // Un clic maintenu ne doit pas faire défiler la liste.
@@ -917,6 +1001,15 @@ impl ExpliaApp {
             )
             .show_rows(ui, row_height, self.visible.len(), |ui, range| {
                 for entry in &self.visible[range] {
+                    // Ligne en cours de renommage : champ de saisie à la place du libellé.
+                    if let Some(state) = rename.as_mut()
+                        && state.path == entry.path
+                    {
+                        if let Some(rename_action) = rename_row(ui, state) {
+                            action = Some(rename_action);
+                        }
+                        continue;
+                    }
                     let is_selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path)
                         || self.multi.iter().any(|m| m.path == entry.path);
                     let icon = if entry.is_dir {
@@ -987,13 +1080,34 @@ impl ExpliaApp {
                             Action::Open(entry.path.clone())
                         });
                     } else if response.clicked() {
-                        action = Some(if multi_mode {
-                            Action::ToggleMulti(entry.clone())
+                        let now = ui.input(|i| i.time);
+                        // Second clic « lent » sur l'élément déjà sélectionné : renommage.
+                        let slow_second_click = !multi_mode
+                            && self.multi.is_empty()
+                            && self.selected.as_ref().is_some_and(|s| s.path == entry.path)
+                            && last_click.as_ref().is_some_and(|(path, time)| {
+                                *path == entry.path
+                                    && (RENAME_CLICK_MIN_SECONDS..RENAME_CLICK_MAX_SECONDS)
+                                        .contains(&(now - time))
+                            });
+                        if slow_second_click {
+                            last_click = None;
+                            action = Some(Action::StartRename(entry.clone()));
                         } else {
-                            Action::Select(entry.clone())
-                        });
+                            last_click = Some((entry.path.clone(), now));
+                            action = Some(if multi_mode {
+                                Action::ToggleMulti(entry.clone())
+                            } else {
+                                Action::Select(entry.clone())
+                            });
+                        }
                     }
                     response.context_menu(|ui| {
+                        if ui.button("Renommer  (F2)").clicked() {
+                            action = Some(Action::StartRename(entry.clone()));
+                            ui.close();
+                        }
+                        ui.separator();
                         if entry.is_dir {
                             if self.favorites.contains(&entry.path) {
                                 if ui.button("Retirer des favoris").clicked() {
@@ -1024,25 +1138,24 @@ impl ExpliaApp {
                     });
                 }
             });
+        self.renaming = rename;
+        self.last_row_click = last_click;
         action
     }
 
-    /// Contenu du volet pendant la multi-sélection : résumé et actions (supprimer).
-    fn actions_content(&self, ui: &mut egui::Ui) -> Option<Action> {
+    /// Boutons « Renommer » et « Supprimer ». « Supprimer » demande d'abord confirmation,
+    /// puis envoie à la corbeille. `rename` : l'élément à renommer (un seul à la fois).
+    fn edit_controls(
+        &self,
+        ui: &mut egui::Ui,
+        what: &str,
+        rename: Option<&Entry>,
+    ) -> Option<Action> {
         let mut action = None;
-        let count = self.multi.len();
-        let kind = if self.multi.first().is_some_and(|e| e.is_dir) {
-            "dossier(s)"
-        } else {
-            "fichier(s)"
-        };
-        ui.label(egui::RichText::new(format!("{count} {kind} sélectionné(s)")).strong());
-        ui.weak("Clic maintenu ou clic sur une ligne pour ajouter ou retirer.");
-        ui.add_space(6.0);
         if self.confirm_delete {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
-                format!("Envoyer {count} {kind} à la corbeille ?"),
+                format!("Envoyer {what} à la corbeille ?"),
             );
             ui.horizontal(|ui| {
                 let confirm = egui::Button::new(
@@ -1057,15 +1170,42 @@ impl ExpliaApp {
                 }
             });
         } else {
-            ui.horizontal(|ui| {
-                if ui.button("🗑 Supprimer").clicked() {
+            ui.horizontal_wrapped(|ui| {
+                if let Some(entry) = rename
+                    && ui
+                        .button("✏ Renommer")
+                        .on_hover_text("Raccourci : F2")
+                        .clicked()
+                {
+                    action = Some(Action::StartRename(entry.clone()));
+                }
+                if ui
+                    .button("🗑 Supprimer")
+                    .on_hover_text("Raccourci : Suppr")
+                    .clicked()
+                {
                     action = Some(Action::AskDelete);
                 }
-                if ui.button("Désélectionner").clicked() {
-                    action = Some(Action::ClearMulti);
-                }
             });
-            ui.weak("Les éléments vont dans la corbeille de Windows.");
+            ui.weak("Suppression : vers la corbeille de Windows.");
+        }
+        action
+    }
+
+    /// Contenu du volet pendant la multi-sélection : résumé et actions (supprimer).
+    fn actions_content(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let count = self.multi.len();
+        let kind = if self.multi.first().is_some_and(|e| e.is_dir) {
+            "dossier(s)"
+        } else {
+            "fichier(s)"
+        };
+        ui.label(egui::RichText::new(format!("{count} {kind} sélectionné(s)")).strong());
+        ui.weak("Clic maintenu ou clic sur une ligne pour ajouter ou retirer.");
+        ui.add_space(6.0);
+        let mut action = self.edit_controls(ui, &format!("{count} {kind}"), None);
+        if !self.confirm_delete && ui.button("Désélectionner").clicked() {
+            action = Some(Action::ClearMulti);
         }
         ui.add_space(6.0);
         ui.separator();
@@ -1102,11 +1242,10 @@ impl ExpliaApp {
                 ("<", "Agrandir le volet d'aperçu")
             };
             toggle = ui.button(arrow).on_hover_text(hint).clicked();
-            ui.heading(if self.multi.is_empty() {
-                "Aperçu"
-            } else {
-                "Actions"
-            });
+            // Un dossier (ou une multi-sélection) n'a pas d'aperçu : le volet propose des actions.
+            let actions_mode =
+                !self.multi.is_empty() || self.selected.as_ref().is_some_and(|s| s.is_dir);
+            ui.heading(if actions_mode { "Actions" } else { "Aperçu" });
         });
         ui.separator();
         if !self.multi.is_empty() {
@@ -1129,7 +1268,9 @@ impl ExpliaApp {
             if !size.is_empty() {
                 ui.label(format!("Taille : {size}"));
             }
-            return (toggle, None);
+            ui.add_space(6.0);
+            let what = format!("le dossier « {} »", entry.name);
+            return (toggle, self.edit_controls(ui, &what, Some(entry)));
         }
         ui.label(preview::kind_description(&entry.path));
         ui.label(format!("Taille : {}", self.entry_size_text(entry)));
@@ -1160,6 +1301,11 @@ impl ExpliaApp {
                 action = Some(Action::OpenAsAdmin(entry.path.clone()));
             }
         });
+        let what = format!("le fichier « {} »", entry.name);
+        if let Some(edit_action) = self.edit_controls(ui, &what, Some(entry)) {
+            action = Some(edit_action);
+        }
+        ui.add_space(4.0);
         if !preview::is_previewable(&entry.path) {
             ui.add_space(12.0);
             let icon = if is_video { "🎬" } else { "📄" };
@@ -1268,6 +1414,47 @@ fn menu(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)
     MenuButton::new(title)
         .config(MenuConfig::new().close_behavior(PopupCloseBehavior::CloseOnClickOutside))
         .ui(ui, add_contents);
+}
+
+/// Ligne en cours de renommage : Entrée valide, Échap ou un clic ailleurs annule.
+fn rename_row(ui: &mut egui::Ui, state: &mut RenameState) -> Option<Action> {
+    let id = egui::Id::unique("rename-edit");
+    let width = (ui.available_width() - SIZE_COLUMN_WIDTH).max(120.0);
+    let edit = ui.add_sized(
+        [width, table_row_height(ui)],
+        egui::TextEdit::singleline(&mut state.text).id(id),
+    );
+    if state.frames == 0 {
+        edit.request_focus();
+    } else if state.frames == 1 {
+        // Sélectionne le nom sans l'extension, comme l'Explorateur.
+        if let Some(mut edit_state) = egui::TextEdit::load_state(ui.ctx(), id) {
+            edit_state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(state.initial_selection),
+                )));
+            edit_state.store(ui.ctx(), id);
+        }
+    }
+    state.frames += 1;
+    let (enter, escape) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::Enter),
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    if edit.lost_focus() && enter {
+        return Some(Action::CommitRename {
+            path: state.path.clone(),
+            new_name: state.text.clone(),
+        });
+    }
+    if escape || (edit.lost_focus() && state.frames > 2) {
+        return Some(Action::CancelRename);
+    }
+    None
 }
 
 fn table_row_height(ui: &egui::Ui) -> f32 {
@@ -1383,6 +1570,26 @@ impl eframe::App for ExpliaApp {
             self.clear_multi();
         }
         let mut action = None;
+
+        // Raccourcis : F2 renomme, Suppr demande la suppression (jamais pendant une saisie).
+        if !ctx.egui_wants_keyboard_input() && self.renaming.is_none() && !self.address_editing {
+            let (f2, delete) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::F2),
+                    i.key_pressed(egui::Key::Delete),
+                )
+            });
+            let single = match self.multi.len() {
+                0 => self.selected.as_ref(),
+                1 => self.multi.first(),
+                _ => None,
+            };
+            if f2 && let Some(entry) = single {
+                action = Some(Action::StartRename(entry.clone()));
+            } else if delete && !self.delete_targets().is_empty() {
+                action = Some(Action::AskDelete);
+            }
+        }
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.add_space(4.0);
