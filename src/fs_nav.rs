@@ -20,7 +20,7 @@ pub struct Entry {
 
 /// Vrai si l'élément est caché : attribut « caché » de Windows (`meta` doit décrire l'élément
 /// lui-même, sans suivre les liens) ou nom commençant par un point (`.git`, `.config`, …).
-fn is_hidden(name: &str, meta: Option<&fs::Metadata>) -> bool {
+pub fn is_hidden(name: &str, meta: Option<&fs::Metadata>) -> bool {
     name.starts_with('.') || has_hidden_attribute(meta)
 }
 
@@ -35,6 +35,40 @@ fn has_hidden_attribute(meta: Option<&fs::Metadata>) -> bool {
 #[cfg(not(windows))]
 fn has_hidden_attribute(_meta: Option<&fs::Metadata>) -> bool {
     false
+}
+
+/// Lien symbolique ou jonction (point d'analyse Windows) : jamais suivi lors d'un parcours.
+/// `meta` doit décrire l'élément lui-même (`DirEntry::metadata`, pas `fs::metadata`).
+pub fn is_link(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        /// `FILE_ATTRIBUTE_REPARSE_POINT`.
+        const REPARSE_POINT: u32 = 0x400;
+        meta.file_attributes() & REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+/// Construit l'entrée décrivant un chemin (nom, type, taille, dates). `None` s'il est illisible.
+pub fn entry_from_path(path: &Path) -> Option<Entry> {
+    let own = fs::symlink_metadata(path).ok()?;
+    let meta = fs::metadata(path).unwrap_or_else(|_| own.clone());
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let is_dir = meta.is_dir();
+    let hidden = is_hidden(&name, Some(&own));
+    Some(Entry {
+        name,
+        path: path.to_path_buf(),
+        is_dir,
+        size: if is_dir { None } else { Some(meta.len()) },
+        hidden,
+        modified: meta.modified().ok(),
+        created: meta.created().ok(),
+    })
 }
 
 /// Où se trouve l'utilisateur : l'accueil (liste des lecteurs) ou un dossier.

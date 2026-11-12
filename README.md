@@ -16,7 +16,7 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 ### Navigation
 - Au lancement, ExPLIA ouvre le dossier de l'utilisateur courant (`C:\Users\nom`). La fenêtre s'ouvre à 80 % de l'écran, centrée, puis la taille que vous lui donnez est mémorisée.
 - **Barre d'adresse** (en haut de la zone centrale, avec la recherche) : fil d'Ariane cliquable (`Ce PC > D: > Projets > …`) pour remonter à n'importe quel niveau ; dans votre dossier utilisateur, le chemin commence par `Home` (`Ce PC > Home > Videos`) au lieu de `C: > Users > nom` ; chaque mot s'illumine (fond et couleur) au survol. Un clic sur l'espace libre permet de saisir un chemin Windows (`C:\Users`, `D:`) ou `Ce PC` ; Entrée valide, Échap annule. Les barres sont agrandies pour être plus lisibles ; la barre de menus du haut contient le bouton **Ce PC** (ouvre l'onglet des lecteurs), **Afficher** et **Option**.
-- **Recherche** (à droite de la barre d'adresse, **Ctrl+F** pour y aller, **Échap** pour l'effacer) : filtre en direct les fichiers **et dossiers** du dossier affiché. Un mot est cherché dans le nom (`rapport`, `.exe`) ; `*` et `?` sont des jokers sur le nom entier (`*.exe`, `img_??.png`) ; plusieurs motifs se séparent par `,` ou `;` (`*.mkv, *.avi`). Majuscules et minuscules sont indifférentes. La recherche ne porte que sur le dossier courant (pas les sous-dossiers) et s'efface quand on change de dossier.
+- **Recherche** (à droite de la barre d'adresse, **Ctrl+F** pour y aller, **Échap** pour l'effacer) : filtre en direct les fichiers **et dossiers** du dossier affiché. Un mot est cherché dans le nom (`rapport`, `.exe`) ; `*` et `?` sont des jokers sur le nom entier (`*.exe`, `img_??.png`) ; plusieurs motifs se séparent par `,` ou `;` (`*.mkv, *.avi`). Majuscules et minuscules sont indifférentes. Avec la case **Récursive** (à gauche de la barre de recherche, **cochée par défaut**), la recherche parcourt aussi les sous-dossiers, en arrière-plan : les résultats (5 000 au plus) apparaissent au fur et à mesure dans la liste, avec leur dossier d'origine, jusqu'au bouton « ✕ Fermer » ; décochée, elle filtre seulement le dossier affiché. Les liens et jonctions ne sont jamais suivis. La recherche s'efface quand on change de dossier.
 - **Barre latérale en « classeur »** : la liste de l'onglet actif est à gauche, les onglets (intercalaires) sont sur son bord droit :
   - **Ce PC** : les lecteurs détectés (`C:`, `D:`, …) avec leur nom de volume et, sous chacun, une **barre d'occupation** avec le pourcentage à l'intérieur (verte, orange à partir de 75 %, rouge à partir de 90 %). L'infobulle donne le type, le format, le total, l'espace utilisé et libre. **Option > Occupation des disques** masque ou affiche ces barres.
   - **Home** : le dossier de l'utilisateur et ses sous-dossiers.
@@ -43,13 +43,17 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 
 ### Sélection et actions
 - **Sélection multiple** : **clic maintenu** (0,5 s) sur une ligne pour démarrer, puis un clic sur chaque ligne à ajouter ou retirer ; **Ctrl+clic** ajoute ou retire une ligne (liste, colonnes « style Mac » et grilles) ; **Maj+clic** (ou **Maj+↑/↓**) sélectionne la plage. Un seul type à la fois : uniquement des dossiers, ou uniquement des fichiers.
+- **Ligne « Sélection »** (volet de détail, sous Colonnes / Images / Vidéos ; elle respecte l'option **Récursive**) :
+  - **📂 Dossiers vides** : liste puis **sélectionne** tous les dossiers sans aucun fichier (des sous-dossiers vides ne comptent pas) ; seuls les plus hauts sont listés. Il ne reste qu'à cliquer sur « Supprimer » (corbeille, avec confirmation). Non récursif : seulement les sous-dossiers directs.
+  - **📑 Doublons > [50] Mo** : liste les fichiers de même contenu (même taille puis même empreinte 64 bits du contenu) plus gros que le seuil, modifiable (50 Mo par défaut). Les copies sont groupées (`#1`, `#2`…) avec leur dossier d'origine ; « Sélectionner les copies » garde le premier fichier de chaque groupe et sélectionne les autres. Rien n'est supprimé sans votre confirmation.
+- **Supprimer le dossier affiché** : quand rien n'est sélectionné, le volet de détail propose « Supprimer ce dossier » (corbeille, avec confirmation) ; ExPLIA remonte ensuite au dossier parent.
 - **Volet « Actions »** : un clic sur un dossier (ou une multi-sélection) transforme l'aperçu du volet de détail en actions ; sur un fichier, les boutons s'ajoutent sous l'aperçu.
 - **Renommer** : **F2**, bouton « Renommer » ou clic droit, directement dans la liste ou la dernière colonne de la vue en colonnes (Entrée valide, Échap annule ; l'extension n'est pas sélectionnée). Les noms interdits par Windows sont refusés et un élément existant n'est jamais écrasé.
 - **Supprimer** : **Suppr** ou bouton « Supprimer », vers la **corbeille de Windows** (récupérable). Le bouton devient « Confirmer » **à la même place** (un second clic au même endroit valide ; « Annuler » est juste à côté) ; au clavier, **Suppr** puis **Entrée**, Échap annule. Un double-clic accidentel est ignoré pendant 0,6 s.
 - **Ouvrir** : double-clic sur un fichier l'ouvre avec l'application par défaut de Windows. Clic droit sur un exécutable (`.exe`, `.bat`, `.cmd`, `.msi`) : « Exécuter » ou « Exécuter en tant qu'administrateur » (fenêtre UAC).
 
 ### Réglages
-Vos réglages sont enregistrés automatiquement dans `%APPDATA%\ExPLIA\settings.txt` (format `clé=valeur`, modifiable à la main) : taille de la fenêtre, tri, volet d'aperçu, disposition des blocs, mode d'affichage, colonnes, éléments cachés, options (taille des dossiers, occupation des disques), favoris et applications.
+Vos réglages sont enregistrés automatiquement dans `%APPDATA%\ExPLIA\settings.txt` (format `clé=valeur`, modifiable à la main) : taille de la fenêtre, tri, volet d'aperçu, disposition des blocs, mode d'affichage, colonnes, éléments cachés, options (taille des dossiers, occupation des disques, récursivité, seuil des doublons), favoris et applications.
 
 ## Raccourcis clavier
 
@@ -133,6 +137,7 @@ cargo clippy -- -D warnings
 | `src/fileops.rs` | Renommage : validation du nom Windows, refus d'écraser. |
 | `src/trash.rs` | Envoi à la corbeille (`SHFileOperationW` avec `FOF_ALLOWUNDO`). |
 | `src/launch.rs` | Ouverture d'un fichier / lancement d'un exécutable (`ShellExecuteW`, UAC). |
+| `src/scan.rs` | Parcours en lecture seule : recherche récursive, dossiers vides, doublons (empreintes). |
 | `src/places.rs` | Lecteurs logiques, capacité / occupation / nom / format des lecteurs, dossier de l'utilisateur (API Windows). |
 | `src/preview.rs` | Aperçus : images, texte, archives ZIP, miniatures. |
 | `.cargo/config.toml` | Liaison statique du runtime C. |

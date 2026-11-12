@@ -18,6 +18,7 @@ use crate::media::{self, MediaInfo, MediaKind};
 use crate::places::{self, Drive, DriveInfo, DriveKind};
 use crate::player::{self, Player, PlayerState};
 use crate::preview::{self, ArchivePreview, ImagePreview, PreviewContent, TextPreview};
+use crate::scan;
 use crate::settings::Settings;
 use crate::trash;
 use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
@@ -61,6 +62,8 @@ const DRIVE_BAR_HEIGHT: f32 = 16.0;
 /// Largeurs des deux colonnes à gauche de la grille d'images : lecteurs et navigation.
 /// Largeur de la barre de recherche, en haut de la zone centrale.
 const SEARCH_WIDTH: f32 = 300.0;
+/// Place réservée à la case « Récursive », à gauche de la barre de recherche.
+const RECURSIVE_WIDTH: f32 = 110.0;
 /// Libellés des boutons de la barre du volet de détail (mesurés pour sa largeur minimale).
 const OPTION_COLUMNS_LABEL: &str = "▥ Colonnes";
 const OPTION_IMAGES_LABEL: &str = "🖼 Images";
@@ -69,6 +72,29 @@ const GALLERY_DRIVES_WIDTH: f32 = 170.0;
 const GALLERY_NAV_WIDTH: f32 = 210.0;
 /// Agrandissement du texte et des boutons des barres du haut, en points.
 const TOOLBAR_TEXT_BOOST: f32 = 2.0;
+
+/// Nature des résultats affichés à la place du contenu du dossier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultKind {
+    /// Recherche récursive par nom.
+    Search,
+    /// Dossiers sans aucun fichier.
+    EmptyFolders,
+    /// Fichiers de même contenu.
+    Duplicates,
+}
+
+/// Résultats d'un parcours (recherche récursive, dossiers vides, doublons), affichés dans la
+/// liste à la place du contenu du dossier jusqu'à leur fermeture ou un changement de dossier.
+struct Results {
+    kind: ResultKind,
+    /// Parcours en cours (les résultats arrivent au fur et à mesure).
+    running: bool,
+    /// Recherche limitée à `scan::SEARCH_LIMIT` résultats.
+    truncated: bool,
+    /// Avancement du parcours (doublons).
+    progress: Option<String>,
+}
 
 /// Onglets (« intercalaires ») de la barre latérale : le classeur.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +188,26 @@ enum Event {
     Thumb(PathBuf, Option<ImagePreview>),
     /// Lecteur audio / vidéo prêt (ou échec), après le chargement de VLC.
     PlayerReady(PathBuf, Result<Player, String>),
+    /// Lot de résultats d'un parcours ; `generation` identifie le parcours concerné.
+    ScanBatch {
+        generation: u64,
+        entries: Vec<Entry>,
+    },
+    /// Groupes de doublons trouvés (un groupe = des fichiers de même contenu).
+    ScanGroups {
+        generation: u64,
+        groups: Vec<Vec<Entry>>,
+    },
+    /// Avancement d'un parcours.
+    ScanProgress {
+        generation: u64,
+        text: String,
+    },
+    /// Fin d'un parcours ; `truncated` : résultats limités.
+    ScanDone {
+        generation: u64,
+        truncated: bool,
+    },
 }
 
 /// Lecture intégrée en cours dans le volet d'aperçu.
@@ -241,6 +287,18 @@ enum Action {
     StopPlayer,
     /// Change la façon d'afficher le dossier (liste, colonnes, grille d'images).
     SetViewMode(ViewMode),
+    /// Lance la recherche des dossiers vides (selon l'option « Récursive »).
+    FindEmptyFolders,
+    /// Lance la recherche des doublons (selon l'option « Récursive » et le seuil en Mo).
+    FindDuplicates,
+    /// Change le seuil, en Mo, de la recherche de doublons.
+    SetDuplicateMb(u32),
+    /// Sélectionne les copies : tout sauf le premier fichier de chaque groupe de doublons.
+    SelectDuplicateCopies,
+    /// Ferme les résultats et revient au contenu du dossier.
+    CloseResults,
+    /// Demande la suppression du dossier affiché lui-même.
+    AskDeleteCurrent,
     /// Clic sur un en-tête de colonne : trie dessus, ou inverse l'ordre s'il est déjà actif.
     SortBy(SortKey),
     /// Affiche ou masque les dossiers et fichiers cachés.
@@ -315,6 +373,18 @@ pub struct ExpliaApp {
     visible: Vec<Entry>,
     sort_key: SortKey,
     sort_order: SortOrder,
+    /// Option « Récursive » : recherche, dossiers vides et doublons parcourent les sous-dossiers.
+    recursive: bool,
+    /// Taille minimale (Mo) des fichiers examinés pour les doublons.
+    duplicate_min_mb: u32,
+    /// Résultats affichés à la place du contenu du dossier.
+    results: Option<Results>,
+    /// Éléments trouvés par le parcours en cours ou terminé.
+    result_entries: Vec<Entry>,
+    /// Numéro de groupe (à partir de 1) de chaque fichier en doublon.
+    duplicate_groups: HashMap<PathBuf, usize>,
+    /// Identifie le parcours courant ; l'incrémenter l'annule.
+    scan_generation: Arc<AtomicU64>,
     /// Recherche (barre au-dessus de la liste) : motifs de noms, voir `view::matches_query`.
     search: String,
     /// Donne le focus à la barre de recherche à la prochaine image (Ctrl+F).
@@ -413,6 +483,12 @@ impl ExpliaApp {
             sort_key: settings.sort_key,
             sort_order: settings.sort_order,
             search: String::new(),
+            recursive: settings.recursive,
+            duplicate_min_mb: settings.duplicate_min_mb,
+            results: None,
+            result_entries: Vec::new(),
+            duplicate_groups: HashMap::new(),
+            scan_generation: Arc::new(AtomicU64::new(0)),
             focus_search: false,
             show_preview: settings.show_preview,
             preview_expanded: settings.preview_expanded,
@@ -600,7 +676,176 @@ impl ExpliaApp {
     }
 
     fn recompute_visible(&mut self) {
+        if let Some(results) = &self.results {
+            let mut list: Vec<Entry> = self
+                .result_entries
+                .iter()
+                // La recherche de la barre filtre aussi les autres résultats (hors recherche récursive).
+                .filter(|e| {
+                    results.kind == ResultKind::Search || view::matches_query(&e.name, &self.search)
+                })
+                .cloned()
+                .collect();
+            // Les doublons restent groupés ; le reste suit le tri choisi.
+            if results.kind != ResultKind::Duplicates {
+                view::sort_entries(&mut list, self.sort_key, self.sort_order);
+            }
+            self.visible = list;
+            return;
+        }
         self.visible = self.filtered_and_sorted(&self.entries, true);
+    }
+
+    /// Annule le parcours en cours et ferme les résultats.
+    fn close_results(&mut self) {
+        self.scan_generation.fetch_add(1, Ordering::SeqCst);
+        self.results = None;
+        self.result_entries.clear();
+        self.duplicate_groups.clear();
+    }
+
+    /// Lance un parcours en arrière-plan sur le dossier affiché ; les résultats remplacent le
+    /// contenu du dossier dans la liste. Un parcours précédent est annulé.
+    fn start_scan(&mut self, kind: ResultKind) {
+        let Location::Dir(root) = self.location.clone() else {
+            return;
+        };
+        let generation = self.scan_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.results = Some(Results {
+            kind,
+            running: true,
+            truncated: false,
+            progress: None,
+        });
+        self.result_entries.clear();
+        self.duplicate_groups.clear();
+        self.clear_multi();
+        self.selected = None;
+        self.preview = PreviewState::None;
+        self.error = None;
+        self.notice = None;
+        self.recompute_visible();
+        let query = self.search.clone();
+        let recursive = self.recursive;
+        let show_hidden = self.show_hidden;
+        let min_bytes = u64::from(self.duplicate_min_mb) * 1024 * 1024;
+        let current = Arc::clone(&self.scan_generation);
+        let tx = self.event_tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let cancelled = || current.load(Ordering::Relaxed) != generation;
+            let send = |event: Event| {
+                let _ = tx.send(event);
+                ctx.request_repaint();
+            };
+            let mut truncated = false;
+            match kind {
+                ResultKind::Search => {
+                    truncated = scan::search(
+                        &root,
+                        &query,
+                        show_hidden,
+                        scan::SEARCH_LIMIT,
+                        &cancelled,
+                        &mut |entries| {
+                            send(Event::ScanBatch {
+                                generation,
+                                entries,
+                            })
+                        },
+                    );
+                }
+                ResultKind::EmptyFolders => {
+                    let folders = scan::find_empty_folders(&root, recursive, &cancelled);
+                    let entries: Vec<Entry> = folders
+                        .iter()
+                        .filter_map(|path| fs_nav::entry_from_path(path))
+                        .collect();
+                    send(Event::ScanBatch {
+                        generation,
+                        entries,
+                    });
+                }
+                ResultKind::Duplicates => {
+                    let found = scan::find_duplicates(
+                        &root,
+                        recursive,
+                        min_bytes,
+                        &cancelled,
+                        &mut |count| {
+                            send(Event::ScanProgress {
+                                generation,
+                                text: format!("{count} fichier(s) examiné(s)…"),
+                            });
+                        },
+                    );
+                    let groups: Vec<Vec<Entry>> = found
+                        .iter()
+                        .map(|group| {
+                            group
+                                .files
+                                .iter()
+                                .filter_map(|path| fs_nav::entry_from_path(path))
+                                .collect()
+                        })
+                        .collect();
+                    send(Event::ScanGroups { generation, groups });
+                }
+            }
+            send(Event::ScanDone {
+                generation,
+                truncated,
+            });
+        });
+    }
+
+    /// Le texte de la barre de recherche a changé : recherche récursive en arrière-plan, ou
+    /// filtre immédiat du dossier affiché.
+    fn on_search_changed(&mut self) {
+        let searching = self.recursive
+            && !self.search.trim().is_empty()
+            && matches!(self.location, Location::Dir(_));
+        if searching {
+            self.start_scan(ResultKind::Search);
+            return;
+        }
+        if self
+            .results
+            .as_ref()
+            .is_some_and(|r| r.kind == ResultKind::Search)
+        {
+            self.close_results();
+            self.clear_multi();
+            self.selected = None;
+        }
+        self.recompute_visible();
+    }
+
+    /// L'option « Récursive » a changé : les résultats affichés sont recalculés.
+    fn on_recursive_changed(&mut self) {
+        if let Some(kind) = self.results.as_ref().map(|r| r.kind) {
+            if kind == ResultKind::Search {
+                self.on_search_changed();
+            } else {
+                self.start_scan(kind);
+            }
+        } else if self.recursive && !self.search.trim().is_empty() {
+            self.on_search_changed();
+        }
+    }
+
+    /// Annule la demande de suppression. Si elle visait le dossier affiché lui-même, la
+    /// sélection provisoire est retirée.
+    fn cancel_delete(&mut self) {
+        self.confirm_delete = false;
+        let on_current = match (&self.selected, &self.location) {
+            (Some(selected), Location::Dir(path)) => selected.path == *path,
+            _ => false,
+        };
+        if on_current {
+            self.selected = None;
+            self.preview = PreviewState::None;
+        }
     }
 
     /// Famille multimédia d'un fichier si une colonne affichée a besoin de la lire.
@@ -732,7 +977,9 @@ impl ExpliaApp {
         self.notice = None;
         self.drives_focus = false;
         self.drive_cursor = None;
-        // La recherche vaut pour le dossier affiché : un nouveau dossier repart sans filtre.
+        // La recherche et les résultats valent pour le dossier affiché : un nouveau dossier
+        // repart sans filtre.
+        self.close_results();
         self.search.clear();
         self.address = target.display();
         self.location = target;
@@ -823,6 +1070,8 @@ impl ExpliaApp {
 
     /// Relit le dossier affiché (après une suppression, par exemple).
     fn refresh_listing(&mut self) {
+        // Parmi les résultats, on retire ce qui n'existe plus (supprimé, renommé).
+        self.result_entries.retain(|e| e.path.exists());
         let Location::Dir(path) = &self.location else {
             return;
         };
@@ -909,6 +1158,16 @@ impl ExpliaApp {
             Ok(()) => {
                 self.error = None;
                 self.notice = Some(format!("{count} élément(s) envoyé(s) à la corbeille."));
+                // Le dossier affiché a lui-même été supprimé : on remonte au dossier parent.
+                if let Location::Dir(current) = self.location.clone()
+                    && !current.exists()
+                    && let Some(parent) = current.parent()
+                {
+                    let notice = self.notice.take();
+                    self.navigate(Location::Dir(parent.to_path_buf()));
+                    self.notice = notice;
+                    return;
+                }
             }
             Err(message) => {
                 self.error = Some(message);
@@ -924,7 +1183,10 @@ impl ExpliaApp {
 
     /// Démarre le renommage de `entry` directement dans la liste.
     fn start_rename(&mut self, entry: &Entry) {
-        if !matches!(self.location, Location::Dir(_)) {
+        // Seul un élément de la liste affichée se renomme (pas le dossier courant lui-même).
+        if !matches!(self.location, Location::Dir(_))
+            || !self.visible.iter().any(|e| e.path == entry.path)
+        {
             return;
         }
         self.error = None;
@@ -1098,6 +1360,7 @@ impl ExpliaApp {
     /// Traite les résultats des threads de travail.
     fn poll_events(&mut self, ctx: &egui::Context) {
         let mut sizes_changed = false;
+        let mut results_changed = false;
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 Event::Preview(path, result) => self.on_preview(ctx, path, result),
@@ -1128,6 +1391,58 @@ impl ExpliaApp {
                     }
                 }
                 Event::PlayerReady(path, result) => self.on_player_ready(path, result),
+                Event::ScanBatch {
+                    generation,
+                    entries,
+                } => {
+                    if generation == self.scan_generation.load(Ordering::SeqCst)
+                        && self.results.is_some()
+                    {
+                        self.result_entries.extend(entries);
+                        results_changed = true;
+                    }
+                }
+                Event::ScanGroups { generation, groups } => {
+                    if generation == self.scan_generation.load(Ordering::SeqCst)
+                        && self.results.is_some()
+                    {
+                        self.duplicate_groups.clear();
+                        self.result_entries.clear();
+                        for (index, group) in groups.into_iter().enumerate() {
+                            for entry in group {
+                                self.duplicate_groups.insert(entry.path.clone(), index + 1);
+                                self.result_entries.push(entry);
+                            }
+                        }
+                        results_changed = true;
+                    }
+                }
+                Event::ScanProgress { generation, text } => {
+                    if generation == self.scan_generation.load(Ordering::SeqCst)
+                        && let Some(results) = &mut self.results
+                    {
+                        results.progress = Some(text);
+                    }
+                }
+                Event::ScanDone {
+                    generation,
+                    truncated,
+                } => {
+                    if generation == self.scan_generation.load(Ordering::SeqCst)
+                        && let Some(results) = &mut self.results
+                    {
+                        results.running = false;
+                        results.truncated = truncated;
+                        results.progress = None;
+                        // Dossiers vides : tous sont sélectionnés, il ne reste qu'à supprimer.
+                        if results.kind == ResultKind::EmptyFolders {
+                            self.recompute_visible();
+                            self.multi = self.visible.clone();
+                            self.anchor = self.multi.first().map(|e| e.path.clone());
+                        }
+                        results_changed = true;
+                    }
+                }
                 Event::Thumb(path, thumb) => {
                     self.thumbs_in_flight = self.thumbs_in_flight.saturating_sub(1);
                     // Une miniature en échec reste dans `thumbs_requested` : on ne la redemande pas.
@@ -1145,7 +1460,7 @@ impl ExpliaApp {
                 }
             }
         }
-        if sizes_changed {
+        if sizes_changed || results_changed {
             self.recompute_visible();
         }
     }
@@ -1256,7 +1571,55 @@ impl ExpliaApp {
                 self.confirm_delete = !self.delete_targets().is_empty();
                 self.delete_asked_at = Some(ctx.input(|i| i.time));
             }
-            Action::CancelDelete => self.confirm_delete = false,
+            Action::CancelDelete => self.cancel_delete(),
+            Action::FindEmptyFolders => self.start_scan(ResultKind::EmptyFolders),
+            Action::FindDuplicates => self.start_scan(ResultKind::Duplicates),
+            Action::SetDuplicateMb(mb) => self.duplicate_min_mb = mb.clamp(1, 1_000_000),
+            Action::SelectDuplicateCopies => {
+                // On garde le premier fichier de chaque groupe ; les autres sont sélectionnés.
+                let mut seen = HashSet::new();
+                let copies: Vec<Entry> = self
+                    .visible
+                    .iter()
+                    .filter(|e| {
+                        self.duplicate_groups
+                            .get(&e.path)
+                            .is_some_and(|group| !seen.insert(*group))
+                    })
+                    .cloned()
+                    .collect();
+                if !copies.is_empty() {
+                    self.clear_multi();
+                    self.selected = None;
+                    self.preview = PreviewState::None;
+                    self.anchor = copies.first().map(|e| e.path.clone());
+                    self.multi = copies;
+                }
+            }
+            Action::CloseResults => {
+                let was_search = self
+                    .results
+                    .as_ref()
+                    .is_some_and(|r| r.kind == ResultKind::Search);
+                self.close_results();
+                if was_search {
+                    self.search.clear();
+                }
+                self.clear_multi();
+                self.selected = None;
+                self.preview = PreviewState::None;
+                self.recompute_visible();
+            }
+            Action::AskDeleteCurrent => {
+                if let Location::Dir(path) = &self.location
+                    && let Some(entry) = fs_nav::entry_from_path(path)
+                {
+                    self.clear_multi();
+                    self.selected = Some(entry);
+                    self.confirm_delete = true;
+                    self.delete_asked_at = Some(ctx.input(|i| i.time));
+                }
+            }
             Action::ConfirmDelete => self.delete_selection(),
             Action::EnterFolder(path) => {
                 self.select_first_after_nav = true;
@@ -1295,6 +1658,8 @@ impl ExpliaApp {
             preview_expanded: self.preview_expanded,
             skip_folder_sizes: self.skip_folder_sizes,
             show_drive_usage: self.show_drive_usage,
+            recursive: self.recursive,
+            duplicate_min_mb: self.duplicate_min_mb,
             view_mode: self.view_mode,
             show_hidden: self.show_hidden,
             columns: self.columns,
@@ -1340,6 +1705,62 @@ impl ExpliaApp {
         });
     }
 
+    /// Bandeau des résultats d'un parcours : titre, avancement, actions et fermeture.
+    fn results_banner(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let results = self.results.as_ref()?;
+        let mut action = None;
+        let count = self.visible.len();
+        let title = match results.kind {
+            ResultKind::Search => {
+                format!("Recherche « {} » : {count} résultat(s)", self.search.trim())
+            }
+            ResultKind::EmptyFolders => format!("Dossiers vides : {count}"),
+            ResultKind::Duplicates => {
+                let groups = self.duplicate_groups.values().copied().max().unwrap_or(0);
+                format!(
+                    "Doublons > {} Mo : {groups} groupe(s), {count} fichier(s)",
+                    self.duplicate_min_mb
+                )
+            }
+        };
+        let scope = if self.recursive {
+            "sous-dossiers inclus"
+        } else {
+            "dossier courant seulement"
+        };
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(title);
+                ui.weak(format!("({scope})"));
+                if results.running {
+                    ui.spinner();
+                    ui.weak(results.progress.as_deref().unwrap_or("Analyse en cours…"));
+                }
+                if results.truncated {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("limité à {} résultats", scan::SEARCH_LIMIT),
+                    );
+                }
+                if results.kind == ResultKind::Duplicates
+                    && !results.running
+                    && count > 0
+                    && ui
+                        .button("Sélectionner les copies")
+                        .on_hover_text("Sélectionne tout sauf le premier fichier de chaque groupe")
+                        .clicked()
+                {
+                    action = Some(Action::SelectDuplicateCopies);
+                }
+                if ui.button("✕ Fermer").clicked() {
+                    action = Some(Action::CloseResults);
+                }
+            });
+        });
+        action
+    }
+
     /// Haut de la zone centrale : fil d'Ariane (ou saisie du chemin) et barre de recherche.
     fn location_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
@@ -1347,7 +1768,10 @@ impl ExpliaApp {
             enlarge_toolbar(ui);
             let spacing = ui.spacing().item_spacing.x;
             let search_width = SEARCH_WIDTH.min(ui.available_width() * 0.4);
-            let address_width = (ui.available_width() - search_width - spacing).max(80.0);
+            // La case « Récursive » prend sa place à gauche de la barre de recherche.
+            let recursive_width = RECURSIVE_WIDTH;
+            let address_width =
+                (ui.available_width() - search_width - recursive_width - 2.0 * spacing).max(80.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(address_width, ui.spacing().interact_size.y),
                 egui::Layout::left_to_right(egui::Align::Center),
@@ -1360,13 +1784,23 @@ impl ExpliaApp {
                     }
                 },
             );
+            if ui
+                .checkbox(&mut self.recursive, "Récursive")
+                .on_hover_text(
+                    "Recherche, dossiers vides et doublons parcourent aussi les sous-dossiers",
+                )
+                .changed()
+            {
+                self.on_recursive_changed();
+            }
             self.search_box(ui, search_width);
         });
         action
     }
 
-    /// Barre de recherche : filtre le dossier affiché par nom (voir `view::matches_query`).
-    /// Ctrl+F lui donne le focus ; Échap l'efface.
+    /// Barre de recherche par nom (voir `view::matches_query`) : filtre le dossier affiché, ou, si
+    /// « Récursive » est cochée, cherche aussi dans les sous-dossiers. Ctrl+F lui donne le focus ;
+    /// Échap l'efface.
     fn search_box(&mut self, ui: &mut egui::Ui, width: f32) {
         let edit = ui.add(
             egui::TextEdit::singleline(&mut self.search)
@@ -1379,9 +1813,9 @@ impl ExpliaApp {
         if edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.search.clear();
             edit.surrender_focus();
-            self.recompute_visible();
+            self.on_search_changed();
         } else if edit.changed() {
-            self.recompute_visible();
+            self.on_search_changed();
         }
     }
 
@@ -1915,6 +2349,11 @@ impl ExpliaApp {
     }
 
     fn central(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        // Les résultats d'un parcours (recherche récursive, dossiers vides, doublons) s'affichent
+        // toujours en liste, quel que soit le mode d'affichage.
+        if self.results.is_some() && matches!(self.location, Location::Dir(_)) {
+            return self.listing_view(ui);
+        }
         match (&self.location, self.view_mode) {
             (Location::ThisPc, _) => {
                 ui.label("Choisissez un dossier ou un lecteur dans la barre latérale.");
@@ -2292,11 +2731,38 @@ impl ExpliaApp {
         action
     }
 
+    /// Libellé d'une ligne de la liste. Parmi des résultats : numéro de groupe (doublons) et
+    /// dossier d'origine, relatif au dossier affiché.
+    fn row_label(&self, icon: &str, entry: &Entry) -> String {
+        if self.results.is_none() {
+            return format!("{icon} {}", entry.name);
+        }
+        let group = self
+            .duplicate_groups
+            .get(&entry.path)
+            .map_or(String::new(), |group| format!("#{group}  "));
+        let origin = match (&self.location, entry.path.parent()) {
+            (Location::Dir(root), Some(parent)) => parent.strip_prefix(root).map_or_else(
+                |_| parent.display().to_string(),
+                |p| p.display().to_string(),
+            ),
+            (_, Some(parent)) => parent.display().to_string(),
+            _ => String::new(),
+        };
+        if origin.is_empty() {
+            format!("{group}{icon} {}", entry.name)
+        } else {
+            format!("{group}{icon} {}   —   {origin}", entry.name)
+        }
+    }
+
     /// Texte de la colonne « Taille » d'une entrée de dossier.
     fn entry_size_text(&self, entry: &Entry) -> String {
         match entry.size {
             Some(bytes) => fs_nav::format_size(bytes),
-            None if entry.is_dir && !self.skip_folder_sizes => "Calcul…".to_string(),
+            None if entry.is_dir && !self.skip_folder_sizes && self.results.is_none() => {
+                "Calcul…".to_string()
+            }
             None => String::new(),
         }
     }
@@ -2365,9 +2831,21 @@ impl ExpliaApp {
     fn listing_view(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         // Première ligne : « .. » revient au dossier précédent (le parent).
-        let parent = self.location.parent();
+        let parent = if self.results.is_some() {
+            None
+        } else {
+            self.location.parent()
+        };
         let shift = usize::from(parent.is_some());
-        let empty_message = if self.entries.is_empty() {
+        let empty_message = if let Some(results) = &self.results {
+            if !self.visible.is_empty() {
+                None
+            } else if results.running {
+                Some("Analyse en cours…")
+            } else {
+                Some("Aucun résultat.")
+            }
+        } else if self.entries.is_empty() {
             Some("Ce dossier est vide.")
         } else if self.visible.is_empty() {
             Some("Aucun élément ne correspond à la recherche.")
@@ -2454,7 +2932,7 @@ impl ExpliaApp {
                     ui,
                     is_selected,
                     entry.hidden,
-                    &format!("{icon} {}", entry.name),
+                    &self.row_label(icon, entry),
                     &columns,
                     &cells,
                 );
@@ -2881,6 +3359,48 @@ impl ExpliaApp {
                 }
             }
         });
+        // Seconde ligne : actions qui sélectionnent ou listent des éléments (voir « Récursive »).
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Sélection").strong());
+            let on_dir = matches!(self.location, Location::Dir(_));
+            let empty_hint = if self.recursive {
+                "Sélectionne les dossiers vides (sans aucun fichier), sous-dossiers compris"
+            } else {
+                "Sélectionne les sous-dossiers directs qui sont vides (sans aucun fichier)"
+            };
+            if ui
+                .add_enabled(on_dir, egui::Button::new("📂 Dossiers vides"))
+                .on_hover_text(empty_hint)
+                .clicked()
+            {
+                action = Some(Action::FindEmptyFolders);
+            }
+            if ui
+                .add_enabled(on_dir, egui::Button::new("📑 Doublons"))
+                .on_hover_text(
+                    "Fichiers de même contenu (même empreinte), plus gros que la taille indiquée",
+                )
+                .clicked()
+            {
+                action = Some(Action::FindDuplicates);
+            }
+            ui.label(">");
+            let mut mb = self.duplicate_min_mb;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut mb)
+                        .range(1..=1_000_000)
+                        .suffix(" Mo"),
+                )
+                .on_hover_text(
+                    "Taille minimale des fichiers examinés pour les doublons (modifiable)",
+                )
+                .changed()
+            {
+                action = Some(Action::SetDuplicateMb(mb));
+            }
+        });
         ui.separator();
         (toggle, action)
     }
@@ -2974,7 +3494,25 @@ impl ExpliaApp {
             return self.actions_content(ui);
         }
         let Some(selected) = &self.selected else {
-            ui.weak("Sélectionnez un élément.");
+            // Aucun élément choisi : le volet propose d'agir sur le dossier affiché lui-même.
+            if let Location::Dir(path) = &self.location
+                && self.results.is_none()
+                && path.parent().is_some()
+            {
+                ui.label(egui::RichText::new(favorite_name(path)).strong());
+                ui.label("Dossier courant");
+                ui.add_space(6.0);
+                if ui
+                    .button("🗑 Supprimer ce dossier")
+                    .on_hover_text("Envoie le dossier affiché à la corbeille (après confirmation)")
+                    .clicked()
+                {
+                    return Some(Action::AskDeleteCurrent);
+                }
+                ui.weak("Suppression : vers la corbeille de Windows.");
+            } else {
+                ui.weak("Sélectionnez un élément.");
+            }
             return None;
         };
         // La taille d'un dossier peut arriver après la sélection : on relit l'entrée à jour.
@@ -2984,6 +3522,17 @@ impl ExpliaApp {
             .find(|e| e.path == selected.path)
             .unwrap_or(selected);
         ui.label(egui::RichText::new(&entry.name).strong());
+        // Parmi des résultats, le dossier d'origine du fichier.
+        if self.results.is_some()
+            && let Some(parent) = entry.path.parent()
+        {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("Emplacement : {}", parent.display())).weak(),
+                )
+                .wrap(),
+            );
+        }
         if entry.is_dir {
             ui.label("Dossier");
             let size = self.entry_size_text(entry);
@@ -3155,6 +3704,14 @@ impl ExpliaApp {
     }
 
     fn status_text(&self) -> String {
+        if let Some(results) = &self.results {
+            let what = match results.kind {
+                ResultKind::Search => "résultat(s) de recherche",
+                ResultKind::EmptyFolders => "dossier(s) vide(s)",
+                ResultKind::Duplicates => "fichier(s) en doublon",
+            };
+            return format!("{} {what}", self.visible.len());
+        }
         match &self.location {
             Location::ThisPc => "Aucun dossier ouvert".to_string(),
             Location::Dir(_) => {
@@ -3668,7 +4225,7 @@ impl eframe::App for ExpliaApp {
         // (sauf pendant la saisie d'un chemin).
         if !self.address_editing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.confirm_delete {
-                self.confirm_delete = false;
+                self.cancel_delete();
             } else if !self.multi.is_empty() {
                 self.clear_multi();
             }
@@ -3731,6 +4288,7 @@ impl eframe::App for ExpliaApp {
         action = self.detail_panel(ui).or(action.take());
         egui::CentralPanel::default().show(ui, |ui| {
             action = self.location_bar(ui).or(action.take());
+            action = self.results_banner(ui).or(action.take());
             ui.add_space(4.0);
             action = self.central(ui).or(action.take());
         });
@@ -3747,5 +4305,180 @@ impl eframe::App for ExpliaApp {
         self.stop_player();
         let settings = self.current_settings();
         self.write_settings(settings);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Dossier de test jetable, dans `target/`.
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new(name: &str) -> Self {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("test-app")
+                .join(name);
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn file(&self, rel: &str, content: &[u8]) {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+
+        fn dir(&self, rel: &str) {
+            std::fs::create_dir_all(self.0.join(rel)).unwrap();
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Application sans fenêtre, positionnée sur `tree` (aucun réglage n'est écrit).
+    fn app_in(tree: &TempTree) -> (ExpliaApp, egui::Context) {
+        let ctx = egui::Context::default();
+        let mut app = ExpliaApp::new(ctx.clone(), Settings::default(), None);
+        app.navigate(Location::Dir(tree.0.clone()));
+        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        (app, ctx)
+    }
+
+    /// Traite les événements jusqu'à la fin du parcours en cours.
+    fn wait_scan(app: &mut ExpliaApp, ctx: &egui::Context) {
+        let start = Instant::now();
+        loop {
+            app.poll_events(ctx);
+            if app.results.as_ref().is_some_and(|r| !r.running) {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "parcours trop long"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn names(app: &ExpliaApp) -> Vec<String> {
+        let mut names: Vec<String> = app.visible.iter().map(|e| e.name.clone()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn empty_folder_scan_lists_and_selects_them() {
+        let tree = TempTree::new("empty");
+        tree.dir("vide");
+        tree.dir("b/c");
+        tree.file("b/d/fichier.txt", b"x");
+        let (mut app, ctx) = app_in(&tree);
+        app.apply(&ctx, Action::FindEmptyFolders);
+        wait_scan(&mut app, &ctx);
+        assert_eq!(names(&app), ["c", "vide"]);
+        // Tous sont sélectionnés (multi-sélection de dossiers), prêts à être supprimés.
+        assert_eq!(app.multi.len(), 2);
+        assert!(app.multi.iter().all(|e| e.is_dir));
+        // Sans récursivité : seulement les sous-dossiers directs.
+        app.recursive = false;
+        app.on_recursive_changed();
+        wait_scan(&mut app, &ctx);
+        assert_eq!(names(&app), ["vide"]);
+        // Fermer revient au contenu du dossier.
+        app.apply(&ctx, Action::CloseResults);
+        assert!(app.results.is_none());
+        assert_eq!(names(&app), ["b", "vide"]);
+    }
+
+    #[test]
+    fn duplicate_scan_groups_copies_and_selects_all_but_the_first() {
+        let tree = TempTree::new("dups");
+        let big = vec![3u8; 1_200_000];
+        tree.file("a.bin", &big);
+        tree.file("sub/b.bin", &big);
+        tree.file("sub/c.bin", &big);
+        tree.file("autre.bin", &vec![4u8; 1_200_000]);
+        let (mut app, ctx) = app_in(&tree);
+        app.apply(&ctx, Action::SetDuplicateMb(1));
+        app.apply(&ctx, Action::FindDuplicates);
+        wait_scan(&mut app, &ctx);
+        assert_eq!(names(&app), ["a.bin", "b.bin", "c.bin"]);
+        assert_eq!(app.duplicate_groups.len(), 3);
+        app.apply(&ctx, Action::SelectDuplicateCopies);
+        assert_eq!(app.multi.len(), 2);
+        // Le premier fichier du groupe (ordre des chemins) est conservé.
+        assert!(app.multi.iter().all(|e| e.name != "a.bin"));
+        // Seuil plus haut que les fichiers : aucun doublon.
+        app.apply(&ctx, Action::SetDuplicateMb(2));
+        app.apply(&ctx, Action::FindDuplicates);
+        wait_scan(&mut app, &ctx);
+        assert!(app.visible.is_empty());
+    }
+
+    #[test]
+    fn recursive_search_goes_into_subfolders_and_plain_search_does_not() {
+        let tree = TempTree::new("search");
+        tree.file("racine.exe", b"x");
+        tree.file("sous/dossier/outil.exe", b"x");
+        tree.file("sous/note.txt", b"x");
+        let (mut app, ctx) = app_in(&tree);
+        app.search = "*.exe".to_string();
+        app.recursive = true;
+        app.on_search_changed();
+        wait_scan(&mut app, &ctx);
+        assert_eq!(names(&app), ["outil.exe", "racine.exe"]);
+        // Effacer la recherche ferme les résultats.
+        app.search.clear();
+        app.on_search_changed();
+        assert!(app.results.is_none());
+        // Non récursive : simple filtre du dossier affiché.
+        app.recursive = false;
+        app.search = "*.exe".to_string();
+        app.on_search_changed();
+        assert!(app.results.is_none());
+        assert_eq!(names(&app), ["racine.exe"]);
+    }
+
+    #[test]
+    fn changing_folder_cancels_and_closes_results() {
+        let tree = TempTree::new("navigate");
+        tree.dir("sous");
+        let (mut app, ctx) = app_in(&tree);
+        app.apply(&ctx, Action::FindEmptyFolders);
+        assert!(app.results.is_some());
+        app.navigate(Location::Dir(tree.0.join("sous")));
+        assert!(app.results.is_none());
+        assert!(app.result_entries.is_empty());
+    }
+
+    #[test]
+    fn deleting_the_current_folder_needs_a_confirmation_that_can_be_cancelled() {
+        let tree = TempTree::new("current");
+        tree.dir("vide");
+        let (mut app, ctx) = app_in(&tree);
+        app.apply(&ctx, Action::AskDeleteCurrent);
+        assert!(app.confirm_delete);
+        assert_eq!(
+            app.selected.as_ref().map(|e| e.path.clone()),
+            Some(tree.0.clone())
+        );
+        assert_eq!(app.delete_targets().len(), 1);
+        // Annuler retire la sélection provisoire du dossier affiché.
+        app.apply(&ctx, Action::CancelDelete);
+        assert!(!app.confirm_delete);
+        assert!(app.selected.is_none());
+        // On ne renomme pas le dossier affiché depuis sa propre liste.
+        let current = fs_nav::entry_from_path(&tree.0).unwrap();
+        app.start_rename(&current);
+        assert!(app.renaming.is_none());
     }
 }

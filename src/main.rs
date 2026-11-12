@@ -11,6 +11,7 @@ mod media;
 mod places;
 mod player;
 mod preview;
+mod scan;
 mod settings;
 mod trash;
 mod view;
