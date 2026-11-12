@@ -48,8 +48,9 @@ const GALLERY_LABEL_HEIGHT: f32 = 22.0;
 const GALLERY_THUMB_PIXELS: u32 = 256;
 /// Nombre maximal de miniatures décodées en même temps.
 const MAX_THUMBS_IN_FLIGHT: usize = 6;
-/// Largeur d'une colonne de la navigation « style Mac ».
-const COLUMN_VIEW_WIDTH: f32 = 230.0;
+/// Largeurs minimale et maximale d'une colonne de la navigation « style Mac ».
+const COLUMN_VIEW_MIN_WIDTH: f32 = 150.0;
+const COLUMN_VIEW_MAX_WIDTH: f32 = 340.0;
 
 /// Colonnes optionnelles du tableau.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +226,10 @@ pub struct ExpliaApp {
     media_generation: Arc<AtomicU64>,
     /// Listings des dossiers parents, pour la vue en colonnes.
     column_cache: HashMap<PathBuf, Vec<Entry>>,
+    /// Largeur de chaque colonne parente de la vue en colonnes.
+    column_widths: HashMap<PathBuf, f32>,
+    /// Largeur de la dernière colonne (dossier courant) : dossier, nombre d'éléments, largeur.
+    current_column_width: Option<(PathBuf, usize, f32)>,
     /// Après un changement de dossier : fichier à sélectionner (vue en colonnes).
     select_path_after_nav: Option<PathBuf>,
     /// Miniatures de la grille d'images.
@@ -301,6 +306,8 @@ impl ExpliaApp {
             media: HashMap::new(),
             media_generation: Arc::new(AtomicU64::new(0)),
             column_cache: HashMap::new(),
+            column_widths: HashMap::new(),
+            current_column_width: None,
             select_path_after_nav: None,
             thumbs: HashMap::new(),
             thumbs_requested: HashSet::new(),
@@ -423,6 +430,14 @@ impl ExpliaApp {
             (margin.y - 24.0).max(0.0),
         )));
         self.window_sized = true;
+    }
+
+    /// Oublie les listings et les largeurs de la vue en colonnes (tri, filtre, cachés ou
+    /// contenu modifiés).
+    fn invalidate_columns(&mut self) {
+        self.column_cache.clear();
+        self.column_widths.clear();
+        self.current_column_width = None;
     }
 
     /// Applique le filtre d'extension, le masquage des éléments cachés et le tri à une liste.
@@ -649,7 +664,7 @@ impl ExpliaApp {
             Ok(entries) => {
                 self.entries = entries;
                 // Les listings mis en cache pour la vue en colonnes ne sont plus à jour.
-                self.column_cache.clear();
+                self.invalidate_columns();
                 self.start_folder_sizes();
                 self.start_media(true);
                 self.recompute_visible();
@@ -943,7 +958,7 @@ impl ExpliaApp {
             }
             Action::ToggleHidden => {
                 self.show_hidden = !self.show_hidden;
-                self.column_cache.clear();
+                self.invalidate_columns();
                 self.recompute_visible();
             }
             Action::GoSelect { dir, file } => {
@@ -1238,7 +1253,7 @@ impl ExpliaApp {
         if changed {
             self.recompute_visible();
             // Les colonnes de la vue « style Mac » dépendent du tri et du filtre.
-            self.column_cache.clear();
+            self.invalidate_columns();
         }
     }
 
@@ -1315,14 +1330,47 @@ impl ExpliaApp {
             return None;
         };
         let crumbs = fs_nav::breadcrumbs(&current);
-        // Listings des dossiers traversés (le dernier est le dossier courant : `self.visible`).
+        // Listings des dossiers traversés (le dernier est le dossier courant : `self.visible`),
+        // avec la largeur qui convient à leurs noms.
         for (_, path) in crumbs.iter().take(crumbs.len().saturating_sub(1)) {
             if !self.column_cache.contains_key(path)
                 && let Ok(list) = fs_nav::list_dir(path)
             {
                 let processed = self.filtered_and_sorted(&list);
+                self.column_widths
+                    .insert(path.clone(), column_width_for(ui, &processed));
                 self.column_cache.insert(path.clone(), processed);
             }
+        }
+        let current_width = match &self.current_column_width {
+            Some((path, len, width)) if *path == current && *len == self.visible.len() => *width,
+            _ => {
+                let width = column_width_for(ui, &self.visible);
+                self.current_column_width = Some((current.clone(), self.visible.len(), width));
+                width
+            }
+        };
+        // Largeur de chaque colonne : adaptée à son contenu ; si la place le permet, la dernière
+        // colonne occupe le reste de la largeur disponible.
+        let mut widths: Vec<f32> = crumbs
+            .iter()
+            .enumerate()
+            .map(|(level, (_, path))| {
+                if level + 1 == crumbs.len() {
+                    current_width
+                } else {
+                    self.column_widths
+                        .get(path)
+                        .copied()
+                        .unwrap_or(COLUMN_VIEW_MIN_WIDTH)
+                }
+            })
+            .collect();
+        let separator_gap = ui.spacing().item_spacing.x * 2.0 + 1.0;
+        let used =
+            widths.iter().sum::<f32>() + separator_gap * widths.len().saturating_sub(1) as f32;
+        if let Some(last) = widths.last_mut() {
+            *last += (ui.available_width() - used - ui.spacing().item_spacing.x).max(0.0);
         }
         let mut action = None;
         let height = ui.available_height();
@@ -1340,28 +1388,6 @@ impl ExpliaApp {
             .stick_to_right(true)
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    // Première colonne : « Ce PC » (les lecteurs).
-                    ui.vertical(|ui| {
-                        ui.set_width(COLUMN_VIEW_WIDTH);
-                        ui.set_height(height);
-                        ui.weak("Ce PC");
-                        egui::ScrollArea::vertical()
-                            .id_salt("column-drives")
-                            .auto_shrink([false; 2])
-                            .show(ui, |ui| {
-                                for drive in &self.drives {
-                                    let on_path =
-                                        crumbs.first().is_some_and(|(_, root)| *root == drive.path);
-                                    let label =
-                                        format!("{} {}", drive_icon(drive.kind), drive.label());
-                                    if table_row(ui, on_path, false, &label, &[], &[]).clicked() {
-                                        action =
-                                            Some(Action::Go(Location::Dir(drive.path.clone())));
-                                    }
-                                }
-                            });
-                    });
-                    ui.separator();
                     for (level, (name, dir)) in crumbs.iter().enumerate() {
                         let is_last = level + 1 == crumbs.len();
                         let next_dir = crumbs.get(level + 1).map(|(_, path)| path);
@@ -1371,9 +1397,9 @@ impl ExpliaApp {
                             self.column_cache.get(dir).map_or(&[], Vec::as_slice)
                         };
                         ui.vertical(|ui| {
-                            ui.set_width(COLUMN_VIEW_WIDTH);
+                            ui.set_width(widths[level]);
                             ui.set_height(height);
-                            ui.weak(name);
+                            ui.add(egui::Label::new(egui::RichText::new(name).weak()).truncate());
                             let mut area = egui::ScrollArea::vertical()
                                 .id_salt(("column", level))
                                 .auto_shrink([false; 2]);
@@ -1985,8 +2011,8 @@ impl ExpliaApp {
         (toggle, option_action.or(content_action))
     }
 
-    /// Barre d'options, au-dessus de l'aperçu : navigation en colonnes (style Mac),
-    /// visionnage d'images (grille de miniatures) et affichage des éléments cachés.
+    /// Barre d'options, au-dessus de l'aperçu : navigation en colonnes (style Mac) et
+    /// visionnage d'images (grille de miniatures). Les éléments cachés se règlent dans « Afficher ».
     fn option_bar(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         ui.add_space(4.0);
@@ -2016,13 +2042,6 @@ impl ExpliaApp {
                         mode
                     }));
                 }
-            }
-            if ui
-                .add(egui::Button::new("👁 Cachés").selected(self.show_hidden))
-                .on_hover_text("Afficher les dossiers et fichiers cachés")
-                .clicked()
-            {
-                action = Some(Action::ToggleHidden);
             }
         });
         ui.separator();
@@ -2356,6 +2375,30 @@ fn table_row(
     response
 }
 
+/// Largeur d'une colonne (vue « style Mac ») adaptée aux noms les plus longs de la liste.
+fn column_width_for(ui: &egui::Ui, entries: &[Entry]) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    // Mesurer tous les noms serait coûteux dans un gros dossier : les plus longs suffisent.
+    let mut longest: Vec<&Entry> = entries.iter().collect();
+    longest.sort_by_key(|entry| std::cmp::Reverse(entry.name.chars().count()));
+    let widest = longest
+        .iter()
+        .take(40)
+        .map(|entry| {
+            ui.painter()
+                .layout_no_wrap(
+                    format!("📁 {}", entry.name),
+                    font.clone(),
+                    egui::Color32::WHITE,
+                )
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    // Marge pour le remplissage des lignes et la barre de défilement.
+    (widest + 44.0).clamp(COLUMN_VIEW_MIN_WIDTH, COLUMN_VIEW_MAX_WIDTH)
+}
+
 /// Tuile de la grille d'images : miniature (ou icône) et nom dessous.
 fn gallery_tile(
     ui: &mut egui::Ui,
@@ -2463,11 +2506,12 @@ fn favorite_name(path: &Path) -> String {
 
 fn drive_icon(kind: DriveKind) -> &'static str {
     match kind {
-        DriveKind::Fixed => "💾",
+        // Symboles présents dans la police d'egui (le symbole « disque dur » n'y est pas).
+        DriveKind::Fixed => "💽",
         DriveKind::Removable => "🔌",
         DriveKind::Network => "🌐",
-        DriveKind::Optical => "💿",
-        DriveKind::Other => "💾",
+        DriveKind::Optical => "📀",
+        DriveKind::Other => "💽",
     }
 }
 
