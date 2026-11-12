@@ -2137,8 +2137,9 @@ impl ExpliaApp {
         action
     }
 
-    /// Mode « grille » : hors de Home, trois zones côte à côte — les lecteurs, une colonne de
-    /// navigation (`..` et sous-dossiers), puis la grille. Dans Home, la grille seule (avec les
+    /// Mode « grille » : hors de Home, des zones côte à côte — les lecteurs (sauf si l'onglet « Ce PC »
+    /// de la barre latérale les montre déjà), une colonne de navigation (`..` et sous-dossiers),
+    /// puis la grille. Dans Home, la grille seule (avec les
     /// dossiers en tuiles pour pouvoir y entrer).
     fn gallery_layout(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         if !self.grid_side_columns() {
@@ -2147,24 +2148,33 @@ impl ExpliaApp {
         let mut action = None;
         let height = ui.available_height();
         let gap = ui.spacing().item_spacing.x * 2.0 + 1.0;
+        // Les lecteurs ne sont pas répétés quand l'onglet « Ce PC » de la barre latérale les montre.
+        let show_drives = self.sidebar_tab != SidebarTab::Pc;
+        let zones = if show_drives { 2.0 } else { 1.0 };
         // Sur une fenêtre étroite, la grille garde au moins une tuile de large.
-        let side = (ui.available_width() - GALLERY_TILE - 2.0 * gap).max(0.0);
-        let drives_width = GALLERY_DRIVES_WIDTH.min(side * 0.45);
+        let side = (ui.available_width() - GALLERY_TILE - (zones * gap)).max(0.0);
+        let drives_width = if show_drives {
+            GALLERY_DRIVES_WIDTH.min(side * 0.45)
+        } else {
+            0.0
+        };
         let nav_width = GALLERY_NAV_WIDTH.min(side - drives_width).max(0.0);
-        let grid_width = (ui.available_width() - drives_width - nav_width - 2.0 * gap).max(60.0);
+        let grid_width = (ui.available_width() - drives_width - nav_width - zones * gap).max(60.0);
         ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(drives_width);
-                ui.set_height(height);
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                egui::ScrollArea::vertical()
-                    .id_salt("gallery-drives")
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        action = self.drives_list(ui, false).or(action.take());
-                    });
-            });
-            ui.separator();
+            if show_drives {
+                ui.vertical(|ui| {
+                    ui.set_width(drives_width);
+                    ui.set_height(height);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    egui::ScrollArea::vertical()
+                        .id_salt("gallery-drives")
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            action = self.drives_list(ui, false).or(action.take());
+                        });
+                });
+                ui.separator();
+            }
             ui.vertical(|ui| {
                 ui.set_width(nav_width);
                 ui.set_height(height);
