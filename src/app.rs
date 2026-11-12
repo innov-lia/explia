@@ -54,6 +54,8 @@ const COLUMN_VIEW_MIN_WIDTH: f32 = 150.0;
 const COLUMN_VIEW_MAX_WIDTH: f32 = 340.0;
 /// Largeur des onglets (« intercalaires ») du classeur de la barre latérale.
 const SIDEBAR_TAB_WIDTH: f32 = 26.0;
+/// Marge intérieure du panneau de la barre latérale, à droite des onglets.
+const SIDEBAR_MARGIN: f32 = 8.0;
 /// Hauteur de la barre d'occupation d'un lecteur.
 const DRIVE_BAR_HEIGHT: f32 = 16.0;
 /// Largeurs des deux colonnes à gauche de la grille d'images : lecteurs et navigation.
@@ -264,6 +266,9 @@ pub struct ExpliaApp {
     drive_infos: HashMap<PathBuf, Option<DriveInfo>>,
     /// Option : barre d'occupation et pourcentage des lecteurs.
     show_drive_usage: bool,
+    /// Bord droit du bouton « Extension » : la barre latérale s'ouvre à cette largeur,
+    /// pour que ses onglets s'alignent sur lui.
+    extension_right: Option<f32>,
     /// Onglet affiché dans la barre latérale.
     sidebar_tab: SidebarTab,
     /// Le clavier pilote la liste des lecteurs : ↑ / ↓ changent de lecteur, → revient au dossier.
@@ -364,6 +369,7 @@ impl ExpliaApp {
             drives: Vec::new(),
             drive_infos: HashMap::new(),
             show_drive_usage: settings.show_drive_usage,
+            extension_right: None,
             sidebar_tab: SidebarTab::Pc,
             drives_focus: false,
             drive_cursor: None,
@@ -1434,7 +1440,7 @@ impl ExpliaApp {
             } else {
                 format!("Extension ({})", self.filter.count())
             };
-            menu(ui, &title, |ui| {
+            let extension = menu(ui, &title, |ui| {
                 let mut all = self.filter.is_all();
                 if ui.checkbox(&mut all, "Tout").clicked() {
                     self.filter.clear();
@@ -1458,6 +1464,7 @@ impl ExpliaApp {
                     }
                 }
             });
+            self.extension_right = Some(extension.rect.right());
             ui.separator();
             menu(ui, "Option", |ui| {
                 sizes_option_changed |= ui
@@ -2879,10 +2886,15 @@ fn enlarge_toolbar(ui: &mut egui::Ui) {
 }
 
 /// Bouton de menu qui reste ouvert tant qu'on ne clique pas à l'extérieur.
-fn menu(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+fn menu(
+    ui: &mut egui::Ui,
+    title: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
     MenuButton::new(title)
         .config(MenuConfig::new().close_behavior(PopupCloseBehavior::CloseOnClickOutside))
-        .ui(ui, add_contents);
+        .ui(ui, add_contents)
+        .0
 }
 
 /// Ligne en cours de renommage : Entrée valide, Échap ou un clic ailleurs annule.
@@ -3362,7 +3374,11 @@ impl eframe::App for ExpliaApp {
             }
         });
         egui::Panel::left("sidebar")
-            .default_size(200.0)
+            // Largeur d'ouverture : le bord droit des onglets s'aligne sur le bouton « Extension ».
+            .default_size(
+                self.extension_right
+                    .map_or(240.0, |right| right + SIDEBAR_MARGIN),
+            )
             .resizable(true)
             .show(ui, |ui| {
                 action = self.sidebar(ui).or(action.take());
