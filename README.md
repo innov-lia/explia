@@ -1,8 +1,25 @@
+<div align="center">
+
 # ExPLIA
 
-**L'explorateur de fichiers Windows nouvelle génération.** Rapide, natif, écrit en Rust (`egui` / `eframe`), sans installation : un seul `explia.exe`.
+**L'explorateur de fichiers Windows nouvelle génération.**
+Rapide, natif, écrit en Rust — un seul `explia.exe`, rien à installer.
+
+[![CI](https://github.com/innov-lia/explia/actions/workflows/ci.yml/badge.svg)](https://github.com/innov-lia/explia/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/v/release/innov-lia/explia?include_prereleases&label=version)](https://github.com/innov-lia/explia/releases)
+![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows)
+![Rust](https://img.shields.io/badge/Rust-2024-B7410E?logo=rust)
+[![Étoiles](https://img.shields.io/github/stars/innov-lia/explia?style=social)](https://github.com/innov-lia/explia/stargazers)
+
+[**Télécharger**](https://github.com/innov-lia/explia/releases) · [Fonctionnalités](#fonctionnalités) · [Raccourcis](#raccourcis-clavier) · [Compiler](#pour-les-développeurs) · [English](#in-english)
+
+![ExPLIA : barre latérale en classeur, liste détaillée et volet de détail](docs/screenshots/liste.png)
+
+</div>
 
 ExPLIA réunit dans une seule fenêtre ce qu'on va d'habitude chercher dans plusieurs outils : une navigation au clavier très rapide, trois façons de voir un dossier (liste, colonnes « style Mac », grilles d'images et de vidéos), des aperçus et un lecteur vidéo intégrés, une recherche récursive, la chasse aux **doublons** et aux **dossiers vides**, l'occupation des disques en un coup d'œil, des onglets, PowerShell à portée de clic… tout en restant **prudent avec vos fichiers** : rien n'est jamais écrasé, et la suppression passe toujours par la corbeille, après confirmation.
+
+> ⭐ **ExPLIA vous plaît ? Laissez une étoile au dépôt** : c'est ce qui nous aide le plus à le faire connaître.
 
 ## Les points forts
 
@@ -41,6 +58,8 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 │ … │ intercalaires │ liste, colonnes ou grille                │ ◀ échange        │
 └───┴──────────────┴─────────────────────────────────────────┴─────────────────┘
 ```
+
+<p align="center"><img src="docs/screenshots/grille-images.png" alt="Grille d'images : miniatures du dossier, sous-dossiers en tuiles" width="900"></p>
 
 ## Fonctionnalités
 
@@ -146,6 +165,25 @@ ExPLIA n'embarque aucun lecteur. Pour lire les vidéos et les sons **dans ExPLIA
 - Pas de miniatures pour les vidéos (icône) ; pas de barre de progression pour Coller (bilan à la fin).
 - Glisser vers l'extérieur : des éléments d'un même dossier à la fois, en copie seulement.
 - Pas encore disponible : couper / déplacer, créer un dossier ou un fichier, historique précédent / suivant, onglets mémorisés d'une session à l'autre, navigation dans les partages réseau.
+
+## Contribuer
+
+Les retours sont les bienvenus : [signalez un bug](https://github.com/innov-lia/explia/issues/new?template=bug_report.md), [proposez une idée](https://github.com/innov-lia/explia/issues/new?template=feature_request.md), ou lisez [CONTRIBUTING.md](CONTRIBUTING.md) pour proposer du code. Et si ExPLIA vous est utile, **une étoile ⭐ fait toute la différence**.
+
+## In English
+
+**ExPLIA is a fast, modern file explorer for Windows 10/11, written in Rust** (`egui`/`eframe`), shipped as a single portable `explia.exe`.
+
+- 🗂 Tabbed sidebar ("binder") with *This PC* (disk usage bars), *Home*, *Favorites*, *Applications* and *Network*.
+- 🔎 Name search with wildcards (`*.exe`), optionally **recursive** through subfolders.
+- 👁 List view with sortable headers, Mac-style **column view**, **image and video grids**.
+- 🎬 Built-in previews (images, text, ZIP) and audio/video playback through an installed VLC, with full screen.
+- 🧹 **Empty-folder and duplicate finder** (same content, configurable size threshold), one click to send them to the Recycle Bin.
+- 📋 Copy, paste and drag-and-drop with File Explorer and the Desktop — **never overwrites** an existing file.
+- `>_` Open **PowerShell** (or an admin PowerShell) right in the folder; tabs; full keyboard navigation.
+- 🔒 No telemetry, no network access; deletions always go to the Recycle Bin after confirmation.
+
+The interface is in French for now. ⭐ **If you like it, please star the repo!**
 
 ## Pour les développeurs
 
