@@ -23,13 +23,13 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
   - **Réseau** : les lecteurs réseau connectés (lettres de lecteur mappées). La navigation dans les serveurs et partages réseau n'est pas prise en charge.
 - **La vue centrale n'affiche jamais la liste des lecteurs** : « Ce PC » (bouton, fil d'Ariane ou saisie) ouvre l'onglet « Ce PC » de la barre latérale et laisse le dossier affiché en place.
 - **Ligne `..`** : première ligne de la liste, un clic revient au dossier précédent (le parent) ; à la racine d'un lecteur, elle ouvre l'onglet « Ce PC ».
-- Double-clic sur un dossier pour l'ouvrir ; **Retour arrière** ou **←** remonte au dossier parent. Voir aussi les [raccourcis clavier](#raccourcis-clavier).
+- Double-clic sur un dossier pour l'ouvrir ; **Retour arrière** ou **←** remonte au dossier parent ; au plus haut d'un lecteur, **←** passe la main à la liste des lecteurs (onglet « Ce PC »), où **↑ / ↓** changent de lecteur et **→** revient au dossier. Voir aussi les [raccourcis clavier](#raccourcis-clavier).
 
 ### Affichages
 - **Liste à colonnes** (par défaut) : nom, taille (celle des dossiers est calculée en arrière-plan : « Calcul… » en attendant ; un dossier inaccessible affiche 0 o) et date de modification. Le menu **Afficher** ajoute, en option : date de création, **dimensions** des images (PNG, JPEG, BMP, GIF, WebP), **résolution** des vidéos et **durée** des vidéos et des sons. Ces informations sont lues dans les en-têtes des fichiers, en arrière-plan, sans dépendance supplémentaire : MP4/MOV/M4A, MKV/WebM, AVI, WAV, MP3, FLAC et OGG/Opus (les autres formats affichent « — »). Les dates sont à l'heure locale.
-- **▥ Colonnes** (barre d'options, au-dessus de l'aperçu) : navigation « style Mac », une colonne par niveau du chemin, de largeur adaptée aux noms, la dernière occupant la place restante. Un clic sur un dossier l'ouvre dans la colonne suivante.
-- **🖼 Images** : visionnage rapide, grille de miniatures du dossier (décodées au fur et à mesure). Les quatre flèches se déplacent dans la grille, Entrée ouvre.
-- Un second clic sur ▥ ou 🖼 revient à la liste. Les mêmes choix existent dans le menu **Afficher**, qui contient aussi **Dossiers et fichiers cachés** (masqués par défaut, atténués quand on les affiche).
+- **▥ Colonnes** (barre d'options, au-dessus de l'aperçu) : navigation « style Mac », une colonne par niveau du chemin, de largeur adaptée aux noms, la dernière occupant la place restante. Un clic sur un dossier l'ouvre dans la colonne suivante. Mêmes fonctions que la liste : Ctrl+clic / Maj+clic, **F2** ou clic droit pour renommer, clic droit pour ajouter aux favoris (ou ouvrir / lire / exécuter un fichier).
+- **🖼 Images** : visionnage rapide, trois zones toujours visibles côte à côte : **les lecteurs** (avec leur occupation), **une colonne de navigation** (`..` et sous-dossiers) et **la grille de miniatures** du dossier (décodées au fur et à mesure). Les quatre flèches se déplacent dans la grille, Entrée ouvre.
+- Un second clic sur ▥ ou 🖼 revient à la liste. Les mêmes choix existent dans le menu **Afficher**, qui contient aussi **Dossiers et fichiers cachés** (masqués par défaut, atténués quand on les affiche). Sont considérés comme cachés les éléments ayant l'attribut « caché » de Windows **et ceux dont le nom commence par un point** (`.git`, `.config`, …).
 - **Trier** (nom, taille, type, date de modification ; croissant ou décroissant) et **Extension** (`Tout`, `Custom` pour saisir vos propres extensions, par exemple `mkv, pdf`, ou les catégories `Image`, `Documents`, `Code` ; les dossiers restent visibles).
 - **Option** : « Pas de calcul de taille de dossier », utile sur les gros disques, et « Occupation des disques » (barre et pourcentage dans l'onglet « Ce PC »).
 
@@ -41,7 +41,7 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 ### Sélection et actions
 - **Sélection multiple** : **clic maintenu** (0,5 s) sur une ligne pour démarrer, puis un clic sur chaque ligne à ajouter ou retirer ; **Ctrl+clic** ajoute ou retire une ligne (liste et colonnes « style Mac ») ; **Maj+clic** (ou **Maj+↑/↓**) sélectionne la plage. Un seul type à la fois : uniquement des dossiers, ou uniquement des fichiers.
 - **Volet « Actions »** : un clic sur un dossier (ou une multi-sélection) transforme le volet « Aperçu » en volet « Actions » ; sur un fichier, les boutons s'ajoutent sous l'aperçu.
-- **Renommer** : **F2**, bouton « Renommer » ou clic droit, directement dans la liste (Entrée valide, Échap annule ; l'extension n'est pas sélectionnée). Les noms interdits par Windows sont refusés et un élément existant n'est jamais écrasé.
+- **Renommer** : **F2**, bouton « Renommer » ou clic droit, directement dans la liste ou la dernière colonne de la vue en colonnes (Entrée valide, Échap annule ; l'extension n'est pas sélectionnée). Les noms interdits par Windows sont refusés et un élément existant n'est jamais écrasé.
 - **Supprimer** : **Suppr** ou bouton « Supprimer », vers la **corbeille de Windows** (récupérable). Le bouton devient « Confirmer » **à la même place** (un second clic au même endroit valide ; « Annuler » est juste à côté) ; au clavier, **Suppr** puis **Entrée**, Échap annule. Un double-clic accidentel est ignoré pendant 0,6 s.
 - **Ouvrir** : double-clic sur un fichier l'ouvre avec l'application par défaut de Windows. Clic droit sur un exécutable (`.exe`, `.bat`, `.cmd`, `.msi`) : « Exécuter » ou « Exécuter en tant qu'administrateur » (fenêtre UAC).
 
@@ -53,7 +53,8 @@ Vos réglages sont enregistrés automatiquement dans `%APPDATA%\ExPLIA\settings.
 | Touche ou geste | Action |
 | --- | --- |
 | **↑ / ↓** | Ligne précédente / suivante (la liste défile) ; **Maj+↑/↓** étend la sélection |
-| **←** | Dossier parent, en resélectionnant le dossier quitté |
+| **←** | Dossier parent, en resélectionnant le dossier quitté ; au plus haut d'un lecteur : liste des lecteurs |
+| **↑ / ↓** (liste des lecteurs) | Lecteur précédent / suivant, ouvert aussitôt ; **→** revient au dossier |
 | **→** | Entre dans le dossier sélectionné et sélectionne son premier élément |
 | **Retour arrière** | Dossier parent (tous les affichages) |
 | **Grille d'images** | ↑ ↓ ← → se déplacent dans la grille, **Entrée** ouvre |
@@ -84,7 +85,7 @@ ExPLIA n'embarque aucun lecteur. Pour lire les vidéos et les sons **dans ExPLIA
 
 - Préversion (0.1.0), testée sur Windows 11 uniquement ; exécutable non signé.
 - Lecture intégrée vérifiée avec une vidéo AVI ; MP4 et MKV réels, et le son avec réglage du volume, ne sont pas encore testés.
-- La ligne `..` n'existe que dans la liste (ni dans les colonnes, où les niveaux précédents sont visibles, ni dans la grille d'images : utilisez Retour arrière) ; Ctrl+clic fonctionne dans la liste et les colonnes, pas dans la grille d'images.
+- La ligne `..` existe dans la liste et dans la colonne de navigation de la grille d'images (pas dans la vue en colonnes, où les niveaux précédents sont visibles) ; Ctrl+clic fonctionne dans la liste et les colonnes, pas dans la grille d'images. Dans la grille, **←** déplace la sélection : utilisez Retour arrière pour remonter.
 - Pas encore disponible : copier / couper / coller et déplacer, créer un dossier ou un fichier, recherche, onglets, historique précédent / suivant.
 
 ## Pour les développeurs

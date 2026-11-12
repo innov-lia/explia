@@ -56,6 +56,9 @@ const COLUMN_VIEW_MAX_WIDTH: f32 = 340.0;
 const SIDEBAR_TAB_WIDTH: f32 = 26.0;
 /// Hauteur de la barre d'occupation d'un lecteur.
 const DRIVE_BAR_HEIGHT: f32 = 16.0;
+/// Largeurs des deux colonnes à gauche de la grille d'images : lecteurs et navigation.
+const GALLERY_DRIVES_WIDTH: f32 = 170.0;
+const GALLERY_NAV_WIDTH: f32 = 210.0;
 /// Agrandissement du texte et des boutons des barres du haut, en points.
 const TOOLBAR_TEXT_BOOST: f32 = 2.0;
 
@@ -263,6 +266,10 @@ pub struct ExpliaApp {
     show_drive_usage: bool,
     /// Onglet affiché dans la barre latérale.
     sidebar_tab: SidebarTab,
+    /// Le clavier pilote la liste des lecteurs : ↑ / ↓ changent de lecteur, → revient au dossier.
+    drives_focus: bool,
+    /// Lecteur choisi au clavier (index dans `drives`).
+    drive_cursor: Option<usize>,
     /// Dossier de l'utilisateur courant (onglet « Home »).
     home: Option<PathBuf>,
     /// Sous-dossiers du dossier de l'utilisateur.
@@ -358,6 +365,8 @@ impl ExpliaApp {
             drive_infos: HashMap::new(),
             show_drive_usage: settings.show_drive_usage,
             sidebar_tab: SidebarTab::Pc,
+            drives_focus: false,
+            drive_cursor: None,
             home: places::user_home().filter(|home| home.is_dir()),
             home_dirs: Vec::new(),
             favorites: Favorites::from_paths(settings.favorites.clone()),
@@ -456,6 +465,8 @@ impl ExpliaApp {
     /// Affiche un onglet du classeur ; son contenu est relu (lecteurs, dossiers).
     fn set_sidebar_tab(&mut self, tab: SidebarTab) {
         self.sidebar_tab = tab;
+        self.drives_focus = false;
+        self.drive_cursor = None;
         match tab {
             SidebarTab::Pc | SidebarTab::Network => self.refresh_drives(),
             SidebarTab::Home => self.refresh_home_dirs(),
@@ -651,6 +662,8 @@ impl ExpliaApp {
         let path = match &target {
             Location::ThisPc => {
                 self.set_sidebar_tab(SidebarTab::Pc);
+                // Les flèches ↑ / ↓ changent alors de lecteur.
+                self.drives_focus = true;
                 self.address = self.location.display();
                 return;
             }
@@ -682,6 +695,8 @@ impl ExpliaApp {
         }
         self.error = None;
         self.notice = None;
+        self.drives_focus = false;
+        self.drive_cursor = None;
         self.address = target.display();
         self.location = target;
         self.selected = None;
@@ -721,6 +736,23 @@ impl ExpliaApp {
             self.select(&ctx, entry);
             self.scroll_to_index = Some(index);
         }
+    }
+
+    /// Passe au lecteur précédent (`delta` < 0) ou suivant (`delta` > 0) et l'ouvre ; le clavier
+    /// continue de piloter la liste des lecteurs.
+    fn step_drive(&mut self, delta: i32) {
+        let current = self.drive_cursor.or(match &self.location {
+            Location::Dir(path) => self.drives.iter().position(|d| path.starts_with(&d.path)),
+            Location::ThisPc => None,
+        });
+        let Some(next) = view::step_index(current, self.drives.len(), delta) else {
+            return;
+        };
+        let root = self.drives[next].path.clone();
+        self.navigate(Location::Dir(root));
+        self.drives_focus = true;
+        // Même si le lecteur n'est pas prêt (erreur), le curseur avance : on peut passer au suivant.
+        self.drive_cursor = Some(next);
     }
 
     /// Maj+clic : sélectionne la plage entre l'ancre (dernier élément choisi) et `entry`.
@@ -774,6 +806,7 @@ impl ExpliaApp {
     /// Ajoute ou retire une ligne de la multi-sélection. Un seul type à la fois :
     /// on ne mélange pas dossiers et fichiers.
     fn toggle_multi(&mut self, entry: Entry) {
+        self.drives_focus = false;
         self.confirm_delete = false;
         // Comme dans l'Explorateur : le premier Ctrl+clic garde l'élément déjà sélectionné.
         if self.multi.is_empty()
@@ -988,6 +1021,7 @@ impl ExpliaApp {
     }
 
     fn select(&mut self, ctx: &egui::Context, entry: Entry) {
+        self.drives_focus = false;
         // Choisir un autre élément arrête la lecture en cours.
         if !matches!(&self.player, PlayerSlot::None) {
             let same = match &self.player {
@@ -1108,7 +1142,20 @@ impl ExpliaApp {
 
     fn apply(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::Go(location) => self.navigate(location),
+            Action::Go(location) => {
+                let drive_root = match &location {
+                    Location::Dir(path) => self.drives.iter().position(|d| d.path == *path),
+                    Location::ThisPc => None,
+                };
+                self.navigate(location);
+                // Un clic sur un lecteur donne aussi la main aux flèches ↑ / ↓.
+                if drive_root.is_some()
+                    && matches!(self.sidebar_tab, SidebarTab::Pc | SidebarTab::Network)
+                {
+                    self.drives_focus = true;
+                    self.drive_cursor = drive_root;
+                }
+            }
             Action::SidebarTab(tab) => self.set_sidebar_tab(tab),
             Action::Select(entry) => self.select(ctx, entry),
             Action::AddFavorite(path) => {
@@ -1559,7 +1606,7 @@ impl ExpliaApp {
         let mut action = None;
         ui.heading(if network_only { "Réseau" } else { "Ce PC" });
         let mut any = false;
-        for drive in &self.drives {
+        for (index, drive) in self.drives.iter().enumerate() {
             if network_only && drive.kind != DriveKind::Network {
                 continue;
             }
@@ -1567,7 +1614,12 @@ impl ExpliaApp {
             let info = self.drive_infos.get(&drive.path).and_then(Option::as_ref);
             let here =
                 matches!(&self.location, Location::Dir(path) if path.starts_with(&drive.path));
-            if drive_entry(ui, drive, info, here, self.show_drive_usage).clicked() {
+            // Pilotée au clavier : le lecteur choisi par les flèches est en surbrillance.
+            let highlighted = match self.drive_cursor {
+                Some(cursor) if self.drives_focus => cursor == index,
+                _ => here,
+            };
+            if drive_entry(ui, drive, info, highlighted, self.show_drive_usage).clicked() {
                 action = Some(Action::Go(Location::Dir(drive.path.clone())));
             }
         }
@@ -1645,7 +1697,7 @@ impl ExpliaApp {
             }
             (Location::Dir(_), ViewMode::List) => self.listing_view(ui),
             (Location::Dir(_), ViewMode::Columns) => self.columns_view(ui),
-            (Location::Dir(_), ViewMode::Gallery) => self.gallery_view(ui),
+            (Location::Dir(_), ViewMode::Gallery) => self.gallery_layout(ui),
         }
     }
 
@@ -1709,6 +1761,8 @@ impl ExpliaApp {
         }
         let last_scroll = self.last_scroll;
         let mut new_scroll = last_scroll;
+        // Renommage en cours : sorti de `self` le temps de la frame (dernière colonne seulement).
+        let mut rename = self.renaming.take();
         egui::ScrollArea::horizontal()
             .id_salt("columns-view")
             .auto_shrink([false; 2])
@@ -1741,6 +1795,16 @@ impl ExpliaApp {
                             let output =
                                 area.show_rows(ui, row_height, entries.len(), |ui, range| {
                                     for entry in &entries[range] {
+                                        if is_last
+                                            && let Some(state) = rename.as_mut()
+                                            && state.path == entry.path
+                                        {
+                                            if let Some(rename_action) = rename_row(ui, state, 0.0)
+                                            {
+                                                action = Some(rename_action);
+                                            }
+                                            continue;
+                                        }
                                         let highlighted = if is_last {
                                             self.selected
                                                 .as_ref()
@@ -1780,6 +1844,15 @@ impl ExpliaApp {
                                                 }
                                             });
                                         }
+                                        // Mêmes fonctions que la liste : renommer (dernière
+                                        // colonne), favoris, ouvrir / lire / exécuter.
+                                        response.context_menu(|ui| {
+                                            if let Some(menu_action) =
+                                                self.entry_menu(ui, entry, is_last)
+                                            {
+                                                action = Some(menu_action);
+                                            }
+                                        });
                                     }
                                 });
                             if is_last {
@@ -1794,6 +1867,89 @@ impl ExpliaApp {
                 });
             });
         self.last_scroll = new_scroll;
+        self.renaming = rename;
+        action
+    }
+
+    /// Mode « grille d'images » : trois zones côte à côte, toujours présentes — les lecteurs,
+    /// une colonne de navigation (`..` et sous-dossiers), puis la grille de miniatures.
+    fn gallery_layout(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        let height = ui.available_height();
+        let gap = ui.spacing().item_spacing.x * 2.0 + 1.0;
+        // Sur une fenêtre étroite, la grille garde au moins une tuile de large.
+        let side = (ui.available_width() - GALLERY_TILE - 2.0 * gap).max(0.0);
+        let drives_width = GALLERY_DRIVES_WIDTH.min(side * 0.45);
+        let nav_width = GALLERY_NAV_WIDTH.min(side - drives_width).max(0.0);
+        let grid_width = (ui.available_width() - drives_width - nav_width - 2.0 * gap).max(60.0);
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(drives_width);
+                ui.set_height(height);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                egui::ScrollArea::vertical()
+                    .id_salt("gallery-drives")
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        action = self.drives_list(ui, false).or(action.take());
+                    });
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_width(nav_width);
+                ui.set_height(height);
+                action = self.nav_column(ui).or(action.take());
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_width(grid_width);
+                ui.set_height(height);
+                action = self.gallery_view(ui).or(action.take());
+            });
+        });
+        action
+    }
+
+    /// Colonne de navigation de la grille d'images : `..` puis les sous-dossiers du dossier.
+    fn nav_column(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        let parent = self.location.parent();
+        let folders: Vec<&Entry> = self.visible.iter().filter(|e| e.is_dir).collect();
+        let shift = usize::from(parent.is_some());
+        let row_height = table_row_height(ui);
+        egui::ScrollArea::vertical()
+            .id_salt("gallery-nav")
+            .auto_shrink([false; 2])
+            .show_rows(ui, row_height, folders.len() + shift, |ui, range| {
+                for row in range {
+                    if row < shift {
+                        if let Some(parent) = &parent
+                            && parent_row(ui).clicked()
+                        {
+                            action = Some(Action::Go(parent.clone()));
+                        }
+                        continue;
+                    }
+                    let entry = folders[row - shift];
+                    let selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path);
+                    let response = table_row(
+                        ui,
+                        selected,
+                        entry.hidden,
+                        &format!("📁 {}", entry.name),
+                        &[],
+                        &[],
+                    );
+                    if response.clicked() {
+                        action = Some(Action::Go(Location::Dir(entry.path.clone())));
+                    }
+                    response.context_menu(|ui| {
+                        if let Some(menu_action) = self.entry_menu(ui, entry, false) {
+                            action = Some(menu_action);
+                        }
+                    });
+                }
+            });
         action
     }
 
@@ -1996,7 +2152,7 @@ impl ExpliaApp {
                 if let Some(state) = rename.as_mut()
                     && state.path == entry.path
                 {
-                    if let Some(rename_action) = rename_row(ui, state) {
+                    if let Some(rename_action) = rename_row(ui, state, Column::Size.width()) {
                         action = Some(rename_action);
                     }
                     continue;
@@ -2085,50 +2241,62 @@ impl ExpliaApp {
                     });
                 }
                 response.context_menu(|ui| {
-                    if ui.button("Renommer  (F2)").clicked() {
-                        action = Some(Action::StartRename(entry.clone()));
-                        ui.close();
-                    }
-                    ui.separator();
-                    if entry.is_dir {
-                        if self.favorites.contains(&entry.path) {
-                            if ui.button("Retirer des favoris").clicked() {
-                                action = Some(Action::RemoveFavorite(entry.path.clone()));
-                                ui.close();
-                            }
-                        } else if ui.button("Ajouter aux favoris").clicked() {
-                            action = Some(Action::AddFavorite(entry.path.clone()));
-                            ui.close();
-                        }
-                    } else {
-                        let playable = is_playable(&entry.path);
-                        let label = if launch::is_executable(&entry.path) {
-                            "Exécuter"
-                        } else if playable {
-                            "Lire"
-                        } else {
-                            "Ouvrir"
-                        };
-                        if ui.button(label).clicked() {
-                            action = Some(open_action(&entry.path));
-                            ui.close();
-                        }
-                        if playable && ui.button("Ouvrir avec le lecteur externe").clicked() {
-                            action = Some(Action::Open(entry.path.clone()));
-                            ui.close();
-                        }
-                        if launch::is_executable(&entry.path)
-                            && ui.button("Exécuter en tant qu'administrateur").clicked()
-                        {
-                            action = Some(Action::OpenAsAdmin(entry.path.clone()));
-                            ui.close();
-                        }
+                    if let Some(menu_action) = self.entry_menu(ui, entry, true) {
+                        action = Some(menu_action);
                     }
                 });
             }
         });
         self.last_scroll = (output.state.clamped_offset().y, output.inner_rect.height());
         self.renaming = rename;
+        action
+    }
+
+    /// Menu contextuel d'une ligne (liste, colonnes, colonne de navigation) : renommer
+    /// (si `allow_rename`), favoris pour un dossier, ouvrir / lire / exécuter pour un fichier.
+    fn entry_menu(&self, ui: &mut egui::Ui, entry: &Entry, allow_rename: bool) -> Option<Action> {
+        let mut action = None;
+        if allow_rename {
+            if ui.button("Renommer  (F2)").clicked() {
+                action = Some(Action::StartRename(entry.clone()));
+                ui.close();
+            }
+            ui.separator();
+        }
+        if entry.is_dir {
+            if self.favorites.contains(&entry.path) {
+                if ui.button("Retirer des favoris").clicked() {
+                    action = Some(Action::RemoveFavorite(entry.path.clone()));
+                    ui.close();
+                }
+            } else if ui.button("Ajouter aux favoris").clicked() {
+                action = Some(Action::AddFavorite(entry.path.clone()));
+                ui.close();
+            }
+        } else {
+            let playable = is_playable(&entry.path);
+            let label = if launch::is_executable(&entry.path) {
+                "Exécuter"
+            } else if playable {
+                "Lire"
+            } else {
+                "Ouvrir"
+            };
+            if ui.button(label).clicked() {
+                action = Some(open_action(&entry.path));
+                ui.close();
+            }
+            if playable && ui.button("Ouvrir avec le lecteur externe").clicked() {
+                action = Some(Action::Open(entry.path.clone()));
+                ui.close();
+            }
+            if launch::is_executable(&entry.path)
+                && ui.button("Exécuter en tant qu'administrateur").clicked()
+            {
+                action = Some(Action::OpenAsAdmin(entry.path.clone()));
+                ui.close();
+            }
+        }
         action
     }
 
@@ -2154,6 +2322,19 @@ impl ExpliaApp {
             return None;
         }
         let vertical = if down { 1 } else { -1 };
+        // La liste des lecteurs a la main (flèche gauche au plus haut, ou clic sur un lecteur) :
+        // ↑ / ↓ changent de lecteur, → rend la main au dossier.
+        if self.drives_focus {
+            if up || down {
+                self.step_drive(vertical);
+            } else if right || (enter && gallery) {
+                self.drives_focus = false;
+                self.drive_cursor = None;
+                self.scroll_to_index = Some(0);
+                return self.visible.first().cloned().map(Action::Select);
+            }
+            return None;
+        }
         match &self.location {
             Location::ThisPc => None,
             Location::Dir(_) => {
@@ -2705,9 +2886,9 @@ fn menu(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)
 }
 
 /// Ligne en cours de renommage : Entrée valide, Échap ou un clic ailleurs annule.
-fn rename_row(ui: &mut egui::Ui, state: &mut RenameState) -> Option<Action> {
+fn rename_row(ui: &mut egui::Ui, state: &mut RenameState, reserved: f32) -> Option<Action> {
     let id = egui::Id::unique("rename-edit");
-    let width = (ui.available_width() - Column::Size.width()).max(120.0);
+    let width = (ui.available_width() - reserved).max(120.0);
     let edit = ui.add_sized(
         [width, table_row_height(ui)],
         egui::TextEdit::singleline(&mut state.text).id(id),

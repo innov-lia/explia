@@ -12,27 +12,29 @@ pub struct Entry {
     pub is_dir: bool,
     /// Taille en octets. Pour un dossier : `None` tant qu'elle n'est pas calculée.
     pub size: Option<u64>,
-    /// Élément caché (attribut « caché » de Windows, ou nom commençant par un point ailleurs).
+    /// Élément caché (attribut « caché » de Windows, ou nom commençant par un point).
     pub hidden: bool,
     pub modified: Option<SystemTime>,
     pub created: Option<SystemTime>,
 }
 
-/// Vrai si l'élément est caché. `meta` doit décrire l'élément lui-même (sans suivre les liens).
+/// Vrai si l'élément est caché : attribut « caché » de Windows (`meta` doit décrire l'élément
+/// lui-même, sans suivre les liens) ou nom commençant par un point (`.git`, `.config`, …).
 fn is_hidden(name: &str, meta: Option<&fs::Metadata>) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        /// `FILE_ATTRIBUTE_HIDDEN`.
-        const HIDDEN: u32 = 0x2;
-        let _ = name;
-        meta.is_some_and(|m| m.file_attributes() & HIDDEN != 0)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = meta;
-        name.starts_with('.')
-    }
+    name.starts_with('.') || has_hidden_attribute(meta)
+}
+
+#[cfg(windows)]
+fn has_hidden_attribute(meta: Option<&fs::Metadata>) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    /// `FILE_ATTRIBUTE_HIDDEN`.
+    const HIDDEN: u32 = 0x2;
+    meta.is_some_and(|m| m.file_attributes() & HIDDEN != 0)
+}
+
+#[cfg(not(windows))]
+fn has_hidden_attribute(_meta: Option<&fs::Metadata>) -> bool {
+    false
 }
 
 /// Où se trouve l'utilisateur : l'accueil (liste des lecteurs) ou un dossier.
@@ -251,6 +253,18 @@ mod tests {
         let sub = Location::Dir(PathBuf::from("C:\\Users"));
         assert_eq!(sub.parent(), Some(Location::Dir(PathBuf::from("C:\\"))));
         assert_eq!(Location::ThisPc.parent(), None);
+    }
+
+    #[test]
+    fn names_starting_with_a_dot_are_hidden() {
+        assert!(is_hidden(".git", None));
+        assert!(is_hidden(".env", None));
+        assert!(!is_hidden("src", None));
+        assert!(!is_hidden("a.rs", None));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let entries = list_dir(root).expect("le dossier du projet est lisible");
+        assert!(entries.iter().any(|e| e.name == ".cargo" && e.hidden));
+        assert!(entries.iter().any(|e| e.name == "src" && !e.hidden));
     }
 
     #[test]
