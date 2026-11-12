@@ -10,7 +10,9 @@ use eframe::egui::containers::menu::{MenuButton, MenuConfig};
 use eframe::egui::{self, PopupCloseBehavior};
 
 use crate::clipboard;
+use crate::copy::{self, CopyReport};
 use crate::dates;
+use crate::dragdrop;
 use crate::favorites::Favorites;
 use crate::fileops;
 use crate::fs_nav::{self, Entry, Location};
@@ -39,6 +41,12 @@ const EDIT_BUTTON_WIDTH: f32 = 120.0;
 const CONFIRM_ARMING_SECONDS: f64 = 0.6;
 /// Déplacement maximal du pointeur, en points, pendant un clic maintenu.
 const LONG_PRESS_TOLERANCE: f32 = 12.0;
+/// Déplacement (en points) au-delà duquel un appui sur une ligne devient un glisser vers
+/// l'extérieur (plus que la tolérance du clic maintenu).
+const DRAG_OUT_DISTANCE: f32 = 16.0;
+/// Après un glisser lancé depuis ExPLIA, durée (s) pendant laquelle un dépôt dans sa propre
+/// fenêtre est ignoré : relâcher le bouton dans ExPLIA ne crée pas de copie par mégarde.
+const OWN_DROP_GUARD_SECONDS: f64 = 1.0;
 /// Nombre maximal de threads qui calculent les tailles de dossiers ou lisent des métadonnées.
 const MAX_SIZE_WORKERS: usize = 4;
 /// Côté d'une tuile de la grille de miniatures, en points (hors espacement).
@@ -202,6 +210,11 @@ enum Event {
         generation: u64,
         text: String,
     },
+    /// Fin d'une copie (Coller, dépôt) dans le dossier `dest`.
+    CopyDone {
+        dest: PathBuf,
+        report: CopyReport,
+    },
     /// Fin d'un parcours ; `truncated` : résultats limités.
     ScanDone {
         generation: u64,
@@ -300,6 +313,23 @@ enum Action {
     CopyPath(PathBuf),
     /// Copie des fichiers ou dossiers dans le presse-papiers de Windows (à coller ailleurs).
     CopyFiles(Vec<PathBuf>),
+    /// Colle dans `dest` les fichiers et dossiers du presse-papiers (copie, sans écrasement).
+    Paste {
+        dest: PathBuf,
+    },
+    /// Copie des éléments déposés dans la fenêtre vers `dest` (sans écrasement).
+    CopyInto {
+        sources: Vec<PathBuf>,
+        dest: PathBuf,
+    },
+    /// Glisse des éléments vers une autre application (Bureau, Explorateur), en copie.
+    DragOut(Vec<PathBuf>),
+    /// Ouvre un dossier dans un nouvel onglet.
+    NewTab(PathBuf),
+    /// Affiche l'onglet donné.
+    SwitchTab(usize),
+    /// Ferme l'onglet donné.
+    CloseTab(usize),
     /// Ouvre PowerShell dans un dossier, éventuellement en administrateur (UAC).
     OpenPowerShell {
         dir: PathBuf,
@@ -443,6 +473,18 @@ pub struct ExpliaApp {
     multi_toggle_mode: bool,
     /// Un clic maintenu vient d'être traité : le relâchement ne doit pas compter comme un clic.
     long_press_done: bool,
+    /// Un glisser vers l'extérieur a déjà été lancé pour l'appui en cours.
+    drag_out_done: bool,
+    /// Instant (s) de la fin du dernier glisser lancé depuis ExPLIA (garde contre l'auto-dépôt).
+    drag_out_ended_at: Option<f64>,
+    /// Ctrl+V était enfoncé à l'image précédente (détection de l'appui).
+    paste_keys_were_down: bool,
+    /// Une copie est en cours en arrière-plan.
+    copying: bool,
+    /// Onglets : dossier de chaque onglet ; vide tant qu'un seul dossier est ouvert.
+    tabs: Vec<PathBuf>,
+    /// Onglet affiché.
+    active_tab: usize,
     /// Message d'information (non erroné) affiché dans la barre d'état.
     notice: Option<String>,
     /// Renommage en cours (une seule ligne à la fois).
@@ -526,6 +568,12 @@ impl ExpliaApp {
             confirm_delete: false,
             multi_toggle_mode: false,
             long_press_done: false,
+            drag_out_done: false,
+            drag_out_ended_at: None,
+            paste_keys_were_down: false,
+            copying: false,
+            tabs: Vec::new(),
+            active_tab: 0,
             notice: None,
             renaming: None,
             delete_asked_at: None,
@@ -705,6 +753,113 @@ impl ExpliaApp {
             return;
         }
         self.visible = self.filtered_and_sorted(&self.entries, true);
+    }
+
+    /// Copie des éléments dans `dest`, en arrière-plan (jamais d'écrasement, voir `copy`).
+    fn start_copy(&mut self, sources: Vec<PathBuf>, dest: PathBuf) {
+        if sources.is_empty() {
+            return;
+        }
+        if self.copying {
+            self.error = Some("Une copie est déjà en cours.".to_string());
+            return;
+        }
+        self.copying = true;
+        self.error = None;
+        self.notice = Some(format!(
+            "Copie de {} élément(s) vers « {} »…",
+            sources.len(),
+            dest.display()
+        ));
+        let tx = self.event_tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let report = copy::copy_into(&sources, &dest);
+            let _ = tx.send(Event::CopyDone { dest, report });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Fin d'une copie : bilan dans la barre d'état et dossier relu s'il est affiché.
+    fn on_copy_done(&mut self, dest: &Path, report: CopyReport) {
+        self.copying = false;
+        if self.location == Location::Dir(dest.to_path_buf()) {
+            self.refresh_listing();
+            // Les éléments copiés sont sélectionnés (un seul type à la fois).
+            if let Some(first) = report.copied.first()
+                && let Some(entry) = self.visible.iter().find(|e| e.path == *first).cloned()
+            {
+                let ctx = self.ctx.clone();
+                self.select(&ctx, entry);
+            }
+        }
+        let copied = report.copied.len();
+        if report.errors.is_empty() {
+            self.error = None;
+            self.notice = Some(format!(
+                "{copied} élément(s) copié(s) dans « {} ».",
+                dest.display()
+            ));
+        } else {
+            let first = &report.errors[0];
+            let more = report.errors.len() - 1;
+            self.error = Some(if more > 0 {
+                format!("{copied} élément(s) copié(s) ; {first} (et {more} autre(s) problème(s))")
+            } else {
+                format!("{copied} élément(s) copié(s) ; {first}")
+            });
+        }
+    }
+
+    /// Ferme un onglet ; s'il était affiché, on passe à son voisin.
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let was_active = index == self.active_tab;
+        self.tabs.remove(index);
+        if index < self.active_tab {
+            self.active_tab -= 1;
+        }
+        self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        let next = self.tabs.get(self.active_tab).cloned();
+        if self.tabs.len() <= 1 {
+            // Un seul dossier ouvert : plus de barre d'onglets.
+            self.tabs.clear();
+            self.active_tab = 0;
+        }
+        if was_active && let Some(path) = next {
+            self.navigate(Location::Dir(path));
+        }
+    }
+
+    /// Éléments glissés depuis une ligne : toute la multi-sélection si la ligne en fait partie,
+    /// sinon la ligne seule.
+    fn drag_targets(&self, entry: &Entry) -> Vec<PathBuf> {
+        if self.multi.iter().any(|m| m.path == entry.path) {
+            self.multi.iter().map(|m| m.path.clone()).collect()
+        } else {
+            vec![entry.path.clone()]
+        }
+    }
+
+    /// Appui maintenu sur une ligne et pointeur déplacé : lance un glisser vers l'extérieur.
+    fn drag_out_check(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        entry: &Entry,
+    ) -> Option<Action> {
+        if self.drag_out_done || !response.is_pointer_button_down_on() {
+            return None;
+        }
+        let moved = ui.input(
+            |i| match (i.pointer.press_origin(), i.pointer.latest_pos()) {
+                (Some(origin), Some(position)) => origin.distance(position) > DRAG_OUT_DISTANCE,
+                _ => false,
+            },
+        );
+        moved.then(|| Action::DragOut(self.drag_targets(entry)))
     }
 
     /// Annule le parcours en cours et ferme les résultats.
@@ -992,6 +1147,9 @@ impl ExpliaApp {
         // repart sans filtre.
         self.close_results();
         self.search.clear();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.clone_from(&path);
+        }
         self.address = target.display();
         self.location = target;
         self.selected = None;
@@ -1488,6 +1646,7 @@ impl ExpliaApp {
                         results_changed = true;
                     }
                 }
+                Event::CopyDone { dest, report } => self.on_copy_done(&dest, report),
                 Event::ScanProgress { generation, text } => {
                     if generation == self.scan_generation.load(Ordering::SeqCst)
                         && let Some(results) = &mut self.results
@@ -1659,6 +1818,46 @@ impl ExpliaApp {
                 }
                 Err(message) => self.error = Some(message),
             },
+            Action::Paste { dest } => match clipboard::clipboard_files() {
+                Ok(files) if files.is_empty() => {
+                    self.notice = Some("Rien à coller : copiez d'abord des fichiers.".to_string());
+                }
+                Ok(files) => self.start_copy(files, dest),
+                Err(message) => self.error = Some(message),
+            },
+            Action::CopyInto { sources, dest } => self.start_copy(sources, dest),
+            Action::DragOut(paths) => {
+                self.drag_out_done = true;
+                let result = dragdrop::drag_files_out(&paths);
+                self.drag_out_ended_at = Some(ctx.input(|i| i.time));
+                match result {
+                    Ok(true) => {
+                        self.error = None;
+                        self.notice =
+                            Some(format!("{} élément(s) déposé(s) (copie).", paths.len()));
+                    }
+                    Ok(false) => {}
+                    Err(message) => self.error = Some(message),
+                }
+            }
+            Action::NewTab(path) => {
+                if self.tabs.is_empty()
+                    && let Location::Dir(current) = &self.location
+                {
+                    self.tabs.push(current.clone());
+                    self.active_tab = 0;
+                }
+                self.tabs.push(path.clone());
+                self.active_tab = self.tabs.len() - 1;
+                self.navigate(Location::Dir(path));
+            }
+            Action::SwitchTab(index) => {
+                if let Some(path) = self.tabs.get(index).cloned() {
+                    self.active_tab = index;
+                    self.navigate(Location::Dir(path));
+                }
+            }
+            Action::CloseTab(index) => self.close_tab(index),
             Action::OpenPowerShell { dir, admin } => {
                 self.report_launch(launch::open_powershell(&dir, admin));
             }
@@ -2093,6 +2292,32 @@ impl ExpliaApp {
                     "Occupation des disques (barre et %)",
                 );
             });
+            // Onglets : après le menu Option, dès que plusieurs dossiers sont ouverts.
+            if self.tabs.len() > 1 {
+                ui.separator();
+                for (index, path) in self.tabs.iter().enumerate() {
+                    let mut name = favorite_name(path);
+                    if name.chars().count() > 22 {
+                        name = name.chars().take(21).collect::<String>() + "…";
+                    }
+                    let active = index == self.active_tab;
+                    if ui
+                        .add(egui::Button::new(format!("🗂 {name}")).selected(active))
+                        .on_hover_text(path.display().to_string())
+                        .clicked()
+                        && !active
+                    {
+                        action = Some(Action::SwitchTab(index));
+                    }
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Fermer l'onglet (Ctrl+W)")
+                        .clicked()
+                    {
+                        action = Some(Action::CloseTab(index));
+                    }
+                }
+            }
         });
         if sizes_option_changed {
             if self.skip_folder_sizes {
@@ -2664,7 +2889,11 @@ impl ExpliaApp {
                                         );
                                         let (ctrl, shift) =
                                             ui.input(|i| (i.modifiers.command, i.modifiers.shift));
-                                        if is_last && response.clicked() && ctrl {
+                                        if let Some(drag) =
+                                            self.drag_out_check(ui, &response, entry)
+                                        {
+                                            action = Some(drag);
+                                        } else if is_last && response.clicked() && ctrl {
                                             // Ctrl+clic : ajoute ou retire l'élément de la sélection
                                             // multiple (dossier ou fichier de la dernière colonne).
                                             action = Some(Action::ToggleMulti(entry.clone()));
@@ -2868,7 +3097,9 @@ impl ExpliaApp {
                         }
                         let response = gallery_tile(ui, entry, selected, thumb);
                         let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
-                        if response.clicked() && ctrl {
+                        if let Some(drag) = self.drag_out_check(ui, &response, entry) {
+                            action = Some(drag);
+                        } else if response.clicked() && ctrl {
                             // Ctrl+clic : ajoute ou retire la tuile de la sélection multiple.
                             action = Some(Action::ToggleMulti(entry.clone()));
                         } else if response.clicked() && shift {
@@ -3131,6 +3362,10 @@ impl ExpliaApp {
                 if response.long_touched() {
                     action = Some(Action::LongPress(entry.clone()));
                 }
+                // Appui puis déplacement : glisser vers le Bureau ou une autre application.
+                if let Some(drag) = self.drag_out_check(ui, &response, entry) {
+                    action = Some(drag);
+                }
                 let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
                 if response.clicked() && ctrl {
                     // Ctrl+clic : ajoute ou retire la ligne de la sélection multiple.
@@ -3202,6 +3437,22 @@ impl ExpliaApp {
             ui.close();
         }
         if entry.is_dir {
+            if ui.button("🗂 Ouvrir dans un nouvel onglet").clicked() {
+                action = Some(Action::NewTab(entry.path.clone()));
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    clipboard::has_files(),
+                    egui::Button::new("📥 Coller dans ce dossier"),
+                )
+                .clicked()
+            {
+                action = Some(Action::Paste {
+                    dest: entry.path.clone(),
+                });
+                ui.close();
+            }
             if ui.button(">_ PowerShell ici").clicked() {
                 action = Some(Action::OpenPowerShell {
                     dir: entry.path.clone(),
@@ -3761,6 +4012,13 @@ impl ExpliaApp {
                 ui.label("Dossier courant");
                 ui.add_space(6.0);
                 let tools = self.folder_tools(ui, path);
+                if ui
+                    .add_enabled(clipboard::has_files(), egui::Button::new("📥 Coller ici"))
+                    .on_hover_text("Copie ici les fichiers du presse-papiers (Ctrl+V)")
+                    .clicked()
+                {
+                    return Some(Action::Paste { dest: path.clone() });
+                }
                 if ui
                     .button("🗑 Supprimer ce dossier")
                     .on_hover_text("Envoie le dossier affiché à la corbeille (après confirmation)")
@@ -4490,6 +4748,7 @@ impl eframe::App for ExpliaApp {
         self.update_player(&ctx);
         if ctx.input(|i| i.pointer.primary_pressed()) {
             self.long_press_done = false;
+            self.drag_out_done = false;
         }
         // Échap annule la confirmation de suppression, sinon quitte la multi-sélection
         // (sauf pendant la saisie d'un chemin).
@@ -4507,6 +4766,81 @@ impl eframe::App for ExpliaApp {
         // Ctrl+F : va dans la barre de recherche.
         if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
             self.focus_search = true;
+        }
+        let typing =
+            ctx.egui_wants_keyboard_input() || self.address_editing || self.renaming.is_some();
+        // Ctrl+T : nouvel onglet sur le dossier affiché ; Ctrl+W : ferme l'onglet affiché.
+        if !typing && let Location::Dir(current) = &self.location {
+            let (new_tab, close_tab) = ctx.input(|i| {
+                (
+                    i.modifiers.command && i.key_pressed(egui::Key::T),
+                    i.modifiers.command && i.key_pressed(egui::Key::W),
+                )
+            });
+            if new_tab {
+                action = Some(Action::NewTab(current.clone()));
+            } else if close_tab && !self.tabs.is_empty() {
+                action = Some(Action::CloseTab(self.active_tab));
+            }
+        }
+        // Ctrl+V : coller les fichiers du presse-papiers dans le dossier affiché (détecté à
+        // l'appui, voir `clipboard::paste_keys_down`).
+        let paste_down = ctx.input(|i| i.focused) && clipboard::paste_keys_down();
+        if paste_down
+            && !self.paste_keys_were_down
+            && !typing
+            && clipboard::has_files()
+            && let Location::Dir(current) = &self.location
+        {
+            action = Some(Action::Paste {
+                dest: current.clone(),
+            });
+        }
+        self.paste_keys_were_down = paste_down;
+        // Éléments glissés depuis l'Explorateur (ou le Bureau) et déposés dans la fenêtre :
+        // copiés dans le dossier affiché. Un dépôt juste après un glisser lancé depuis ExPLIA
+        // est ignoré (bouton relâché dans sa propre fenêtre).
+        let (dropped, hovering, now) = ctx.input(|i| {
+            (
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .map(|f| f.path().to_path_buf())
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .collect::<Vec<PathBuf>>(),
+                !i.raw.hovered_files.is_empty(),
+                i.time,
+            )
+        });
+        let own_drag = self
+            .drag_out_ended_at
+            .is_some_and(|ended| now - ended < OWN_DROP_GUARD_SECONDS);
+        if !dropped.is_empty()
+            && !own_drag
+            && let Location::Dir(current) = &self.location
+        {
+            action = Some(Action::CopyInto {
+                sources: dropped,
+                dest: current.clone(),
+            });
+        }
+        if hovering
+            && !self.drag_out_done
+            && let Location::Dir(current) = &self.location
+        {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::unique("drop-hint"),
+            ));
+            let screen = ctx.content_rect();
+            painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(90));
+            painter.text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("Déposer pour copier dans « {} »", favorite_name(current)),
+                egui::FontId::proportional(22.0),
+                egui::Color32::WHITE,
+            );
         }
 
         // Raccourcis (jamais pendant une saisie) : F2 renomme ; Suppr demande la suppression,
@@ -4822,5 +5156,69 @@ mod tests {
         assert!(app.video_fullscreen);
         app.apply(&ctx, Action::ToggleVideoFullscreen);
         assert!(!app.video_fullscreen);
+    }
+
+    #[test]
+    fn dropped_items_are_copied_into_the_current_folder_without_overwriting() {
+        let tree = TempTree::new("drop");
+        tree.file("ailleurs/photo.jpg", b"img");
+        tree.file("ici/photo.jpg", b"ancienne");
+        let here = tree.0.join("ici");
+        let (mut app, ctx) = app_in(&tree);
+        app.navigate(Location::Dir(here.clone()));
+        app.apply(
+            &ctx,
+            Action::CopyInto {
+                sources: vec![tree.0.join("ailleurs/photo.jpg")],
+                dest: here.clone(),
+            },
+        );
+        let start = Instant::now();
+        while app.copying {
+            app.poll_events(&ctx);
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read(here.join("photo.jpg")).unwrap(), b"ancienne");
+        assert_eq!(
+            std::fs::read(here.join("photo - Copie.jpg")).unwrap(),
+            b"img"
+        );
+        // Le dossier est relu et la copie sélectionnée.
+        assert_eq!(names(&app), ["photo - Copie.jpg", "photo.jpg"]);
+        assert_eq!(
+            app.selected.as_ref().map(|e| e.name.clone()),
+            Some("photo - Copie.jpg".to_string())
+        );
+    }
+
+    #[test]
+    fn tabs_open_switch_and_close() {
+        let tree = TempTree::new("tabs");
+        tree.dir("a");
+        tree.dir("b");
+        let (mut app, ctx) = app_in(&tree);
+        assert!(app.tabs.is_empty());
+        app.apply(&ctx, Action::NewTab(tree.0.join("a")));
+        assert_eq!(app.tabs, [tree.0.clone(), tree.0.join("a")]);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.location, Location::Dir(tree.0.join("a")));
+        // Naviguer change le dossier de l'onglet affiché.
+        app.navigate(Location::Dir(tree.0.join("b")));
+        assert_eq!(app.tabs[1], tree.0.join("b"));
+        app.apply(&ctx, Action::SwitchTab(0));
+        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        // Fermer l'onglet affiché passe au voisin ; avec un seul dossier, plus d'onglets.
+        app.apply(&ctx, Action::CloseTab(0));
+        assert!(app.tabs.is_empty());
+        assert_eq!(app.location, Location::Dir(tree.0.join("b")));
+        // Trois onglets : fermer un onglet non affiché garde le dossier affiché.
+        app.apply(&ctx, Action::NewTab(tree.0.join("a")));
+        app.apply(&ctx, Action::NewTab(tree.0.clone()));
+        assert_eq!(app.tabs.len(), 3);
+        app.apply(&ctx, Action::CloseTab(0));
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.location, Location::Dir(tree.0.clone()));
     }
 }

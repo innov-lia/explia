@@ -54,6 +54,11 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 - **Renommer** : **F2**, bouton « Renommer » ou clic droit, directement dans la liste ou la dernière colonne de la vue en colonnes (Entrée valide, Échap annule ; l'extension n'est pas sélectionnée). Les noms interdits par Windows sont refusés et un élément existant n'est jamais écrasé.
 - **Supprimer** : **Suppr** ou bouton « Supprimer », vers la **corbeille de Windows** (récupérable). Le bouton devient « Confirmer » **à la même place** (un second clic au même endroit valide ; « Annuler » est juste à côté) ; au clavier, **Suppr** puis **Entrée**, Échap annule. Un double-clic accidentel est ignoré pendant 0,6 s.
 - **Copier** (clic droit « 📋 Copier », bouton du volet pour une multi-sélection, ou **Ctrl+C**) : place les fichiers et dossiers dans le presse-papiers de Windows ; collez-les ensuite dans l'Explorateur, sur le Bureau ou dans une autre application (**Ctrl+V**). ExPLIA n'écrit rien lui-même : c'est l'application où l'on colle qui copie.
+- **Coller** (**Ctrl+V**, clic droit « 📥 Coller dans ce dossier » sur un dossier, ou bouton « 📥 Coller ici » du volet quand rien n'est sélectionné) : copie dans le dossier les fichiers et dossiers du presse-papiers (copiés dans ExPLIA ou dans l'Explorateur). Un élément existant n'est **jamais écrasé** : la copie prend le nom « nom - Copie », « nom - Copie (2) »…, comme dans l'Explorateur. Un dossier n'est jamais copié dans lui-même, les liens et jonctions ne sont pas copiés, et rien n'est déplacé (des éléments « coupés » dans l'Explorateur sont copiés, l'original reste en place). La copie se fait en arrière-plan ; le bilan s'affiche dans la barre d'état.
+- **Glisser-déposer** :
+  - **vers l'extérieur** : appuyez sur une ligne (ou une tuile) et déplacez la souris : les éléments (toute la multi-sélection si la ligne en fait partie) se glissent vers le Bureau, l'Explorateur ou une autre application, **en copie** (l'original reste en place). Les éléments doivent venir du même dossier.
+  - **vers ExPLIA** : des fichiers glissés depuis l'Explorateur ou le Bureau et déposés dans la fenêtre sont **copiés** dans le dossier affiché, avec les mêmes règles que Coller.
+- **Onglets** : clic droit sur un dossier « 🗂 Ouvrir dans un nouvel onglet » (ou **Ctrl+T** pour le dossier affiché). Les onglets s'affichent dans la barre de menus, après **Option** ; un clic affiche l'onglet, « × » (ou **Ctrl+W**) le ferme. Ils disparaissent quand il n'en reste qu'un.
 - **Copier le chemin** (clic droit, ou bouton « 📋 Chemin » d'un dossier) : le chemin complet, en texte.
 - **PowerShell** : dans le volet de détail d'un dossier (dossier sélectionné ou dossier affiché), boutons **>_ PowerShell** et **>_ Admin** (en administrateur, fenêtre UAC) ; aussi au clic droit sur un dossier. La console s'ouvre directement dans ce dossier (Windows PowerShell, `powershell.exe`).
 - **Ouvrir** : double-clic sur un fichier l'ouvre avec l'application par défaut de Windows. Clic droit sur un exécutable (`.exe`, `.bat`, `.cmd`, `.msi`) : « Exécuter » ou « Exécuter en tant qu'administrateur » (fenêtre UAC).
@@ -77,6 +82,8 @@ Vos réglages sont enregistrés automatiquement dans `%APPDATA%\ExPLIA\settings.
 | **Échap** | Annule une saisie, une confirmation ou la multi-sélection |
 | **Ctrl+clic**, **Maj+clic**, **clic maintenu** | Sélection multiple |
 | **Ctrl+C** | Copie la sélection (à coller dans l'Explorateur ou sur le Bureau) |
+| **Ctrl+V** | Colle dans le dossier affiché les fichiers du presse-papiers (sans écraser) |
+| **Ctrl+T** / **Ctrl+W** | Nouvel onglet sur le dossier affiché / ferme l'onglet |
 | **Ctrl+F** | Va dans la barre de recherche |
 | **Double-clic** | Ouvre un dossier ; lit un fichier audio / vidéo ; ouvre un autre fichier |
 
@@ -101,7 +108,8 @@ ExPLIA n'embarque aucun lecteur. Pour lire les vidéos et les sons **dans ExPLIA
 - Préversion (0.1.0), testée sur Windows 11 uniquement ; exécutable non signé.
 - Lecture intégrée vérifiée avec une vidéo AVI ; MP4 et MKV réels, et le son avec réglage du volume, ne sont pas encore testés.
 - La ligne `..` existe dans la liste et dans la colonne de navigation de la grille d'images (pas dans la vue en colonnes, où les niveaux précédents sont visibles) ; Ctrl+clic et Maj+clic fonctionnent dans la liste, les colonnes et les grilles. Dans la grille, **←** déplace la sélection : utilisez Retour arrière pour remonter.
-- Pas encore disponible : copier / couper / coller et déplacer, créer un dossier ou un fichier, recherche, onglets, historique précédent / suivant.
+- Pas encore disponible : couper et déplacer, créer un dossier ou un fichier, historique précédent / suivant.
+- Glisser vers l'extérieur et Coller n'ont pas de barre de progression (bilan à la fin) ; les onglets ne sont pas mémorisés d'une session à l'autre.
 
 ## Pour les développeurs
 
@@ -146,6 +154,8 @@ cargo clippy -- -D warnings
 | `src/trash.rs` | Envoi à la corbeille (`SHFileOperationW` avec `FOF_ALLOWUNDO`). |
 | `src/launch.rs` | Ouverture d'un fichier / lancement d'un exécutable (`ShellExecuteW`, UAC). |
 | `src/scan.rs` | Parcours en lecture seule : recherche récursive, dossiers vides, doublons (empreintes). |
+| `src/copy.rs` | Copie de fichiers et dossiers sans écrasement (Coller, dépôt). |
+| `src/dragdrop.rs` | Glisser vers une autre application (OLE `DoDragDrop`, copie seulement). |
 | `src/clipboard.rs` | Presse-papiers de Windows : liste de fichiers (`CF_HDROP`) à coller ailleurs. |
 | `src/places.rs` | Lecteurs logiques, capacité / occupation / nom / format des lecteurs, dossier de l'utilisateur (API Windows). |
 | `src/preview.rs` | Aperçus : images, texte, archives ZIP, miniatures. |

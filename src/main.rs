@@ -3,7 +3,9 @@
 
 mod app;
 mod clipboard;
+mod copy;
 mod dates;
+mod dragdrop;
 mod favorites;
 mod fileops;
 mod fs_nav;
