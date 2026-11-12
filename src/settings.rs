@@ -1,7 +1,7 @@
 //! Réglages de l'utilisateur.
 //!
 //! Seul fichier écrit par ExPLIA : `%APPDATA%\ExPLIA\settings.txt`, au format
-//! `clé=valeur` (une ligne par réglage ; `favorite=` est répété pour chaque favori).
+//! `clé=valeur` (une ligne par réglage ; `favorite=` et `application=` sont répétés pour chaque favori et chaque application).
 //! Les fichiers de l'utilisateur ne sont jamais modifiés.
 
 use std::fs;
@@ -28,6 +28,8 @@ pub struct Settings {
     pub categories: Vec<Category>,
     pub custom_extensions: String,
     pub favorites: Vec<PathBuf>,
+    /// Applications ajoutées par l'utilisateur (onglet « Applications »).
+    pub applications: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -46,6 +48,7 @@ impl Default for Settings {
             categories: Vec::new(),
             custom_extensions: String::new(),
             favorites: Vec::new(),
+            applications: Vec::new(),
         }
     }
 }
@@ -106,6 +109,9 @@ impl Settings {
                 }
                 "custom_extensions" => settings.custom_extensions = value.to_string(),
                 "favorite" if !value.is_empty() => settings.favorites.push(PathBuf::from(value)),
+                "application" if !value.is_empty() => {
+                    settings.applications.push(PathBuf::from(value));
+                }
                 _ => {}
             }
         }
@@ -138,6 +144,9 @@ impl Settings {
         text += &format!("custom_extensions={custom}\n");
         for favorite in &self.favorites {
             text += &format!("favorite={}\n", favorite.display());
+        }
+        for application in &self.applications {
+            text += &format!("application={}\n", application.display());
         }
         text
     }
@@ -194,6 +203,7 @@ mod tests {
             categories: vec![Category::Image, Category::Code],
             custom_extensions: "mkv, .pdf".to_string(),
             favorites: vec![PathBuf::from("C:\\Projets"), PathBuf::from("D:\\Photos")],
+            applications: vec![PathBuf::from("C:\\Outils\\app.exe")],
         }
     }
 

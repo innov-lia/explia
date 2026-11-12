@@ -70,14 +70,16 @@ enum SidebarTab {
     Pc,
     Home,
     Favorites,
+    Apps,
     Network,
 }
 
 impl SidebarTab {
-    const ALL: [SidebarTab; 4] = [
+    const ALL: [SidebarTab; 5] = [
         SidebarTab::Pc,
         SidebarTab::Home,
         SidebarTab::Favorites,
+        SidebarTab::Apps,
         SidebarTab::Network,
     ];
 
@@ -86,6 +88,7 @@ impl SidebarTab {
             SidebarTab::Pc => "Ce PC",
             SidebarTab::Home => "Home",
             SidebarTab::Favorites => "Favoris",
+            SidebarTab::Apps => "Applications",
             SidebarTab::Network => "Réseau",
         }
     }
@@ -191,6 +194,9 @@ enum Action {
     Select(Entry),
     AddFavorite(PathBuf),
     RemoveFavorite(PathBuf),
+    /// Ajoute un exécutable à l'onglet « Applications ».
+    AddApplication(PathBuf),
+    RemoveApplication(PathBuf),
     /// Ouvre un fichier avec son application associée (ou lance un exécutable).
     Open(PathBuf),
     /// Lance un exécutable en tant qu'administrateur (fenêtre UAC).
@@ -280,6 +286,10 @@ pub struct ExpliaApp {
     /// Sous-dossiers du dossier de l'utilisateur.
     home_dirs: Vec<Entry>,
     favorites: Favorites,
+    /// Applications de l'onglet « Applications » (ajoutées par l'utilisateur).
+    applications: Favorites,
+    /// ExPLIA lui-même, toujours en tête de l'onglet « Applications ».
+    own_exe: Option<PathBuf>,
     /// Contenu brut du dossier courant.
     entries: Vec<Entry>,
     /// Contenu affiché : filtré par extension puis trié.
@@ -376,6 +386,8 @@ impl ExpliaApp {
             home: places::user_home().filter(|home| home.is_dir()),
             home_dirs: Vec::new(),
             favorites: Favorites::from_paths(settings.favorites.clone()),
+            applications: Favorites::from_paths(settings.applications.clone()),
+            own_exe: std::env::current_exe().ok(),
             entries: Vec::new(),
             visible: Vec::new(),
             sort_key: settings.sort_key,
@@ -476,7 +488,7 @@ impl ExpliaApp {
         match tab {
             SidebarTab::Pc | SidebarTab::Network => self.refresh_drives(),
             SidebarTab::Home => self.refresh_home_dirs(),
-            SidebarTab::Favorites => {}
+            SidebarTab::Favorites | SidebarTab::Apps => {}
         }
     }
 
@@ -916,6 +928,10 @@ impl ExpliaApp {
                     self.favorites.remove(&path);
                     self.favorites.add(new_path.clone());
                 }
+                if self.applications.contains(&path) {
+                    self.applications.remove(&path);
+                    self.applications.add(new_path.clone());
+                }
                 self.refresh_listing();
                 if let Some(entry) = self.entries.iter().find(|e| e.path == new_path).cloned() {
                     self.select(ctx, entry);
@@ -1168,6 +1184,10 @@ impl ExpliaApp {
                 self.favorites.add(path);
             }
             Action::RemoveFavorite(path) => self.favorites.remove(&path),
+            Action::AddApplication(path) => {
+                self.applications.add(path);
+            }
+            Action::RemoveApplication(path) => self.applications.remove(&path),
             Action::Open(path) => self.report_launch(launch::open(&path)),
             Action::Play(path) => self.start_player(path),
             Action::StopPlayer => self.stop_player(),
@@ -1241,6 +1261,7 @@ impl ExpliaApp {
             categories: self.filter.categories().to_vec(),
             custom_extensions: self.filter.custom().to_string(),
             favorites: self.favorites.paths().to_vec(),
+            applications: self.applications.paths().to_vec(),
         }
     }
 
@@ -1604,6 +1625,7 @@ impl ExpliaApp {
             SidebarTab::Network => self.drives_list(ui, true),
             SidebarTab::Home => self.home_list(ui),
             SidebarTab::Favorites => self.favorites_list(ui),
+            SidebarTab::Apps => self.applications_list(ui),
         }
     }
 
@@ -1668,6 +1690,59 @@ impl ExpliaApp {
             {
                 action = Some(Action::Go(Location::Dir(entry.path.clone())));
             }
+        }
+        action
+    }
+
+    /// Onglet « Applications » : ExPLIA, puis les exécutables ajoutés par l'utilisateur
+    /// (clic droit sur un `.exe` > « Ajouter aux applications »). Un clic lance l'application.
+    fn applications_list(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        ui.heading("Applications");
+        if self.applications.paths().is_empty() {
+            ui.weak("Clic droit sur un exécutable (.exe, .bat…) pour l'ajouter.");
+        }
+        let own = self.own_exe.iter().map(|path| (path, false));
+        let added = self.applications.paths().iter().map(|path| (path, true));
+        for (path, removable) in own.chain(added) {
+            let name = if removable {
+                path.file_stem().map_or_else(
+                    || path.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                )
+            } else {
+                "ExPLIA".to_string()
+            };
+            let response = ui
+                .selectable_label(false, format!("🚀 {name}"))
+                .on_hover_text(path.display().to_string())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if response.clicked() {
+                action = Some(Action::Open(path.clone()));
+            }
+            response.context_menu(|ui| {
+                if ui.button("Lancer").clicked() {
+                    action = Some(Action::Open(path.clone()));
+                    ui.close();
+                }
+                if ui.button("Lancer en tant qu'administrateur").clicked() {
+                    action = Some(Action::OpenAsAdmin(path.clone()));
+                    ui.close();
+                }
+                if let Some(dir) = path.parent()
+                    && ui.button("Afficher dans son dossier").clicked()
+                {
+                    action = Some(Action::GoSelect {
+                        dir: dir.to_path_buf(),
+                        file: path.clone(),
+                    });
+                    ui.close();
+                }
+                if removable && ui.button("Retirer des applications").clicked() {
+                    action = Some(Action::RemoveApplication(path.clone()));
+                    ui.close();
+                }
+            });
         }
         action
     }
@@ -2292,6 +2367,17 @@ impl ExpliaApp {
             if ui.button(label).clicked() {
                 action = Some(open_action(&entry.path));
                 ui.close();
+            }
+            if launch::is_executable(&entry.path) {
+                if self.applications.contains(&entry.path) {
+                    if ui.button("Retirer des applications").clicked() {
+                        action = Some(Action::RemoveApplication(entry.path.clone()));
+                        ui.close();
+                    }
+                } else if ui.button("Ajouter aux applications").clicked() {
+                    action = Some(Action::AddApplication(entry.path.clone()));
+                    ui.close();
+                }
             }
             if playable && ui.button("Ouvrir avec le lecteur externe").clicked() {
                 action = Some(Action::Open(entry.path.clone()));

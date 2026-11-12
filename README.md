@@ -20,6 +20,7 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
   - **Ce PC** : les lecteurs détectés (`C:`, `D:`, …) avec leur nom de volume et, sous chacun, une **barre d'occupation** avec le pourcentage à l'intérieur (verte, orange à partir de 75 %, rouge à partir de 90 %). L'infobulle donne le type, le format, le total, l'espace utilisé et libre. **Option > Occupation des disques** masque ou affiche ces barres.
   - **Home** : le dossier de l'utilisateur et ses sous-dossiers.
   - **Favoris** : vide par défaut, uniquement les dossiers que vous ajoutez par clic droit « Ajouter aux favoris » ; clic droit « Retirer des favoris ».
+  - **Applications** : ExPLIA lui-même en tête, puis les applications que vous ajoutez (clic droit sur un exécutable `.exe`, `.bat`, `.cmd`, `.msi` ou `.com` > « Ajouter aux applications »). Un clic lance l'application ; clic droit : lancer en administrateur (fenêtre UAC), afficher dans son dossier, retirer des applications.
   - **Réseau** : les lecteurs réseau connectés (lettres de lecteur mappées). La navigation dans les serveurs et partages réseau n'est pas prise en charge.
 - **La vue centrale n'affiche jamais la liste des lecteurs** : « Ce PC » (bouton, fil d'Ariane ou saisie) ouvre l'onglet « Ce PC » de la barre latérale et laisse le dossier affiché en place.
 - **Ligne `..`** : première ligne de la liste, un clic revient au dossier précédent (le parent) ; à la racine d'un lecteur, elle ouvre l'onglet « Ce PC ».
@@ -46,7 +47,7 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 - **Ouvrir** : double-clic sur un fichier l'ouvre avec l'application par défaut de Windows. Clic droit sur un exécutable (`.exe`, `.bat`, `.cmd`, `.msi`) : « Exécuter » ou « Exécuter en tant qu'administrateur » (fenêtre UAC).
 
 ### Réglages
-Vos réglages sont enregistrés automatiquement dans `%APPDATA%\ExPLIA\settings.txt` (format `clé=valeur`, modifiable à la main) : taille de la fenêtre, tri, volet d'aperçu, mode d'affichage, colonnes, éléments cachés, filtre d'extension, options (taille des dossiers, occupation des disques) et favoris.
+Vos réglages sont enregistrés automatiquement dans `%APPDATA%\ExPLIA\settings.txt` (format `clé=valeur`, modifiable à la main) : taille de la fenêtre, tri, volet d'aperçu, mode d'affichage, colonnes, éléments cachés, filtre d'extension, options (taille des dossiers, occupation des disques), favoris et applications.
 
 ## Raccourcis clavier
 
