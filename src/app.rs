@@ -15,7 +15,7 @@ use crate::fileops;
 use crate::fs_nav::{self, Entry, Location};
 use crate::launch;
 use crate::media::{self, MediaInfo, MediaKind};
-use crate::places::{self, Drive, DriveKind};
+use crate::places::{self, Drive, DriveInfo, DriveKind};
 use crate::player::{self, Player, PlayerState};
 use crate::preview::{self, ArchivePreview, ImagePreview, PreviewContent, TextPreview};
 use crate::settings::Settings;
@@ -52,6 +52,39 @@ const MAX_THUMBS_IN_FLIGHT: usize = 6;
 /// Largeurs minimale et maximale d'une colonne de la navigation « style Mac ».
 const COLUMN_VIEW_MIN_WIDTH: f32 = 150.0;
 const COLUMN_VIEW_MAX_WIDTH: f32 = 340.0;
+/// Largeur des onglets (« intercalaires ») du classeur de la barre latérale.
+const SIDEBAR_TAB_WIDTH: f32 = 26.0;
+/// Hauteur de la barre d'occupation d'un lecteur.
+const DRIVE_BAR_HEIGHT: f32 = 16.0;
+/// Agrandissement du texte et des boutons des barres du haut, en points.
+const TOOLBAR_TEXT_BOOST: f32 = 2.0;
+
+/// Onglets (« intercalaires ») de la barre latérale : le classeur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarTab {
+    Pc,
+    Home,
+    Favorites,
+    Network,
+}
+
+impl SidebarTab {
+    const ALL: [SidebarTab; 4] = [
+        SidebarTab::Pc,
+        SidebarTab::Home,
+        SidebarTab::Favorites,
+        SidebarTab::Network,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            SidebarTab::Pc => "Ce PC",
+            SidebarTab::Home => "Home",
+            SidebarTab::Favorites => "Favoris",
+            SidebarTab::Network => "Réseau",
+        }
+    }
+}
 
 /// Colonnes optionnelles du tableau.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +120,8 @@ impl Column {
 /// Résultat renvoyé à l'interface par un thread de travail.
 enum Event {
     Preview(PathBuf, Result<PreviewContent, String>),
-    DriveSize(PathBuf, Option<u64>),
+    /// Capacité et occupation d'un lecteur (`None` si le lecteur n'est pas prêt).
+    DriveInfo(PathBuf, Option<DriveInfo>),
     /// Taille d'un dossier ; `generation` identifie le listing concerné.
     FolderSize {
         generation: u64,
@@ -147,6 +181,8 @@ enum PreviewState {
 /// Action demandée par l'interface pendant une frame, appliquée ensuite.
 enum Action {
     Go(Location),
+    /// Change d'onglet dans le classeur de la barre latérale.
+    SidebarTab(SidebarTab),
     Select(Entry),
     AddFavorite(PathBuf),
     RemoveFavorite(PathBuf),
@@ -220,9 +256,17 @@ pub struct ExpliaApp {
     focus_address: bool,
     error: Option<String>,
     drives: Vec<Drive>,
-    /// Taille totale des lecteurs : absente tant que le calcul est en cours,
+    /// Capacité et occupation des lecteurs : absente tant que le calcul est en cours,
     /// `None` si le lecteur n'est pas prêt.
-    drive_sizes: HashMap<PathBuf, Option<u64>>,
+    drive_infos: HashMap<PathBuf, Option<DriveInfo>>,
+    /// Option : barre d'occupation et pourcentage des lecteurs.
+    show_drive_usage: bool,
+    /// Onglet affiché dans la barre latérale.
+    sidebar_tab: SidebarTab,
+    /// Dossier de l'utilisateur courant (onglet « Home »).
+    home: Option<PathBuf>,
+    /// Sous-dossiers du dossier de l'utilisateur.
+    home_dirs: Vec<Entry>,
     favorites: Favorites,
     /// Contenu brut du dossier courant.
     entries: Vec<Entry>,
@@ -292,8 +336,6 @@ pub struct ExpliaApp {
     last_scroll: (f32, f32),
     /// Après l'entrée dans un dossier au clavier (flèche droite) : sélectionne son premier élément.
     select_first_after_nav: bool,
-    /// Lecteur en surbrillance dans la vue « Ce PC » (flèches).
-    drive_cursor: Option<usize>,
     preview: PreviewState,
     event_tx: Sender<Event>,
     event_rx: Receiver<Event>,
@@ -312,8 +354,12 @@ impl ExpliaApp {
             address: location.display(),
             location,
             error: None,
-            drives: places::detect_drives(),
-            drive_sizes: HashMap::new(),
+            drives: Vec::new(),
+            drive_infos: HashMap::new(),
+            show_drive_usage: settings.show_drive_usage,
+            sidebar_tab: SidebarTab::Pc,
+            home: places::user_home().filter(|home| home.is_dir()),
+            home_dirs: Vec::new(),
             favorites: Favorites::from_paths(settings.favorites.clone()),
             entries: Vec::new(),
             visible: Vec::new(),
@@ -357,35 +403,64 @@ impl ExpliaApp {
             scroll_to_index: None,
             last_scroll: (0.0, 0.0),
             select_first_after_nav: false,
-            drive_cursor: None,
             preview: PreviewState::None,
             event_tx,
             event_rx,
         };
-        // Au lancement : le dossier de l'utilisateur courant (à défaut, la vue « Ce PC »).
-        let start = places::user_home()
-            .filter(|home| home.is_dir())
-            .map_or(Location::ThisPc, Location::Dir);
-        app.navigate(start.clone());
-        if app.location != start {
-            app.navigate(Location::ThisPc);
+        app.refresh_drives();
+        app.refresh_home_dirs();
+        // Au lancement : le dossier de l'utilisateur courant (à défaut, le premier lecteur).
+        // La vue du centre n'affiche jamais la liste des lecteurs : elle est dans la barre latérale.
+        let start = match &app.home {
+            Some(home) => Some(home.clone()),
+            None => app.drives.first().map(|drive| drive.path.clone()),
+        };
+        app.sidebar_tab = if app.home.is_some() {
+            SidebarTab::Home
+        } else {
+            SidebarTab::Pc
+        };
+        if let Some(start) = start {
+            app.navigate(Location::Dir(start));
         }
         app
     }
 
-    /// Calcule la taille des lecteurs dans un thread (un lecteur réseau peut être lent).
-    fn start_drive_sizes(&mut self) {
-        self.drive_sizes.clear();
+    /// Relit les lecteurs et calcule leur capacité dans un thread (un lecteur réseau peut
+    /// être lent). Les valeurs déjà connues restent affichées jusqu'à leur mise à jour.
+    fn refresh_drives(&mut self) {
+        self.drives = places::detect_drives();
         let roots: Vec<PathBuf> = self.drives.iter().map(|d| d.path.clone()).collect();
+        self.drive_infos.retain(|path, _| roots.contains(path));
         let tx = self.event_tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             for root in roots {
-                let size = places::drive_total_size(&root);
-                let _ = tx.send(Event::DriveSize(root, size));
+                let info = places::drive_info(&root);
+                let _ = tx.send(Event::DriveInfo(root, info));
                 ctx.request_repaint();
             }
         });
+    }
+
+    /// Relit les sous-dossiers du dossier de l'utilisateur (onglet « Home »).
+    fn refresh_home_dirs(&mut self) {
+        self.home_dirs = self
+            .home
+            .as_deref()
+            .and_then(|home| fs_nav::list_dir(home).ok())
+            .map(|entries| entries.into_iter().filter(|e| e.is_dir).collect())
+            .unwrap_or_default();
+    }
+
+    /// Affiche un onglet du classeur ; son contenu est relu (lecteurs, dossiers).
+    fn set_sidebar_tab(&mut self, tab: SidebarTab) {
+        self.sidebar_tab = tab;
+        match tab {
+            SidebarTab::Pc | SidebarTab::Network => self.refresh_drives(),
+            SidebarTab::Home => self.refresh_home_dirs(),
+            SidebarTab::Favorites => {}
+        }
     }
 
     /// Lance le calcul de la taille des sous-dossiers du dossier affiché.
@@ -571,6 +646,16 @@ impl ExpliaApp {
 
     /// Change d'emplacement. En cas d'erreur, on reste sur l'emplacement actuel.
     fn navigate(&mut self, target: Location) {
+        // La vue du centre ne revient jamais sur les lecteurs : « Ce PC » ouvre l'onglet
+        // des lecteurs dans la barre latérale, et le dossier affiché ne change pas.
+        let path = match &target {
+            Location::ThisPc => {
+                self.set_sidebar_tab(SidebarTab::Pc);
+                self.address = self.location.display();
+                return;
+            }
+            Location::Dir(path) => path.clone(),
+        };
         // Une lecture en cours ne suit pas dans un autre dossier.
         self.stop_player();
         let select_first = std::mem::take(&mut self.select_first_after_nav);
@@ -580,31 +665,20 @@ impl ExpliaApp {
             Location::Dir(path) => Some(path.clone()),
             Location::ThisPc => None,
         };
-        match &target {
-            Location::ThisPc => {
-                self.drives = places::detect_drives();
-                self.entries.clear();
-                // Annule un éventuel calcul de tailles de dossiers ou de métadonnées.
-                self.folder_generation.fetch_add(1, Ordering::SeqCst);
-                self.media_generation.fetch_add(1, Ordering::SeqCst);
-                self.media.clear();
-                self.start_drive_sizes();
+        match fs_nav::list_dir(&path) {
+            Ok(entries) => {
+                self.entries = entries;
+                self.start_folder_sizes();
+                self.start_media(false);
             }
-            Location::Dir(path) => match fs_nav::list_dir(path) {
-                Ok(entries) => {
-                    self.entries = entries;
-                    self.start_folder_sizes();
-                    self.start_media(false);
-                }
-                Err(err) => {
-                    self.error = Some(format!(
-                        "Impossible d'ouvrir « {} » : {err}",
-                        path.display()
-                    ));
-                    self.address = self.location.display();
-                    return;
-                }
-            },
+            Err(err) => {
+                self.error = Some(format!(
+                    "Impossible d'ouvrir « {} » : {err}",
+                    path.display()
+                ));
+                self.address = self.location.display();
+                return;
+            }
         }
         self.error = None;
         self.notice = None;
@@ -615,7 +689,6 @@ impl ExpliaApp {
         self.anchor = None;
         self.cursor = None;
         self.scroll_to_index = None;
-        self.drive_cursor = None;
         self.renaming = None;
         self.preview = PreviewState::None;
         // Les miniatures de la grille appartiennent au dossier quitté.
@@ -623,21 +696,15 @@ impl ExpliaApp {
         self.thumbs_requested.clear();
         self.recompute_visible();
         // Remontée d'un niveau : le dossier quitté redevient la ligne courante.
-        if let Some(previous) = came_from {
-            match &self.location {
-                Location::Dir(now) if previous.parent() == Some(now.as_path()) => {
-                    if let Some(index) = self.visible.iter().position(|e| e.path == previous) {
-                        self.cursor = Some(previous.clone());
-                        self.anchor = Some(previous);
-                        self.selected = Some(self.visible[index].clone());
-                        self.scroll_to_index = Some(index);
-                    }
-                }
-                Location::ThisPc if previous.parent().is_none() => {
-                    self.drive_cursor = self.drives.iter().position(|d| d.path == previous);
-                }
-                _ => {}
-            }
+        if let Some(previous) = came_from
+            && let Location::Dir(now) = &self.location
+            && previous.parent() == Some(now.as_path())
+            && let Some(index) = self.visible.iter().position(|e| e.path == previous)
+        {
+            self.cursor = Some(previous.clone());
+            self.anchor = Some(previous);
+            self.selected = Some(self.visible[index].clone());
+            self.scroll_to_index = Some(index);
         }
         // Entrée dans un dossier au clavier : on sélectionne son premier élément.
         if select_first && let Some(first) = self.visible.first().cloned() {
@@ -958,8 +1025,8 @@ impl ExpliaApp {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 Event::Preview(path, result) => self.on_preview(ctx, path, result),
-                Event::DriveSize(path, size) => {
-                    self.drive_sizes.insert(path, size);
+                Event::DriveInfo(path, info) => {
+                    self.drive_infos.insert(path, info);
                 }
                 Event::FolderSize {
                     generation,
@@ -1042,6 +1109,7 @@ impl ExpliaApp {
     fn apply(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::Go(location) => self.navigate(location),
+            Action::SidebarTab(tab) => self.set_sidebar_tab(tab),
             Action::Select(entry) => self.select(ctx, entry),
             Action::AddFavorite(path) => {
                 self.favorites.add(path);
@@ -1113,6 +1181,7 @@ impl ExpliaApp {
             show_preview: self.show_preview,
             preview_expanded: self.preview_expanded,
             skip_folder_sizes: self.skip_folder_sizes,
+            show_drive_usage: self.show_drive_usage,
             view_mode: self.view_mode,
             show_hidden: self.show_hidden,
             columns: self.columns,
@@ -1156,17 +1225,10 @@ impl ExpliaApp {
         });
     }
 
-    /// Première ligne : dossier parent, Ce PC, fil d'Ariane (ou saisie du chemin).
+    /// Première ligne : Ce PC, fil d'Ariane (ou saisie du chemin).
     fn address_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         ui.horizontal(|ui| {
-            let parent = self.location.parent();
-            if ui
-                .add_enabled(parent.is_some(), egui::Button::new("⬆ Dossier parent"))
-                .clicked()
-            {
-                action = parent.map(Action::Go);
-            }
             if ui.button("🖥 Ce PC").clicked() {
                 action = Some(Action::Go(Location::ThisPc));
             }
@@ -1204,8 +1266,8 @@ impl ExpliaApp {
         }
     }
 
-    /// Fil d'Ariane : un bouton par niveau du chemin ; un clic sur l'espace libre
-    /// (ou sur le crayon) passe en mode saisie.
+    /// Fil d'Ariane : un bouton par niveau du chemin, qui s'illumine au survol ; un clic sur
+    /// l'espace libre passe en mode saisie.
     fn breadcrumb_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         let crumbs = match &self.location {
@@ -1221,26 +1283,26 @@ impl ExpliaApp {
             ui.set_width(ui.available_width());
             ui.set_height(height);
             ui.horizontal(|ui| {
-                if ui
-                    .small_button("✏")
-                    .on_hover_text("Modifier le chemin")
-                    .clicked()
-                {
-                    action = Some(Action::EditAddress);
-                }
+                // Survol : le mot prend la couleur des liens et un fond apparaît, comme un bouton.
+                let link = ui.visuals().hyperlink_color;
+                let hovered = &mut ui.visuals_mut().widgets.hovered;
+                hovered.weak_bg_fill = link.gamma_multiply(0.22);
+                hovered.bg_fill = hovered.weak_bg_fill;
+                hovered.bg_stroke = egui::Stroke::new(1.0, link);
+                hovered.fg_stroke.color = link;
                 egui::ScrollArea::horizontal()
                     .id_salt("breadcrumb")
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .stick_to_right(true)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            let this_pc = ui.add(egui::Button::new("Ce PC").frame(false));
+                            let this_pc = crumb_button(ui, "Ce PC");
                             if this_pc.clicked() {
                                 action = Some(Action::Go(Location::ThisPc));
                             }
                             for (label, path) in &crumbs {
                                 ui.weak(">");
-                                let button = ui.add(egui::Button::new(label).frame(false));
+                                let button = crumb_button(ui, label);
                                 if button.clicked() {
                                     action = Some(Action::Go(Location::Dir(path.clone())));
                                 }
@@ -1357,6 +1419,10 @@ impl ExpliaApp {
                         "Pas de calcul de taille de dossier",
                     )
                     .changed();
+                ui.checkbox(
+                    &mut self.show_drive_usage,
+                    "Occupation des disques (barre et %)",
+                );
             });
         });
         if sizes_option_changed {
@@ -1394,9 +1460,161 @@ impl ExpliaApp {
             .and_then(|path| self.visible.iter().position(|e| e.path == *path))
     }
 
+    /// Barre latérale en « classeur » : la liste des dossiers de l'onglet actif à gauche,
+    /// les onglets (intercalaires : Ce PC, Home, Favoris, Réseau) sur le bord droit.
     fn sidebar(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        ui.add_space(4.0);
+        let height = ui.available_height();
+        let list_width =
+            (ui.available_width() - SIDEBAR_TAB_WIDTH - ui.spacing().item_spacing.x).max(60.0);
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(list_width);
+                ui.set_height(height);
+                egui::ScrollArea::vertical()
+                    .id_salt("sidebar-list")
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        ui.add_space(4.0);
+                        action = self.sidebar_list(ui);
+                    });
+            });
+            if let Some(tab) = self.sidebar_tabs(ui) {
+                action = Some(Action::SidebarTab(tab));
+            }
+        });
+        action
+    }
+
+    /// Intercalaires du classeur : texte vertical sur le bord droit de la barre latérale.
+    fn sidebar_tabs(&self, ui: &mut egui::Ui) -> Option<SidebarTab> {
+        let mut clicked = None;
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.add_space(4.0);
+            for tab in SidebarTab::ALL {
+                let selected = self.sidebar_tab == tab;
+                let font = egui::TextStyle::Body.resolve(ui.style());
+                let color = if selected {
+                    ui.visuals().selection.stroke.color
+                } else {
+                    ui.visuals().text_color()
+                };
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(tab.title().to_string(), font, color);
+                let text = galley.size();
+                let size = egui::vec2(SIDEBAR_TAB_WIDTH, text.x + 20.0);
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                let visuals = ui.visuals();
+                let fill = if selected {
+                    visuals.selection.bg_fill
+                } else if response.hovered() {
+                    visuals.widgets.hovered.weak_bg_fill
+                } else {
+                    visuals.widgets.inactive.weak_bg_fill
+                };
+                let corners = egui::CornerRadius {
+                    nw: 0,
+                    sw: 0,
+                    ne: 8,
+                    se: 8,
+                };
+                ui.painter().rect_filled(rect, corners, fill);
+                // Texte tourné d'un quart de tour (lecture de haut en bas), centré dans l'onglet.
+                let origin = egui::pos2(
+                    rect.center().x + text.y / 2.0,
+                    rect.center().y - text.x / 2.0,
+                );
+                ui.painter().add(
+                    egui::epaint::TextShape::new(origin, galley, color)
+                        .with_angle(std::f32::consts::FRAC_PI_2),
+                );
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    clicked = Some(tab);
+                }
+            }
+        });
+        clicked
+    }
+
+    /// Contenu de l'onglet actif.
+    fn sidebar_list(&self, ui: &mut egui::Ui) -> Option<Action> {
+        // Un nom trop long est tronqué, jamais coupé sur deux lignes.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        match self.sidebar_tab {
+            SidebarTab::Pc => self.drives_list(ui, false),
+            SidebarTab::Network => self.drives_list(ui, true),
+            SidebarTab::Home => self.home_list(ui),
+            SidebarTab::Favorites => self.favorites_list(ui),
+        }
+    }
+
+    /// Lecteurs, avec leur occupation si l'option est cochée. `network_only` : onglet « Réseau »
+    /// (lecteurs réseau connectés seulement).
+    fn drives_list(&self, ui: &mut egui::Ui, network_only: bool) -> Option<Action> {
+        let mut action = None;
+        ui.heading(if network_only { "Réseau" } else { "Ce PC" });
+        let mut any = false;
+        for drive in &self.drives {
+            if network_only && drive.kind != DriveKind::Network {
+                continue;
+            }
+            any = true;
+            let info = self.drive_infos.get(&drive.path).and_then(Option::as_ref);
+            let here =
+                matches!(&self.location, Location::Dir(path) if path.starts_with(&drive.path));
+            if drive_entry(ui, drive, info, here, self.show_drive_usage).clicked() {
+                action = Some(Action::Go(Location::Dir(drive.path.clone())));
+            }
+        }
+        if !any {
+            ui.weak(if network_only {
+                "Aucun lecteur réseau connecté."
+            } else {
+                "Aucun lecteur détecté."
+            });
+        }
+        action
+    }
+
+    /// Dossier de l'utilisateur et ses sous-dossiers.
+    fn home_list(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        let Some(home) = &self.home else {
+            ui.weak("Dossier de l'utilisateur introuvable.");
+            return None;
+        };
+        ui.heading("Home");
+        let here = self.location == Location::Dir(home.clone());
+        if ui
+            .selectable_label(here, format!("🏠 {}", favorite_name(home)))
+            .on_hover_text(home.display().to_string())
+            .clicked()
+        {
+            action = Some(Action::Go(Location::Dir(home.clone())));
+        }
+        for entry in &self.home_dirs {
+            if entry.hidden && !self.show_hidden {
+                continue;
+            }
+            let here = self.location == Location::Dir(entry.path.clone());
+            if ui
+                .selectable_label(here, format!("📁 {}", entry.name))
+                .on_hover_text(entry.path.display().to_string())
+                .clicked()
+            {
+                action = Some(Action::Go(Location::Dir(entry.path.clone())));
+            }
+        }
+        action
+    }
+
+    fn favorites_list(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
         ui.heading("Favoris");
         if self.favorites.paths().is_empty() {
             ui.weak("Clic droit sur un dossier pour l'ajouter.");
@@ -1416,35 +1634,15 @@ impl ExpliaApp {
                 }
             });
         }
-        ui.separator();
-        // Le titre de la section est « Ce PC » : un clic ouvre la vue des lecteurs.
-        if ui
-            .selectable_label(
-                self.location == Location::ThisPc,
-                egui::RichText::new("🖥 Ce PC").heading(),
-            )
-            .clicked()
-        {
-            action = Some(Action::Go(Location::ThisPc));
-        }
-        for drive in &self.drives {
-            let here = self.location == Location::Dir(drive.path.clone());
-            if ui
-                .selectable_label(
-                    here,
-                    format!("{} {}", drive_icon(drive.kind), drive.label()),
-                )
-                .clicked()
-            {
-                action = Some(Action::Go(Location::Dir(drive.path.clone())));
-            }
-        }
         action
     }
 
     fn central(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         match (&self.location, self.view_mode) {
-            (Location::ThisPc, _) => self.drives_view(ui),
+            (Location::ThisPc, _) => {
+                ui.label("Choisissez un dossier ou un lecteur dans la barre latérale.");
+                None
+            }
             (Location::Dir(_), ViewMode::List) => self.listing_view(ui),
             (Location::Dir(_), ViewMode::Columns) => self.columns_view(ui),
             (Location::Dir(_), ViewMode::Gallery) => self.gallery_view(ui),
@@ -1560,7 +1758,15 @@ impl ExpliaApp {
                                             &[],
                                             &[],
                                         );
-                                        if response.double_clicked() && !entry.is_dir {
+                                        let (ctrl, shift) =
+                                            ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                                        if is_last && response.clicked() && ctrl {
+                                            // Ctrl+clic : ajoute ou retire l'élément de la sélection
+                                            // multiple (dossier ou fichier de la dernière colonne).
+                                            action = Some(Action::ToggleMulti(entry.clone()));
+                                        } else if is_last && response.clicked() && shift {
+                                            action = Some(Action::SelectRange(entry.clone()));
+                                        } else if response.double_clicked() && !entry.is_dir {
                                             action = Some(open_action(&entry.path));
                                         } else if response.clicked() {
                                             action = Some(if entry.is_dir {
@@ -1656,38 +1862,6 @@ impl ExpliaApp {
         action
     }
 
-    fn drives_view(&self, ui: &mut egui::Ui) -> Option<Action> {
-        let mut action = None;
-        ui.heading("Périphériques et lecteurs");
-        ui.add_space(6.0);
-        if self.drives.is_empty() {
-            ui.label("Aucun lecteur détecté.");
-        }
-        table_header(ui, &[Column::Size]);
-        egui::ScrollArea::vertical()
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                for (index, drive) in self.drives.iter().enumerate() {
-                    let name = format!(
-                        "{}  {}   —   {}",
-                        drive_icon(drive.kind),
-                        drive.label(),
-                        drive.kind_name()
-                    );
-                    let size = match self.drive_sizes.get(&drive.path) {
-                        None => "…".to_string(),
-                        Some(None) => "—".to_string(),
-                        Some(Some(bytes)) => fs_nav::format_size(*bytes),
-                    };
-                    let highlighted = self.drive_cursor == Some(index);
-                    if size_row(ui, highlighted, &name, &size).clicked() {
-                        action = Some(Action::Go(Location::Dir(drive.path.clone())));
-                    }
-                }
-            });
-        action
-    }
-
     /// Texte de la colonne « Taille » d'une entrée de dossier.
     fn entry_size_text(&self, entry: &Entry) -> String {
         match entry.size {
@@ -1760,15 +1934,26 @@ impl ExpliaApp {
 
     fn listing_view(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        if self.entries.is_empty() {
-            ui.label("Ce dossier est vide.");
-            return None;
-        }
-        if self.visible.is_empty() {
-            ui.label("Aucun élément ne correspond au filtre d'extension.");
-            return None;
-        }
+        // Première ligne : « .. » revient au dossier précédent (le parent).
+        let parent = self.location.parent();
+        let shift = usize::from(parent.is_some());
+        let empty_message = if self.entries.is_empty() {
+            Some("Ce dossier est vide.")
+        } else if self.visible.is_empty() {
+            Some("Aucun élément ne correspond au filtre d'extension.")
+        } else {
+            None
+        };
         let columns = self.active_columns();
+        if let Some(message) = empty_message {
+            if let Some(parent) = parent
+                && parent_row(ui).clicked()
+            {
+                action = Some(Action::Go(parent));
+            }
+            ui.label(message);
+            return action;
+        }
         table_header(ui, &columns);
         // `show_rows` veut la hauteur d'une ligne SANS l'espacement (il l'ajoute lui-même) ;
         // le pas réel entre deux lignes sert au calcul du défilement.
@@ -1789,14 +1974,24 @@ impl ExpliaApp {
             ui.ctx().request_repaint();
             let (offset, view_height) = self.last_scroll;
             area = area.vertical_scroll_offset(view::scroll_offset_for(
-                index,
+                index + shift,
                 row_pitch,
                 offset,
                 view_height,
             ));
         }
-        let output = area.show_rows(ui, row_height, self.visible.len(), |ui, range| {
-            for entry in &self.visible[range] {
+        let rows = self.visible.len() + shift;
+        let output = area.show_rows(ui, row_height, rows, |ui, range| {
+            for row in range {
+                if row < shift {
+                    if let Some(parent) = &parent
+                        && parent_row(ui).clicked()
+                    {
+                        action = Some(Action::Go(parent.clone()));
+                    }
+                    continue;
+                }
+                let entry = &self.visible[row - shift];
                 // Ligne en cours de renommage : champ de saisie à la place du libellé.
                 if let Some(state) = rename.as_mut()
                     && state.path == entry.path
@@ -1942,7 +2137,6 @@ impl ExpliaApp {
     /// - gauche : dossier parent (le dossier quitté est resélectionné) ;
     /// - droite : entre dans le dossier sélectionné (son premier élément est sélectionné).
     ///
-    /// Dans la vue « Ce PC », haut / bas déplacent le lecteur en surbrillance et droite l'ouvre.
     fn arrow_key_action(&mut self, ctx: &egui::Context) -> Option<Action> {
         let (up, down, left, right, shift, backspace, enter) = ctx.input(|i| {
             (
@@ -1961,17 +2155,7 @@ impl ExpliaApp {
         }
         let vertical = if down { 1 } else { -1 };
         match &self.location {
-            Location::ThisPc => {
-                if up || down {
-                    self.drive_cursor =
-                        view::step_index(self.drive_cursor, self.drives.len(), vertical);
-                    return None;
-                }
-                if right && let Some(drive) = self.drive_cursor.and_then(|i| self.drives.get(i)) {
-                    return Some(Action::EnterFolder(drive.path.clone()));
-                }
-                None
-            }
+            Location::ThisPc => None,
             Location::Dir(_) => {
                 // Retour arrière : dossier parent, dans tous les modes d'affichage.
                 if backspace {
@@ -2471,7 +2655,7 @@ impl ExpliaApp {
 
     fn status_text(&self) -> String {
         match &self.location {
-            Location::ThisPc => format!("{} lecteur(s)", self.drives.len()),
+            Location::ThisPc => "Aucun dossier ouvert".to_string(),
             Location::Dir(_) => {
                 let count = if self.visible.len() == self.entries.len() {
                     format!("{} élément(s)", self.entries.len())
@@ -2486,6 +2670,31 @@ impl ExpliaApp {
             }
         }
     }
+}
+
+/// Ligne « .. » en tête de liste : un clic revient au dossier précédent (le parent).
+fn parent_row(ui: &mut egui::Ui) -> egui::Response {
+    table_row(ui, false, false, "⬆ ..", &[], &[])
+        .on_hover_text("Dossier parent (Retour arrière)")
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Mot du fil d'Ariane : sans cadre au repos, bouton coloré au survol (voir `breadcrumb_bar`).
+fn crumb_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(egui::Button::new(label).frame_when_inactive(false))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Agrandit le texte et les boutons d'une barre du haut (style local à `ui`).
+fn enlarge_toolbar(ui: &mut egui::Ui) {
+    let style = ui.style_mut();
+    for text_style in [egui::TextStyle::Body, egui::TextStyle::Button] {
+        if let Some(font) = style.text_styles.get_mut(&text_style) {
+            font.size += TOOLBAR_TEXT_BOOST;
+        }
+    }
+    style.spacing.interact_size.y = 30.0;
+    style.spacing.button_padding = egui::vec2(10.0, 5.0);
 }
 
 /// Bouton de menu qui reste ouvert tant qu'on ne clique pas à l'extérieur.
@@ -2783,6 +2992,115 @@ fn favorite_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Couleur de la barre d'occupation : verte, orange à partir de 75 %, rouge à partir de 90 %.
+fn usage_color(percent: u8) -> egui::Color32 {
+    match percent {
+        90.. => egui::Color32::from_rgb(190, 35, 45),
+        75..=89 => egui::Color32::from_rgb(190, 125, 0),
+        _ => egui::Color32::from_rgb(30, 140, 55),
+    }
+}
+
+/// Texte de l'infobulle d'un lecteur : type, nom, format, capacité, occupation.
+fn drive_tooltip(drive: &Drive, info: Option<&DriveInfo>) -> String {
+    let mut text = format!("{}  —  {}", drive.label(), drive.kind_name());
+    let Some(info) = info else {
+        return text;
+    };
+    if !info.name.is_empty() {
+        text += &format!("\nNom : {}", info.name);
+    }
+    if !info.file_system.is_empty() {
+        text += &format!("\nFormat : {}", info.file_system);
+    }
+    text += &format!(
+        "\nTotal : {}\nUtilisé : {} ({} %)\nLibre : {}",
+        fs_nav::format_size(info.total),
+        fs_nav::format_size(info.used()),
+        info.used_percent(),
+        fs_nav::format_size(info.free)
+    );
+    text
+}
+
+/// Ligne d'un lecteur dans la barre latérale : icône, lettre et nom du volume ; dessous, si
+/// l'option est cochée, la barre d'occupation avec le pourcentage à l'intérieur.
+fn drive_entry(
+    ui: &mut egui::Ui,
+    drive: &Drive,
+    info: Option<&DriveInfo>,
+    selected: bool,
+    show_usage: bool,
+) -> egui::Response {
+    let line = table_row_height(ui);
+    let usage = info.filter(|info| show_usage && info.total > 0);
+    let height = if usage.is_some() {
+        line + DRIVE_BAR_HEIGHT + 4.0
+    } else {
+        line
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let (background, text_color) = if selected {
+            (
+                Some(visuals.selection.bg_fill),
+                visuals.selection.stroke.color,
+            )
+        } else if response.hovered() {
+            (
+                Some(visuals.widgets.hovered.weak_bg_fill),
+                visuals.text_color(),
+            )
+        } else {
+            (None, visuals.text_color())
+        };
+        let corner = visuals.widgets.inactive.corner_radius;
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let pad = ui.spacing().button_padding.x;
+        let mut title = format!("{} {}", drive_icon(drive.kind), drive.label());
+        if let Some(info) = info
+            && !info.name.is_empty()
+        {
+            title += &format!("  {}", info.name);
+        }
+        let painter = ui.painter();
+        if let Some(fill) = background {
+            painter.rect_filled(rect, corner, fill);
+        }
+        let title_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), line));
+        painter.with_clip_rect(title_rect).text(
+            egui::pos2(rect.left() + pad, title_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            title,
+            font.clone(),
+            text_color,
+        );
+        if let Some(info) = usage {
+            let percent = info.used_percent();
+            let bar = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + pad, rect.top() + line),
+                egui::vec2((rect.width() - 2.0 * pad).max(20.0), DRIVE_BAR_HEIGHT),
+            );
+            painter.rect_filled(bar, 3.0, egui::Color32::from_gray(60));
+            let mut filled = bar;
+            filled.set_width(bar.width() * f32::from(percent) / 100.0);
+            painter.rect_filled(filled, 3.0, usage_color(percent));
+            painter.text(
+                bar.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{percent} %"),
+                egui::FontId::proportional(font.size - 1.5),
+                egui::Color32::WHITE,
+            );
+        }
+    }
+    response.on_hover_text(drive_tooltip(drive, info))
+}
+
 fn drive_icon(kind: DriveKind) -> &'static str {
     match kind {
         // Symboles présents dans la police d'egui (le symbole « disque dur » n'y est pas).
@@ -2846,6 +3164,7 @@ impl eframe::App for ExpliaApp {
         }
 
         egui::Panel::top("toolbar").show(ui, |ui| {
+            enlarge_toolbar(ui);
             ui.add_space(4.0);
             action = self.address_bar(ui).or(action.take());
             ui.add_space(2.0);

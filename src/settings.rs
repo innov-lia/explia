@@ -19,6 +19,8 @@ pub struct Settings {
     pub show_preview: bool,
     pub preview_expanded: bool,
     pub skip_folder_sizes: bool,
+    /// Barre d'occupation (et pourcentage) des lecteurs dans la barre latérale.
+    pub show_drive_usage: bool,
     pub view_mode: ViewMode,
     /// Afficher les dossiers et fichiers cachés.
     pub show_hidden: bool,
@@ -37,6 +39,7 @@ impl Default for Settings {
             show_preview: true,
             preview_expanded: false,
             skip_folder_sizes: false,
+            show_drive_usage: true,
             view_mode: ViewMode::List,
             show_hidden: false,
             columns: Columns::default(),
@@ -87,6 +90,7 @@ impl Settings {
                 "show_preview" => settings.show_preview = value != "false",
                 "preview_expanded" => settings.preview_expanded = value == "true",
                 "skip_folder_sizes" => settings.skip_folder_sizes = value == "true",
+                "show_drive_usage" => settings.show_drive_usage = value != "false",
                 "view_mode" => {
                     if let Some(mode) = ViewMode::from_id(value) {
                         settings.view_mode = mode;
@@ -123,6 +127,7 @@ impl Settings {
         text += &format!("show_preview={}\n", self.show_preview);
         text += &format!("preview_expanded={}\n", self.preview_expanded);
         text += &format!("skip_folder_sizes={}\n", self.skip_folder_sizes);
+        text += &format!("show_drive_usage={}\n", self.show_drive_usage);
         text += &format!("view_mode={}\n", self.view_mode.id());
         text += &format!("show_hidden={}\n", self.show_hidden);
         text += &format!("columns={}\n", self.columns.ids().join(","));
@@ -177,6 +182,7 @@ mod tests {
             show_preview: false,
             preview_expanded: true,
             skip_folder_sizes: true,
+            show_drive_usage: false,
             view_mode: ViewMode::Gallery,
             show_hidden: true,
             columns: Columns {
