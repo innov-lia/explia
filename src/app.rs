@@ -1208,7 +1208,7 @@ impl ExpliaApp {
         if self.confirm_delete {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
-                format!("Envoyer {what} à la corbeille ?"),
+                format!("Envoyer {what} à la corbeille ?  (Entrée : confirmer, Échap : annuler)"),
             );
         } else {
             ui.weak("Suppression : vers la corbeille de Windows.");
@@ -1583,21 +1583,25 @@ impl eframe::App for ExpliaApp {
         if ctx.input(|i| i.pointer.primary_pressed()) {
             self.long_press_done = false;
         }
-        // Échap quitte la multi-sélection (sauf pendant la saisie d'un chemin).
-        if !self.address_editing
-            && !self.multi.is_empty()
-            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
-        {
-            self.clear_multi();
+        // Échap annule la confirmation de suppression, sinon quitte la multi-sélection
+        // (sauf pendant la saisie d'un chemin).
+        if !self.address_editing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.confirm_delete {
+                self.confirm_delete = false;
+            } else if !self.multi.is_empty() {
+                self.clear_multi();
+            }
         }
         let mut action = None;
 
-        // Raccourcis : F2 renomme, Suppr demande la suppression (jamais pendant une saisie).
+        // Raccourcis (jamais pendant une saisie) : F2 renomme ; Suppr demande la suppression,
+        // puis Entrée la confirme (Échap l'annule).
         if !ctx.egui_wants_keyboard_input() && self.renaming.is_none() && !self.address_editing {
-            let (f2, delete) = ctx.input(|i| {
+            let (f2, delete, enter) = ctx.input(|i| {
                 (
                     i.key_pressed(egui::Key::F2),
                     i.key_pressed(egui::Key::Delete),
+                    i.key_pressed(egui::Key::Enter),
                 )
             });
             let single = match self.multi.len() {
@@ -1605,7 +1609,9 @@ impl eframe::App for ExpliaApp {
                 1 => self.multi.first(),
                 _ => None,
             };
-            if f2 && let Some(entry) = single {
+            if enter && self.confirm_delete {
+                action = Some(Action::ConfirmDelete);
+            } else if f2 && let Some(entry) = single {
                 action = Some(Action::StartRename(entry.clone()));
             } else if delete && !self.delete_targets().is_empty() {
                 action = Some(Action::AskDelete);
