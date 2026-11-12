@@ -128,8 +128,14 @@ La priorité est d'obtenir d'abord un explorateur utilisable : **lecteurs
 → navigation par dossiers → barre latérale → aperçu des images**.
 
 Ne pas développer pour l'instant : onglets, réseau, connexions à des
-serveurs, cloud, opérations sur fichiers, recherche avancée, plugins,
-synchronisation ou personnalisation complexe.
+serveurs, cloud, opérations sur fichiers autres que renommer et envoyer à
+la corbeille (donc ni copie, ni déplacement, ni création), recherche
+avancée, plugins, synchronisation ou personnalisation complexe.
+
+Le README doit toujours refléter les fonctionnalités réellement
+développées (fonctionnalités, raccourcis clavier, limites connues,
+prérequis) : le mettre à jour dans la même branche que toute évolution
+visible par l'utilisateur.
 
 ## Workflow Git et GitHub
 
