@@ -10,6 +10,7 @@ pub enum SortKey {
     Size,
     Type,
     Modified,
+    Created,
 }
 
 impl SortKey {
@@ -19,6 +20,7 @@ impl SortKey {
             SortKey::Size => "size",
             SortKey::Type => "type",
             SortKey::Modified => "modified",
+            SortKey::Created => "created",
         }
     }
 
@@ -28,6 +30,7 @@ impl SortKey {
             "size" => Some(SortKey::Size),
             "type" => Some(SortKey::Type),
             "modified" => Some(SortKey::Modified),
+            "created" => Some(SortKey::Created),
             _ => None,
         }
     }
@@ -415,6 +418,7 @@ pub fn sort_entries(entries: &mut [Entry], key: SortKey, order: SortOrder) {
                 .then_with(by_name),
             // Un élément sans date compte comme le plus ancien.
             SortKey::Modified => a.modified.cmp(&b.modified).then_with(by_name),
+            SortKey::Created => a.created.cmp(&b.created).then_with(by_name),
         };
         let ordering = match order {
             SortOrder::Ascending => ordering,
@@ -469,6 +473,36 @@ mod tests {
         assert_eq!(names(&v), ["b", "c", "a"]);
         sort_entries(&mut v, SortKey::Size, SortOrder::Descending);
         assert_eq!(names(&v), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn sort_by_creation_date() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let at = |secs| Some(UNIX_EPOCH + Duration::from_secs(secs));
+        let mut a = file("a", 1);
+        a.created = at(300);
+        let mut b = file("b", 1);
+        b.created = at(100);
+        let mut c = file("c", 1);
+        c.created = at(200);
+        let mut v = vec![a, b, c];
+        sort_entries(&mut v, SortKey::Created, SortOrder::Ascending);
+        assert_eq!(names(&v), ["b", "c", "a"]);
+        sort_entries(&mut v, SortKey::Created, SortOrder::Descending);
+        assert_eq!(names(&v), ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn sort_key_ids_round_trip() {
+        for key in [
+            SortKey::Name,
+            SortKey::Size,
+            SortKey::Type,
+            SortKey::Modified,
+            SortKey::Created,
+        ] {
+            assert_eq!(SortKey::from_id(key.id()), Some(key));
+        }
     }
 
     #[test]

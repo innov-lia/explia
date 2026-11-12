@@ -115,6 +115,16 @@ impl Column {
         }
     }
 
+    /// Critère de tri d'un clic sur l'en-tête (`None` : dimensions et durée, pas triables).
+    fn sort_key(self) -> Option<SortKey> {
+        match self {
+            Column::Created => Some(SortKey::Created),
+            Column::Modified => Some(SortKey::Modified),
+            Column::Size => Some(SortKey::Size),
+            Column::Dimensions | Column::Duration => None,
+        }
+    }
+
     fn width(self) -> f32 {
         match self {
             Column::Dimensions => 105.0,
@@ -225,6 +235,8 @@ enum Action {
     StopPlayer,
     /// Change la façon d'afficher le dossier (liste, colonnes, grille d'images).
     SetViewMode(ViewMode),
+    /// Clic sur un en-tête de colonne : trie dessus, ou inverse l'ordre s'il est déjà actif.
+    SortBy(SortKey),
     /// Affiche ou masque les dossiers et fichiers cachés.
     ToggleHidden,
     /// Ouvre un dossier et y sélectionne un fichier (vue en colonnes).
@@ -1187,6 +1199,26 @@ impl ExpliaApp {
                 }
             }
             Action::SidebarTab(tab) => self.set_sidebar_tab(tab),
+            Action::SortBy(key) => {
+                if self.sort_key == key {
+                    self.sort_order = match self.sort_order {
+                        SortOrder::Ascending => SortOrder::Descending,
+                        SortOrder::Descending => SortOrder::Ascending,
+                    };
+                } else {
+                    self.sort_key = key;
+                    // Nom : de A à Z ; taille et dates : les plus grands / récents d'abord.
+                    self.sort_order = match key {
+                        SortKey::Name | SortKey::Type => SortOrder::Ascending,
+                        SortKey::Size | SortKey::Modified | SortKey::Created => {
+                            SortOrder::Descending
+                        }
+                    };
+                }
+                self.recompute_visible();
+                // Les colonnes de la vue « style Mac » dépendent du tri.
+                self.invalidate_columns();
+            }
             Action::Select(entry) => self.select(ctx, entry),
             Action::AddFavorite(path) => {
                 self.favorites.add(path);
@@ -1422,6 +1454,7 @@ impl ExpliaApp {
                     (SortKey::Size, "Taille"),
                     (SortKey::Type, "Type"),
                     (SortKey::Modified, "Date de modification"),
+                    (SortKey::Created, "Date de création"),
                 ] {
                     changed |= ui.radio_value(&mut self.sort_key, key, label).changed();
                 }
@@ -1982,7 +2015,13 @@ impl ExpliaApp {
                             ui.set_height(height);
                             ui.add(egui::Label::new(egui::RichText::new(name).weak()).truncate());
                             if is_last {
-                                table_header(ui, &info_columns);
+                                if let Some(key) = table_header(
+                                    ui,
+                                    &info_columns,
+                                    (self.sort_key, self.sort_order),
+                                ) {
+                                    action = Some(Action::SortBy(key));
+                                }
                             } else {
                                 // Même hauteur que l'en-tête de la dernière colonne : les lignes
                                 // des colonnes restent alignées.
@@ -2345,7 +2384,9 @@ impl ExpliaApp {
             ui.label(message);
             return action;
         }
-        table_header(ui, &columns);
+        if let Some(key) = table_header(ui, &columns, (self.sort_key, self.sort_order)) {
+            action = Some(Action::SortBy(key));
+        }
         // `show_rows` veut la hauteur d'une ligne SANS l'espacement (il l'ajoute lui-même) ;
         // le pas réel entre deux lignes sert au calcul du défilement.
         let row_height = table_row_height(ui);
@@ -3188,35 +3229,84 @@ fn table_row_height(ui: &egui::Ui) -> f32 {
 }
 
 /// En-tête du tableau : « Nom » à gauche, puis les colonnes demandées alignées à droite
-/// (`columns` dans l'ordre d'affichage, de gauche à droite).
-fn table_header(ui: &mut egui::Ui, columns: &[Column]) {
+/// (`columns` dans l'ordre d'affichage, de gauche à droite). Un clic sur un titre renvoie le
+/// critère de tri correspondant ; le tri actif (`sort`) est marqué d'une flèche.
+fn table_header(
+    ui: &mut egui::Ui,
+    columns: &[Column],
+    sort: (SortKey, SortOrder),
+) -> Option<SortKey> {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), table_row_height(ui)),
         egui::Sense::hover(),
     );
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let color = ui.visuals().strong_text_color();
     let pad = ui.spacing().button_padding.x;
-    let painter = ui.painter();
-    painter.text(
-        egui::pos2(rect.left() + pad, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Nom",
-        font.clone(),
-        color,
-    );
+    let mut clicked = None;
+    // Zones des titres : « Nom » prend la place restante, chaque colonne sa largeur.
+    let mut cells: Vec<(&str, Option<SortKey>, egui::Rect, egui::Align2)> = Vec::new();
     let mut right = rect.right() - pad;
     for column in columns.iter().rev() {
-        painter.text(
-            egui::pos2(right, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
+        let cell = egui::Rect::from_min_max(
+            egui::pos2(right - column.width() + pad, rect.top()),
+            egui::pos2(right + pad, rect.bottom()),
+        );
+        cells.push((
             column.title(),
+            column.sort_key(),
+            cell,
+            egui::Align2::RIGHT_CENTER,
+        ));
+        right -= column.width();
+    }
+    let name_cell = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2((right + pad).max(rect.left() + pad), rect.bottom()),
+    );
+    cells.push((
+        "Nom",
+        Some(SortKey::Name),
+        name_cell,
+        egui::Align2::LEFT_CENTER,
+    ));
+    for (title, key, cell, align) in cells {
+        let response = key.map(|_| {
+            ui.interact(
+                cell,
+                ui.scope_id().with(("header", title)),
+                egui::Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+        });
+        let hovered = response.as_ref().is_some_and(egui::Response::hovered);
+        let active = key == Some(sort.0);
+        let color = if hovered {
+            ui.visuals().hyperlink_color
+        } else {
+            ui.visuals().strong_text_color()
+        };
+        let arrow = match (active, sort.1) {
+            (false, _) => "",
+            (true, SortOrder::Ascending) => " ▲",
+            (true, SortOrder::Descending) => " ▼",
+        };
+        let anchor = match align {
+            egui::Align2::LEFT_CENTER => egui::pos2(cell.left() + pad, cell.center().y),
+            _ => egui::pos2(cell.right() - pad, cell.center().y),
+        };
+        ui.painter().text(
+            anchor,
+            align,
+            format!("{title}{arrow}"),
             font.clone(),
             color,
         );
-        right -= column.width();
+        if response.is_some_and(|r| r.clicked()) {
+            clicked = key;
+        }
     }
     ui.separator();
+    clicked
 }
 
 /// Ligne du tableau : nom à gauche, puis une cellule par colonne, alignées à droite.
