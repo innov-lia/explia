@@ -17,7 +17,8 @@ pub struct Settings {
     pub sort_key: SortKey,
     pub sort_order: SortOrder,
     pub show_preview: bool,
-    pub preview_expanded: bool,
+    /// Volet de détail au centre, navigation dans le volet latéral (triangle d'échange).
+    pub detail_central: bool,
     pub skip_folder_sizes: bool,
     /// Option « Récursive » : recherche, dossiers vides et doublons parcourent les sous-dossiers.
     pub recursive: bool,
@@ -30,8 +31,7 @@ pub struct Settings {
     pub show_hidden: bool,
     pub columns: Columns,
     pub favorites: Vec<PathBuf>,
-    /// Disposition : côté de la barre latérale, de ses onglets et du volet de détail.
-    pub sidebar_side: Side,
+    /// Disposition : côté des onglets de la barre latérale et du volet de détail.
     pub tabs_side: Side,
     pub preview_side: Side,
     /// Applications ajoutées par l'utilisateur (onglet « Applications »).
@@ -45,7 +45,7 @@ impl Default for Settings {
             sort_key: SortKey::Name,
             sort_order: SortOrder::Ascending,
             show_preview: true,
-            preview_expanded: false,
+            detail_central: false,
             skip_folder_sizes: false,
             recursive: true,
             duplicate_min_mb: 50,
@@ -54,8 +54,7 @@ impl Default for Settings {
             show_hidden: false,
             columns: Columns::default(),
             favorites: Vec::new(),
-            sidebar_side: Side::Left,
-            tabs_side: Side::Right,
+            tabs_side: Side::Left,
             preview_side: Side::Right,
             applications: Vec::new(),
         }
@@ -100,7 +99,7 @@ impl Settings {
                     }
                 }
                 "show_preview" => settings.show_preview = value != "false",
-                "preview_expanded" => settings.preview_expanded = value == "true",
+                "detail_central" => settings.detail_central = value == "true",
                 "skip_folder_sizes" => settings.skip_folder_sizes = value == "true",
                 "recursive" => settings.recursive = value != "false",
                 "duplicate_min_mb" => {
@@ -119,11 +118,6 @@ impl Settings {
                 "show_hidden" => settings.show_hidden = value == "true",
                 "columns" => settings.columns = Columns::from_ids(value),
                 "favorite" if !value.is_empty() => settings.favorites.push(PathBuf::from(value)),
-                "sidebar_side" => {
-                    if let Some(side) = Side::from_id(value) {
-                        settings.sidebar_side = side;
-                    }
-                }
                 "tabs_side" => {
                     if let Some(side) = Side::from_id(value) {
                         settings.tabs_side = side;
@@ -156,14 +150,13 @@ impl Settings {
         text += &format!("sort_key={}\n", self.sort_key.id());
         text += &format!("sort_order={}\n", self.sort_order.id());
         text += &format!("show_preview={}\n", self.show_preview);
-        text += &format!("preview_expanded={}\n", self.preview_expanded);
+        text += &format!("detail_central={}\n", self.detail_central);
         text += &format!("skip_folder_sizes={}\n", self.skip_folder_sizes);
         text += &format!("show_drive_usage={}\n", self.show_drive_usage);
         text += &format!("recursive={}\n", self.recursive);
         text += &format!("duplicate_min_mb={}\n", self.duplicate_min_mb);
         text += &format!("view_mode={}\n", self.view_mode.id());
         text += &format!("show_hidden={}\n", self.show_hidden);
-        text += &format!("sidebar_side={}\n", self.sidebar_side.id());
         text += &format!("tabs_side={}\n", self.tabs_side.id());
         text += &format!("preview_side={}\n", self.preview_side.id());
         text += &format!("columns={}\n", self.columns.ids().join(","));
@@ -214,7 +207,7 @@ mod tests {
             sort_key: SortKey::Size,
             sort_order: SortOrder::Descending,
             show_preview: false,
-            preview_expanded: true,
+            detail_central: true,
             skip_folder_sizes: true,
             show_drive_usage: false,
             recursive: false,
@@ -228,8 +221,7 @@ mod tests {
                 ..Columns::default()
             },
             favorites: vec![PathBuf::from("C:\\Projets"), PathBuf::from("D:\\Photos")],
-            sidebar_side: Side::Right,
-            tabs_side: Side::Left,
+            tabs_side: Side::Right,
             preview_side: Side::Left,
             applications: vec![PathBuf::from("C:\\Outils\\app.exe")],
         }

@@ -25,8 +25,6 @@ use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
 
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
 pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
-/// Largeur du volet d'aperçu agrandi, en part de la largeur disponible.
-const PREVIEW_EXPANDED_RATIO: f32 = 0.65;
 /// Message affiché quand on tente de mélanger dossiers et fichiers.
 const MIXED_TYPES_MESSAGE: &str =
     "Sélection d'un seul type à la fois : dossiers ou fichiers, pas les deux.";
@@ -295,6 +293,8 @@ enum Action {
     SelectDuplicateCopies,
     /// Ferme les résultats et revient au contenu du dossier.
     CloseResults,
+    /// Passe la vidéo en plein écran, ou en sort.
+    ToggleVideoFullscreen,
     /// Demande la suppression d'un dossier qui n'est pas une ligne de la liste (le dossier
     /// affiché lui-même, ou un dossier parent d'un résultat).
     AskDeleteFolder(PathBuf),
@@ -347,8 +347,7 @@ pub struct ExpliaApp {
     drive_infos: HashMap<PathBuf, Option<DriveInfo>>,
     /// Option : barre d'occupation et pourcentage des lecteurs.
     show_drive_usage: bool,
-    /// Disposition : côté de la barre latérale, de ses onglets et du volet de détail.
-    sidebar_side: Side,
+    /// Disposition : côté des onglets de la barre latérale et du volet de détail.
     tabs_side: Side,
     preview_side: Side,
     /// Onglet affiché dans la barre latérale.
@@ -390,7 +389,10 @@ pub struct ExpliaApp {
     focus_search: bool,
     show_preview: bool,
     /// Volet d'aperçu agrandi (flèche « < » / « > »).
-    preview_expanded: bool,
+    /// Volet de détail au centre et navigation dans le volet latéral (triangle d'échange).
+    detail_central: bool,
+    /// Vidéo en plein écran (double-clic sur la vidéo du volet de détail).
+    video_fullscreen: bool,
     /// Option : ne pas calculer la taille des dossiers.
     skip_folder_sizes: bool,
     /// Identifie le listing courant ; l'incrémenter annule les calculs en cours.
@@ -466,7 +468,6 @@ impl ExpliaApp {
             drives: Vec::new(),
             drive_infos: HashMap::new(),
             show_drive_usage: settings.show_drive_usage,
-            sidebar_side: settings.sidebar_side,
             tabs_side: settings.tabs_side,
             preview_side: settings.preview_side,
             sidebar_tab: SidebarTab::Pc,
@@ -490,7 +491,8 @@ impl ExpliaApp {
             scan_generation: Arc::new(AtomicU64::new(0)),
             focus_search: false,
             show_preview: settings.show_preview,
-            preview_expanded: settings.preview_expanded,
+            detail_central: settings.detail_central,
+            video_fullscreen: false,
             skip_folder_sizes: settings.skip_folder_sizes,
             view_mode: settings.view_mode,
             show_hidden: settings.show_hidden,
@@ -1240,6 +1242,66 @@ impl ExpliaApp {
         self.navigate(target);
     }
 
+    /// Entre en plein écran (fenêtre en plein écran, vidéo seule) ou en sort.
+    fn set_video_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
+        if self.video_fullscreen != on {
+            self.video_fullscreen = on;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+        }
+    }
+
+    /// Plein écran : la vidéo occupe toute la fenêtre, les commandes en bas. Double-clic ou
+    /// Échap en sort. Renvoie `false` s'il n'y a plus de vidéo à montrer (plein écran quitté).
+    fn fullscreen_video(&mut self, ui: &mut egui::Ui) -> bool {
+        let ctx = ui.ctx().clone();
+        let PlayerSlot::Ready(active) = &self.player else {
+            self.set_video_fullscreen(&ctx, false);
+            return false;
+        };
+        let Some(texture) = &active.texture else {
+            self.set_video_fullscreen(&ctx, false);
+            return false;
+        };
+        let mut action = None;
+        let mut exit = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        egui::Panel::bottom("fullscreen-controls").show(ui, |ui| {
+            ui.add_space(4.0);
+            action = Self::player_bar(ui, active);
+            ui.add_space(4.0);
+        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+            .show(ui, |ui| {
+                let area = ui.available_rect_before_wrap();
+                let size = texture.size_vec2();
+                let scale = (area.width() / size.x).min(area.height() / size.y);
+                let rect = egui::Rect::from_center_size(area.center(), size * scale);
+                let response = ui.allocate_rect(area, egui::Sense::click());
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                if response
+                    .on_hover_text("Double-clic ou Échap : quitter le plein écran")
+                    .double_clicked()
+                {
+                    exit = true;
+                }
+            });
+        if exit {
+            self.set_video_fullscreen(&ctx, false);
+        }
+        if let Some(action) = action {
+            if matches!(action, Action::StopPlayer) {
+                self.set_video_fullscreen(&ctx, false);
+            }
+            self.apply(&ctx, action);
+        }
+        true
+    }
+
     /// Arrête la lecture intégrée (libère le fichier et la mémoire).
     fn stop_player(&mut self) {
         self.player = PlayerSlot::None;
@@ -1571,6 +1633,7 @@ impl ExpliaApp {
                 self.delete_asked_at = Some(ctx.input(|i| i.time));
             }
             Action::CancelDelete => self.cancel_delete(),
+            Action::ToggleVideoFullscreen => self.set_video_fullscreen(ctx, !self.video_fullscreen),
             Action::FindEmptyFolders => self.start_scan(ResultKind::EmptyFolders),
             Action::FindDuplicates => self.start_scan(ResultKind::Duplicates),
             Action::SelectDuplicateCopies => {
@@ -1651,7 +1714,7 @@ impl ExpliaApp {
             sort_key: self.sort_key,
             sort_order: self.sort_order,
             show_preview: self.show_preview,
-            preview_expanded: self.preview_expanded,
+            detail_central: self.detail_central,
             skip_folder_sizes: self.skip_folder_sizes,
             show_drive_usage: self.show_drive_usage,
             recursive: self.recursive,
@@ -1661,7 +1724,6 @@ impl ExpliaApp {
             columns: self.columns,
             favorites: self.favorites.paths().to_vec(),
             applications: self.applications.paths().to_vec(),
-            sidebar_side: self.sidebar_side,
             tabs_side: self.tabs_side,
             preview_side: self.preview_side,
         }
@@ -1979,7 +2041,6 @@ impl ExpliaApp {
                 ui.separator();
                 ui.weak("Disposition (côté de la fenêtre)");
                 for (label, side) in [
-                    ("Barre latérale", &mut self.sidebar_side),
                     ("Onglets", &mut self.tabs_side),
                     ("Volet de détail", &mut self.preview_side),
                 ] {
@@ -2068,14 +2129,10 @@ impl ExpliaApp {
         self.visible.iter().filter(|e| self.in_grid(e)).collect()
     }
 
-    /// Panneau de la barre latérale, à gauche ou à droite selon la disposition.
+    /// Panneau de la barre latérale, toujours à gauche.
     fn sidebar_panel(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        let panel = match self.sidebar_side {
-            Side::Left => egui::Panel::left("sidebar-left"),
-            Side::Right => egui::Panel::right("sidebar-right"),
-        };
-        panel
+        egui::Panel::left("sidebar-left")
             .default_size(SIDEBAR_DEFAULT_WIDTH)
             .resizable(true)
             .show(ui, |ui| {
@@ -2084,37 +2141,81 @@ impl ExpliaApp {
         action
     }
 
-    /// Volet de détail (aperçu, actions), à gauche ou à droite selon la disposition. Pendant
-    /// la multi-sélection, il devient un volet d'actions, même masqué.
-    fn detail_panel(&mut self, ui: &mut egui::Ui) -> Option<Action> {
-        if !self.show_preview && self.multi.is_empty() {
+    /// Le volet de détail est affiché (option « Volet d'aperçu », ou multi-sélection en cours).
+    fn detail_shown(&self) -> bool {
+        self.show_preview || !self.multi.is_empty()
+    }
+
+    /// Volet latéral (à gauche ou à droite selon la disposition) : le volet de détail, ou la
+    /// navigation quand le détail est au centre. Un petit triangle, en bas contre la zone
+    /// centrale, échange les deux.
+    fn side_panel(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        if !self.detail_shown() {
             return None;
         }
-        // Jamais plus étroit que la barre « < Colonnes Images Vidéos » sur une ligne.
-        let min_width = Self::detail_min_width(ui);
-        // Deux identifiants distincts : chaque mode garde sa propre largeur.
-        let width = if self.preview_expanded {
-            ui.available_width() * PREVIEW_EXPANDED_RATIO
+        let mut action = None;
+        let central = self.detail_central;
+        let (min_width, width) = if central {
+            (260.0, 420.0)
         } else {
-            300.0
-        }
-        .max(min_width);
-        let panel = match (self.preview_side, self.preview_expanded) {
-            (Side::Left, false) => egui::Panel::left("preview-left"),
-            (Side::Left, true) => egui::Panel::left("preview-wide-left"),
-            (Side::Right, false) => egui::Panel::right("preview-right"),
-            (Side::Right, true) => egui::Panel::right("preview-wide-right"),
+            // Jamais plus étroit que la barre « Colonnes Images Vidéos » sur une ligne.
+            let min = Self::detail_min_width(ui);
+            (min, 300.0_f32.max(min))
         };
-        let (toggle, action) = panel
+        let panel = match (self.preview_side, central) {
+            (Side::Left, false) => egui::Panel::left("detail-left"),
+            (Side::Right, false) => egui::Panel::right("detail-right"),
+            (Side::Left, true) => egui::Panel::left("navigation-left"),
+            (Side::Right, true) => egui::Panel::right("navigation-right"),
+        };
+        let response = panel
             .default_size(width)
             .min_size(min_width)
             .resizable(true)
-            .show(ui, |ui| self.preview_panel(ui))
-            .inner;
-        if toggle {
-            self.preview_expanded = !self.preview_expanded;
+            .show(ui, |ui| {
+                action = if central {
+                    self.navigation_area(ui)
+                } else {
+                    self.preview_panel(ui)
+                };
+            })
+            .response;
+        if self.swap_handle(ui.ctx(), response.rect) {
+            self.detail_central = !self.detail_central;
         }
         action
+    }
+
+    /// Triangle d'échange, en bas du volet latéral, contre la zone centrale : il pointe vers le
+    /// centre et y amène le contenu du volet. Renvoie `true` s'il est cliqué.
+    fn swap_handle(&self, ctx: &egui::Context, panel: egui::Rect) -> bool {
+        let on_right = self.preview_side == Side::Right;
+        let (arrow, x) = if on_right {
+            ("◀", panel.left() + 4.0)
+        } else {
+            ("▶", panel.right() - 26.0)
+        };
+        let hint = if self.detail_central {
+            "Remettre la navigation au centre"
+        } else {
+            "Mettre le volet de détail au centre"
+        };
+        let mut clicked = false;
+        egui::Area::new(egui::Id::unique("swap-panels"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(x, panel.bottom() - 26.0))
+            .show(ctx, |ui| {
+                clicked = ui.small_button(arrow).on_hover_text(hint).clicked();
+            });
+        clicked
+    }
+
+    /// Navigation dans les dossiers : barre d'adresse et recherche, résultats, contenu.
+    fn navigation_area(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = self.location_bar(ui);
+        action = self.results_banner(ui).or(action);
+        ui.add_space(4.0);
+        self.central(ui).or(action)
     }
 
     /// Barre latérale en « classeur » : la liste des dossiers de l'onglet actif à gauche,
@@ -3356,10 +3457,10 @@ impl ExpliaApp {
     /// Volet d'aperçu. Renvoie `true` si l'utilisateur a cliqué sur la flèche
     /// « < » / « > » pour agrandir ou réduire le volet, et l'action éventuelle
     /// demandée (ouvrir le fichier).
-    fn preview_panel(&self, ui: &mut egui::Ui) -> (bool, Option<Action>) {
-        let (toggle, option_action) = self.option_bar(ui);
+    fn preview_panel(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let option_action = self.option_bar(ui);
         let content_action = self.preview_content(ui);
-        (toggle, option_action.or(content_action))
+        option_action.or(content_action)
     }
 
     /// Largeur minimale du volet de détail : la flèche et les boutons Colonnes, Images et Vidéos
@@ -3369,7 +3470,6 @@ impl ExpliaApp {
         let padding = ui.spacing().button_padding.x * 2.0;
         let gap = ui.spacing().item_spacing.x;
         let labels = [
-            "<",
             OPTION_COLUMNS_LABEL,
             OPTION_IMAGES_LABEL,
             OPTION_VIDEOS_LABEL,
@@ -3391,26 +3491,10 @@ impl ExpliaApp {
 
     /// Barre du haut du volet de détail : flèche d'agrandissement, navigation en colonnes
     /// (style Mac), visionnage d'images et de vidéos (grilles). Les éléments cachés se règlent dans « Afficher ».
-    fn option_bar(&self, ui: &mut egui::Ui) -> (bool, Option<Action>) {
+    fn option_bar(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        let mut toggle = false;
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            // Flèche pour agrandir / réduire le volet : elle pointe vers le centre de la fenêtre
-            // quand le volet peut grandir, vers son bord quand il peut rétrécir.
-            let grows_left = self.preview_side == Side::Right;
-            let (arrow, hint) = if self.preview_expanded {
-                (
-                    if grows_left { ">" } else { "<" },
-                    "Réduire le volet de détail",
-                )
-            } else {
-                (
-                    if grows_left { "<" } else { ">" },
-                    "Agrandir le volet de détail",
-                )
-            };
-            toggle = ui.button(arrow).on_hover_text(hint).clicked();
             for (mode, label, hint) in [
                 (
                     ViewMode::Columns,
@@ -3444,7 +3528,7 @@ impl ExpliaApp {
             }
         });
         ui.separator();
-        (toggle, action)
+        action
     }
 
     /// Zone du lecteur intégré. Renvoie l'action éventuelle (arrêt) et `true` si le lecteur
@@ -3468,18 +3552,34 @@ impl ExpliaApp {
     /// Image de la vidéo et commandes : lecture / pause, arrêt, position, volume.
     fn player_controls(ui: &mut egui::Ui, active: &ActivePlayer) -> Option<Action> {
         let mut action = None;
-        let player = &active.player;
         match &active.texture {
             Some(texture) => {
                 let size = texture.size_vec2();
                 let scale = (ui.available_width() / size.x).min(4.0);
-                ui.image(egui::load::SizedTexture::new(texture.id(), size * scale));
+                let image =
+                    egui::Image::new(egui::load::SizedTexture::new(texture.id(), size * scale))
+                        .sense(egui::Sense::click());
+                // Double-clic sur la vidéo : plein écran.
+                if ui
+                    .add(image)
+                    .on_hover_text("Double-clic : plein écran")
+                    .double_clicked()
+                {
+                    action = Some(Action::ToggleVideoFullscreen);
+                }
             }
             None => {
                 // Son (pas d'image) ou image pas encore décodée.
                 ui.label(egui::RichText::new("🎵").size(48.0));
             }
         }
+        Self::player_bar(ui, active).or(action)
+    }
+
+    /// Commandes du lecteur : lecture / pause, arrêt, position, volume.
+    fn player_bar(ui: &mut egui::Ui, active: &ActivePlayer) -> Option<Action> {
+        let mut action = None;
+        let player = &active.player;
         let state = player.state();
         let length = player.length();
         ui.horizontal(|ui| {
@@ -4259,7 +4359,10 @@ impl eframe::App for ExpliaApp {
         }
         // Échap annule la confirmation de suppression, sinon quitte la multi-sélection
         // (sauf pendant la saisie d'un chemin).
-        if !self.address_editing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if !self.address_editing
+            && !self.video_fullscreen
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
             if self.confirm_delete {
                 self.cancel_delete();
             } else if !self.multi.is_empty() {
@@ -4303,6 +4406,13 @@ impl eframe::App for ExpliaApp {
             }
         }
 
+        // Vidéo en plein écran : elle seule occupe la fenêtre.
+        if self.video_fullscreen && self.fullscreen_video(ui) {
+            self.track_window_size(&ctx);
+            self.save_settings_if_changed();
+            return;
+        }
+
         egui::Panel::top("toolbar").show(ui, |ui| {
             enlarge_toolbar(ui);
             ui.add_space(4.0);
@@ -4318,15 +4428,18 @@ impl eframe::App for ExpliaApp {
                 ui.label(self.status_text());
             }
         });
-        // Les blocs se placent à gauche ou à droite (menu Afficher > Disposition) ; du même
-        // côté, la barre latérale est la plus proche du bord de la fenêtre.
+        // Barre latérale à gauche ; volet latéral (détail, ou navigation si le détail est au
+        // centre) à gauche ou à droite selon la disposition ; le reste au centre.
         action = self.sidebar_panel(ui).or(action.take());
-        action = self.detail_panel(ui).or(action.take());
+        action = self.side_panel(ui).or(action.take());
+        let detail_in_center = self.detail_central && self.detail_shown();
         egui::CentralPanel::default().show(ui, |ui| {
-            action = self.location_bar(ui).or(action.take());
-            action = self.results_banner(ui).or(action.take());
-            ui.add_space(4.0);
-            action = self.central(ui).or(action.take());
+            let central_action = if detail_in_center {
+                self.preview_panel(ui)
+            } else {
+                self.navigation_area(ui)
+            };
+            action = central_action.or(action.take());
         });
 
         if let Some(action) = action {
@@ -4560,5 +4673,15 @@ mod tests {
             app.selected.as_ref().map(|e| e.name.clone()),
             Some(first.name)
         );
+    }
+
+    #[test]
+    fn full_screen_toggles_on_and_off() {
+        let tree = TempTree::new("fullscreen");
+        let (mut app, ctx) = app_in(&tree);
+        app.apply(&ctx, Action::ToggleVideoFullscreen);
+        assert!(app.video_fullscreen);
+        app.apply(&ctx, Action::ToggleVideoFullscreen);
+        assert!(!app.video_fullscreen);
     }
 }
