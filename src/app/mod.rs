@@ -391,6 +391,10 @@ pub struct ExpliaApp {
     clipboard: ClipboardManager,
     /// Affichage fractionné (deux volets), s'il est ouvert.
     split: Option<SplitView>,
+    /// Éléments en cours de glisser dans la fenêtre (vers un dossier, l'autre volet…).
+    drag: Option<Vec<PathBuf>>,
+    /// Dossier sous le pointeur qui recevra le dépôt, repéré pendant le dessin de l'image.
+    drop_target: std::cell::RefCell<Option<PathBuf>>,
     /// Dernier numéro de lecture de dossier attribué (tous volets confondus).
     listing_serial: u64,
     /// Nombre de volets secondaires créés (distingue leurs compteurs).
@@ -455,6 +459,8 @@ impl ExpliaApp {
             storage: StorageManager::default(),
             clipboard: ClipboardManager::default(),
             split: None,
+            drag: None,
+            drop_target: std::cell::RefCell::new(None),
             listing_serial: 0,
             pane_serial: 0,
             confirm_delete: false,
@@ -2377,6 +2383,87 @@ mod tests {
         assert_eq!(names(&app), ["photo.jpg"]);
         let other_names = app.with_other(|other| names(other));
         assert_eq!(other_names, ["doc.txt", "photo.jpg"]);
+    }
+
+    /// Fichier déposé dans la fenêtre, pour les tests.
+    #[derive(Debug)]
+    struct TestDrop(PathBuf);
+
+    impl egui::DroppedFile for TestDrop {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+
+    /// Une image avec ces entrées brutes ; renvoie l'action décidée par `input_events`.
+    fn frame_input(
+        app: &mut ExpliaApp,
+        ctx: &egui::Context,
+        raw: egui::RawInput,
+    ) -> Option<Action> {
+        ctx.begin_pass(raw);
+        let action = app.input_events(ctx);
+        // Pas de rendu dans les tests : les textures préparées sont simplement oubliées.
+        ctx.end_pass().textures_delta.clear();
+        action
+    }
+
+    #[test]
+    fn files_dropped_from_explorer_are_not_lost() {
+        let tree = TempTree::new("drop-input");
+        let source = tree.0.join("ailleurs").join("a.txt");
+        tree.file("ailleurs/a.txt", b"a");
+        tree.dir("ici");
+        let (mut app, ctx) = app_in(&tree);
+        app.navigate(Location::Dir(tree.0.join("ici")));
+        settle(&mut app, &ctx);
+        let raw = egui::RawInput {
+            dropped_files: vec![std::sync::Arc::new(TestDrop(source))],
+            ..Default::default()
+        };
+        // Autrefois, la gestion des flèches effaçait l'action (Coller, dépôt…) déjà décidée.
+        let action = frame_input(&mut app, &ctx, raw);
+        assert!(matches!(action, Some(Action::CopyInto { .. })));
+    }
+
+    #[test]
+    fn dropping_dragged_items_on_a_folder_moves_them_there() {
+        let tree = TempTree::new("drag-drop");
+        tree.file("photo.jpg", b"img");
+        tree.dir("Archives");
+        let (mut app, ctx) = app_in(&tree);
+        let photo = tree.0.join("photo.jpg");
+        let archives = tree.0.join("Archives");
+        app.apply(&ctx, Action::DragStart(vec![photo.clone()]));
+        // Le dossier sous le pointeur, repéré pendant le dessin, devient la cible.
+        assert!(app.offer_drop_target(&archives));
+        let position = egui::pos2(20.0, 20.0);
+        let raw = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let action = frame_input(&mut app, &ctx, raw);
+        assert!(matches!(
+            &action,
+            Some(Action::TransferInto { dest, mode: ClipMode::Cut, .. }) if *dest == archives
+        ));
+        app.apply(&ctx, action.unwrap());
+        settle(&mut app, &ctx);
+        assert!(archives.join("photo.jpg").is_file() && !photo.exists());
+        assert_eq!(names(&app), ["Archives"]);
+        assert!(app.drag.is_none());
     }
 
     #[test]

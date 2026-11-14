@@ -258,6 +258,36 @@ pub(super) fn translate(
     }
 }
 
+/// Un dépôt dans `dir` a un sens : ce n'est ni un élément glissé, ni l'un de ses
+/// sous-dossiers, ni le dossier d'où viennent déjà tous les éléments.
+pub(super) fn accepts_drop(sources: &[PathBuf], dir: &Path) -> bool {
+    !sources.is_empty()
+        && !sources.iter().any(|source| dir.starts_with(source))
+        && !sources.iter().all(|source| source.parent() == Some(dir))
+}
+
+/// Copie ou déplacement, comme dans l'Explorateur : Ctrl copie, Maj déplace ; sans touche, on
+/// déplace sur un même lecteur et on copie vers un autre lecteur.
+pub(super) fn drop_mode(sources: &[PathBuf], dest: &Path, ctrl: bool, shift: bool) -> ClipMode {
+    if ctrl {
+        ClipMode::Copy
+    } else if shift || sources.iter().all(|source| same_volume(source, dest)) {
+        ClipMode::Cut
+    } else {
+        ClipMode::Copy
+    }
+}
+
+/// Deux chemins sur le même lecteur (même lettre, ou même partage réseau).
+fn same_volume(a: &Path, b: &Path) -> bool {
+    let root = |path: &Path| {
+        path.components()
+            .next()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+    };
+    root(a).is_some() && root(a) == root(b)
+}
+
 impl ExpliaApp {
     /// Lit les gestes egui sur un élément et les traduit en action (`translate`).
     pub(super) fn item_events(
@@ -285,12 +315,10 @@ impl ExpliaApp {
         let action = translate(pointer, entry, view, state, || {
             self.selection.paths_from(entry)
         });
-        // Affichage fractionné : on glisse d'abord vers l'autre volet ; hors de la fenêtre, le
-        // glisser repart vers les autres applications (voir `pane_drag_events`).
+        // Le glisser commence dans la fenêtre (vers un dossier, l'autre volet…) ; hors de la
+        // fenêtre, il repart vers les autres applications (voir `drag_events`).
         match action {
-            Some(Action::DragOut(paths)) if self.split.is_some() => {
-                Some(Action::PaneDragStart(paths))
-            }
+            Some(Action::DragOut(paths)) => Some(Action::DragStart(paths)),
             other => other,
         }
     }
@@ -383,7 +411,7 @@ impl ExpliaApp {
         if let Some(drop) = self.dropped_files(ctx) {
             action = Some(drop);
         }
-        if let Some(drag) = self.pane_drag_events(ctx) {
+        if let Some(drag) = self.drag_events(ctx) {
             action = Some(drag);
         }
         // Raccourcis sur la sélection (jamais pendant une saisie) : F2 renomme ; Suppr demande
@@ -440,8 +468,11 @@ impl ExpliaApp {
                 action = Some(Action::SwitchPane);
             } else if pressed(Shortcut::Delete) && !targets.is_empty() {
                 action = Some(Action::AskDelete);
-            } else if !self.confirm_delete {
-                action = self.arrow_key_action(ctx);
+            } else if !self.confirm_delete
+                // Les flèches ne remplacent pas une action déjà décidée (Coller, dépôt…).
+                && let Some(arrow) = self.arrow_key_action(ctx)
+            {
+                action = Some(arrow);
             }
         }
         action
@@ -542,6 +573,73 @@ impl ExpliaApp {
                 }
             }
         }
+    }
+
+    /// Glisser-déposer dans la fenêtre, à chaque image : dépôt sur le dossier visé (copie ou
+    /// déplacement, voir `drop_mode`), abandon ailleurs, ou glisser vers une autre application
+    /// dès que le pointeur sort de la fenêtre.
+    fn drag_events(&mut self, ctx: &egui::Context) -> Option<Action> {
+        let paths = self.drag.clone()?;
+        let (released, down, position, ctrl, shift) = ctx.input(|i| {
+            (
+                i.pointer.primary_released(),
+                i.pointer.primary_down(),
+                i.pointer.latest_pos(),
+                i.modifiers.command,
+                i.modifiers.shift,
+            )
+        });
+        let inside_window = position.is_some_and(|p| ctx.content_rect().contains(p))
+            && ctx.input(|i| i.pointer.hover_pos().is_some());
+        if released {
+            self.drag = None;
+            let dest = self.drop_target.borrow_mut().take()?;
+            let mode = drop_mode(&paths, &dest, ctrl, shift);
+            return Some(Action::TransferInto {
+                sources: paths,
+                dest,
+                mode,
+            });
+        }
+        if down && !inside_window {
+            // Hors de la fenêtre : le glisser continue vers le Bureau ou l'Explorateur.
+            self.drag = None;
+            return Some(Action::DragOut(paths));
+        }
+        if !down {
+            self.drag = None;
+        }
+        None
+    }
+
+    /// Pendant un glisser, `response` (une ligne, un lecteur, un favori…) accepte le dépôt dans
+    /// `dir` si le pointeur est dessus : elle est encadrée et devient la cible.
+    pub(super) fn drop_zone(&self, ui: &egui::Ui, response: &egui::Response, dir: &Path) {
+        let over = self.drag.is_some()
+            && ui
+                .input(|i| i.pointer.latest_pos())
+                .is_some_and(|p| response.rect.contains(p));
+        if over && self.offer_drop_target(dir) {
+            ui.painter().rect_stroke(
+                response.rect,
+                2.0,
+                egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+
+    /// Propose `dir` comme cible du glisser en cours ; refusé si c'est un élément glissé (ou un
+    /// de ses sous-dossiers) ou le dossier d'où viennent tous les éléments.
+    pub(super) fn offer_drop_target(&self, dir: &Path) -> bool {
+        let Some(sources) = &self.drag else {
+            return false;
+        };
+        if !accepts_drop(sources, dir) {
+            return false;
+        }
+        *self.drop_target.borrow_mut() = Some(dir.to_path_buf());
+        true
     }
 
     /// Éléments glissés depuis l'Explorateur (ou le Bureau) et déposés dans la fenêtre : ils
@@ -711,6 +809,31 @@ mod tests {
             }
             _ => panic!("multi-sélection de colonne attendue"),
         }
+    }
+
+    #[test]
+    fn dropping_moves_on_the_same_drive_and_copies_elsewhere() {
+        let sources = [PathBuf::from(r"C:\Photos\a.jpg")];
+        let same = Path::new(r"c:\Archives");
+        let other = Path::new(r"D:\Sauvegarde");
+        assert_eq!(drop_mode(&sources, same, false, false), ClipMode::Cut);
+        assert_eq!(drop_mode(&sources, other, false, false), ClipMode::Copy);
+        // Ctrl force la copie, Maj le déplacement.
+        assert_eq!(drop_mode(&sources, same, true, false), ClipMode::Copy);
+        assert_eq!(drop_mode(&sources, other, false, true), ClipMode::Cut);
+    }
+
+    #[test]
+    fn a_folder_is_never_a_target_for_itself_or_where_items_already_are() {
+        let sources = [PathBuf::from(r"C:\Projets\site")];
+        assert!(!accepts_drop(&sources, Path::new(r"C:\Projets\site")));
+        assert!(!accepts_drop(
+            &sources,
+            Path::new(r"C:\Projets\site\images")
+        ));
+        assert!(!accepts_drop(&sources, Path::new(r"C:\Projets")));
+        assert!(accepts_drop(&sources, Path::new(r"C:\Archives")));
+        assert!(!accepts_drop(&[], Path::new(r"C:\Archives")));
     }
 
     #[test]

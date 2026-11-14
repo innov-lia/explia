@@ -77,10 +77,17 @@ impl ExpliaApp {
         if let Some(split) = self.split.as_mut() {
             split.rects = rects;
         }
+        // Glisser au-dessus de l'autre volet, hors d'un de ses dossiers : dépôt dans son dossier.
+        let pointer = ui.input(|i| i.pointer.latest_pos());
+        if self.drop_target.borrow().is_none()
+            && pointer.is_some_and(|p| other_rect.contains(p))
+            && let Some(dir) = self.other_dir()
+        {
+            self.offer_drop_target(&dir);
+        }
         if pressed_in_other {
             self.activate_other();
         }
-        self.pane_drag_hint(ui.ctx());
         action
     }
 
@@ -97,36 +104,52 @@ impl ExpliaApp {
         }
     }
 
-    /// Pendant un glisser d'un volet à l'autre : l'autre volet s'illumine et une étiquette
-    /// suit le pointeur.
-    fn pane_drag_hint(&self, ctx: &egui::Context) {
-        let Some(split) = &self.split else {
-            return;
-        };
-        let Some(paths) = &split.drag else {
+    /// Pendant un glisser : une étiquette suit le pointeur et dit ce que fera le dépôt ;
+    /// l'autre volet s'illumine quand il est la cible.
+    pub(in crate::app) fn drag_hint(&self, ctx: &egui::Context) {
+        let Some(paths) = &self.drag else {
             return;
         };
         let Some(pointer) = ctx.input(|i| i.pointer.latest_pos()) else {
             return;
         };
-        let target = split.rects[split::side_index(split::opposite(split.active))];
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
-            egui::Id::unique("pane-drag"),
+            egui::Id::unique("drag-hint"),
         ));
-        let over_target = target.contains(pointer);
-        if over_target {
-            let color = ctx
-                .global_style()
-                .visuals
-                .selection
-                .bg_fill
-                .gamma_multiply(0.25);
-            painter.rect_filled(target, 4.0, color);
+        let target = self.drop_target.borrow().clone();
+        if let (Some(split), Some(target)) = (&self.split, &target)
+            && self.other_dir().as_ref() == Some(target)
+        {
+            let rect = split.rects[split::side_index(split::opposite(split.active))];
+            if rect.contains(pointer) {
+                let color = ctx
+                    .global_style()
+                    .visuals
+                    .selection
+                    .bg_fill
+                    .gamma_multiply(0.25);
+                painter.rect_filled(rect, 4.0, color);
+            }
         }
-        let shift = ctx.input(|i| i.modifiers.shift);
-        let what = if shift { "Déplacer" } else { "Copier" };
-        let text = format!("📄 {} élément(s) — {what} (Maj : déplacer)", paths.len());
+        let (ctrl, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
+        let text = match &target {
+            Some(dest) => {
+                let verb = match event_manager::drop_mode(paths, dest, ctrl, shift) {
+                    ClipMode::Copy => "Copier",
+                    ClipMode::Cut => "Déplacer",
+                };
+                format!(
+                    "📄 {} élément(s) — {verb} vers « {} »  (Ctrl : copier, Maj : déplacer)",
+                    paths.len(),
+                    favorite_name(dest)
+                )
+            }
+            None => format!(
+                "📄 {} élément(s) — déposez sur un dossier, ou hors de la fenêtre",
+                paths.len()
+            ),
+        };
         let galley =
             painter.layout_no_wrap(text, egui::FontId::proportional(14.0), egui::Color32::WHITE);
         let rect = egui::Rect::from_min_size(
@@ -249,6 +272,9 @@ impl ExpliaApp {
                     &columns,
                     &cells,
                 );
+                if entry.is_dir {
+                    self.drop_zone(ui, &response, &entry.path);
+                }
                 if let Some(gesture) = self.item_events(ui, &response, entry, ItemView::List) {
                     action = Some(gesture);
                 }

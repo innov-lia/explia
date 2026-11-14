@@ -251,8 +251,14 @@ pub(super) enum Action {
         sources: Vec<PathBuf>,
         mode: ClipMode,
     },
-    /// Commence à glisser ces éléments d'un volet à l'autre.
-    PaneDragStart(Vec<PathBuf>),
+    /// Commence à glisser ces éléments dans la fenêtre (vers un dossier, l'autre volet…).
+    DragStart(Vec<PathBuf>),
+    /// Dépôt d'éléments glissés sur un dossier : copie ou déplacement dans `dest`.
+    TransferInto {
+        sources: Vec<PathBuf>,
+        dest: PathBuf,
+        mode: ClipMode,
+    },
     /// Colle dans `dest` les fichiers et dossiers du presse-papiers : copie, ou déplacement
     /// s'ils ont été coupés (jamais d'écrasement).
     Paste {
@@ -550,12 +556,15 @@ impl ExpliaApp {
                 }
             }
             Action::TransferEntries { sources, mode } => self.transfer_to_other(sources, mode),
-            Action::PaneDragStart(paths) => {
+            Action::DragStart(paths) => {
                 self.drag_out_done = true;
-                if let Some(split) = self.split.as_mut() {
-                    split.drag = Some(paths);
-                }
+                self.drag = Some(paths);
             }
+            Action::TransferInto {
+                sources,
+                dest,
+                mode,
+            } => self.start_transfer(sources, dest, mode),
             Action::SetViewMode(mode) => {
                 // Colonnes, images et vidéos remplacent l'affichage fractionné.
                 self.split = None;

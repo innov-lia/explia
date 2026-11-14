@@ -60,8 +60,6 @@ pub(super) struct SplitView {
     pub(super) active: Side,
     /// Position des volets (gauche, droite) à la dernière image.
     pub(super) rects: [egui::Rect; 2],
-    /// Éléments glissés depuis le volet qui a la main, en attente d'être déposés.
-    pub(super) drag: Option<Vec<PathBuf>>,
 }
 
 /// L'autre côté.
@@ -149,7 +147,6 @@ impl ExpliaApp {
             other: Box::new(pane),
             active: Side::Left,
             rects: [egui::Rect::NOTHING; 2],
-            drag: None,
         });
         // Les volets sont des listes : les grilles et les colonnes n'y ont pas leur place.
         self.view_mode = ViewMode::List;
@@ -224,42 +221,6 @@ impl ExpliaApp {
             }
             _ => false,
         }
-    }
-
-    /// Glisser d'un volet à l'autre, à chaque image : dépôt sur l'autre volet (copie, ou
-    /// déplacement avec Maj), abandon ailleurs dans la fenêtre, ou glisser vers une autre
-    /// application dès que le pointeur sort de la fenêtre.
-    pub(super) fn pane_drag_events(&mut self, ctx: &egui::Context) -> Option<Action> {
-        let split = self.split.as_mut()?;
-        let paths = split.drag.as_ref()?.clone();
-        let (released, down, position, shift) = ctx.input(|i| {
-            (
-                i.pointer.primary_released(),
-                i.pointer.primary_down(),
-                i.pointer.latest_pos(),
-                i.modifiers.shift,
-            )
-        });
-        let target = split.rects[side_index(opposite(split.active))];
-        let inside_window = position.is_some_and(|p| ctx.content_rect().contains(p))
-            && ctx.input(|i| i.pointer.hover_pos().is_some());
-        if released {
-            split.drag = None;
-            let on_other = position.is_some_and(|p| target.contains(p));
-            return on_other.then_some(Action::TransferEntries {
-                sources: paths,
-                mode: if shift { ClipMode::Cut } else { ClipMode::Copy },
-            });
-        }
-        if down && !inside_window {
-            // Hors de la fenêtre : le glisser continue vers le Bureau ou l'Explorateur.
-            split.drag = None;
-            return Some(Action::DragOut(paths));
-        }
-        if !down {
-            split.drag = None;
-        }
-        None
     }
 }
 

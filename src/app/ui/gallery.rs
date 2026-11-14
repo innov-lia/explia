@@ -95,6 +95,7 @@ impl ExpliaApp {
                         &[],
                         &[],
                     );
+                    self.drop_zone(ui, &response, &entry.path);
                     if response.clicked() {
                         action = Some(Action::Go(Location::Dir(entry.path.clone())));
                     }

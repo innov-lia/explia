@@ -237,7 +237,9 @@ impl ExpliaApp {
                 matches!(&self.nav.location, Location::Dir(path) if path.starts_with(&drive.path));
             // Pilotée au clavier : le lecteur choisi par les flèches est en surbrillance.
             let highlighted = cursor.as_ref().map_or(here, |c| *c == drive.path);
-            if drive_entry(ui, drive, info, highlighted, self.show_drive_usage).clicked() {
+            let response = drive_entry(ui, drive, info, highlighted, self.show_drive_usage);
+            self.drop_zone(ui, &response, &drive.path);
+            if response.clicked() {
                 action = Some(Action::SidebarGo(drive.path.clone()));
             }
         }
@@ -267,25 +269,25 @@ impl ExpliaApp {
                     c == path
                 })
         };
-        if ui
+        let response = ui
             .selectable_label(
                 marked(home),
                 egui::RichText::new(format!("🏠 {}", favorite_name(home))).heading(),
             )
-            .on_hover_text(home.display().to_string())
-            .clicked()
-        {
+            .on_hover_text(home.display().to_string());
+        self.drop_zone(ui, &response, home);
+        if response.clicked() {
             action = Some(Action::SidebarGo(home.clone()));
         }
         for entry in &self.sidebar.home_dirs {
             if entry.hidden && !self.show_hidden {
                 continue;
             }
-            if ui
+            let response = ui
                 .selectable_label(marked(&entry.path), format!("📁 {}", entry.name))
-                .on_hover_text(entry.path.display().to_string())
-                .clicked()
-            {
+                .on_hover_text(entry.path.display().to_string());
+            self.drop_zone(ui, &response, &entry.path);
+            if response.clicked() {
                 action = Some(Action::SidebarGo(entry.path.clone()));
             }
         }
@@ -343,6 +345,7 @@ impl ExpliaApp {
             let response = ui
                 .selectable_label(here, format!("⭐ {}", favorite_name(path)))
                 .on_hover_text(path.display().to_string());
+            self.drop_zone(ui, &response, path);
             if response.clicked() {
                 action = Some(Action::SidebarGo(path.clone()));
             }

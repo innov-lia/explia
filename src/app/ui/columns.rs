@@ -139,6 +139,9 @@ impl ExpliaApp {
                                             highlighted: next_dir.map(PathBuf::as_path),
                                             is_last,
                                         };
+                                        if entry.is_dir {
+                                            self.drop_zone(ui, &response, &entry.path);
+                                        }
                                         if let Some(gesture) =
                                             self.item_events(ui, &response, entry, view)
                                         {

@@ -91,7 +91,7 @@ La barre latérale, à gauche, montre la liste de l'intercalaire choisi ; les in
 - **Tri d'un clic sur un en-tête** (Nom, Créé le, Modifié le, Taille) ; un second clic inverse l'ordre, une flèche ▲ / ▼ marque le tri actif.
 - **▥ Colonnes « style Mac »** : une colonne de largeur fixe par niveau du chemin (un nom trop long se termine par « … »), la dernière avec taille, dates et en-têtes triables. Dans Home, les colonnes commencent sous votre dossier (l'intercalaire Home en tient lieu). Ctrl+clic / Maj+clic fonctionnent dans toutes les colonnes, renommer (F2) et clic droit aussi.
 - **🖼 Images** et **🎬 Vidéos** : une grille avec seulement les images (miniatures décodées au fil de l'eau) ou seulement les vidéos du dossier. Hors de Home, une colonne des lecteurs (si l'intercalaire *Ce PC* ne les montre pas déjà) et une colonne de navigation (`..` et sous-dossiers) l'accompagnent ; dans Home, la grille prend toute la place. La grille ne montre jamais de dossier : seulement les images, ou seulement les vidéos.
-- **↔ Fractionné** (à gauche de ▥) : **deux volets côte à côte**, chacun avec sa barre d'adresse, sa recherche et sa liste, pour transférer de l'un à l'autre (comme WinSCP). Le volet actif est encadré ; un clic dans l'autre volet ou **Tab** lui donne la main, et la barre latérale, le clavier et le volet de détail agissent sur le volet actif. **Glisser** des éléments d'un volet à l'autre les **copie** (avec **Maj** : les **déplace**) ; en sortant de la fenêtre, le glisser part vers le Bureau ou l'Explorateur. **F5** copie et **F6** déplace la sélection vers l'autre volet (aussi au clic droit). Jamais d'écrasement, comme pour Coller. Mémorisé d'une session à l'autre.
+- **↔ Fractionné** (à gauche de ▥) : **deux volets côte à côte**, chacun avec sa barre d'adresse, sa recherche et sa liste, pour transférer de l'un à l'autre (comme WinSCP). Le volet actif est encadré ; un clic dans l'autre volet ou **Tab** lui donne la main, et la barre latérale, le clavier et le volet de détail agissent sur le volet actif. **Glisser** des éléments d'un volet à l'autre les y dépose (mêmes règles que le glisser-déposer ci-dessous). **F5** copie et **F6** déplace la sélection vers l'autre volet (aussi au clic droit). Jamais d'écrasement, comme pour Coller. Mémorisé d'une session à l'autre.
 - Un second clic sur ▥, 🖼, 🎬 ou ↔ revient à la liste. **Afficher** gère aussi les **dossiers et fichiers cachés** (attribut « caché » de Windows, et noms commençant par un point comme `.git`), masqués par défaut.
 
 ### Volet de détail, aperçu et lecture
@@ -111,7 +111,10 @@ La barre latérale, à gauche, montre la liste de l'intercalaire choisi ; les in
 - **Nouveau dossier** (**Ctrl+Maj+N**, bouton du volet de détail, clic droit sur un dossier) : crée « Nouveau dossier » (ou « Nouveau dossier (2) »…) et le passe aussitôt en renommage.
 - **Propriétés** (**Alt+Entrée**, clic droit, bouton) : la fenêtre « Propriétés » de Windows.
 - **Menus contextuels** : seules les commandes pertinentes s'affichent (fichier, dossier, exécutable, multi-sélection) et celles que la source permet.
-- **Glisser-déposer** : appuyez sur une ligne ou une tuile et faites glisser vers le Bureau ou l'Explorateur (copie) ; à l'inverse, déposez dans ExPLIA des fichiers venus de l'Explorateur : ils sont copiés dans le dossier affiché, avec les mêmes règles que Coller.
+- **Glisser-déposer**, comme dans l'Explorateur : appuyez sur une ligne (fichier ou dossier, ou toute la sélection) et faites glisser.
+  - **Sur un dossier** de la liste ou de la vue en colonnes, sur un lecteur, un dossier de Home ou un favori de la barre latérale, ou sur l'autre volet (affichage fractionné) : la cible est encadrée et une étiquette dit ce qui va se passer. Sur le même lecteur, les éléments sont **déplacés** ; vers un autre lecteur, **copiés** ; **Ctrl** force la copie, **Maj** le déplacement. Jamais d'écrasement.
+  - **Hors de la fenêtre** : le glisser continue vers le Bureau ou l'Explorateur (copie).
+  - À l'inverse, déposez dans ExPLIA des fichiers venus de l'Explorateur : ils sont copiés dans le dossier affiché, avec les mêmes règles que Coller.
 - **Ouvrir** : double-clic (application par défaut). Clic droit sur un exécutable : « Exécuter » ou « Exécuter en tant qu'administrateur » (UAC).
 
 ### Nettoyage : doublons et gros fichiers
@@ -177,7 +180,7 @@ ExPLIA n'embarque aucun lecteur. Pour lire les vidéos et les sons **dans ExPLIA
 - Préversion (0.1.0), testée sur Windows 11 uniquement ; exécutable non signé.
 - Lecture intégrée vérifiée avec une vidéo AVI ; MP4, MKV et le son restent à valider plus largement.
 - Pas de miniatures pour les vidéos (icône) ; pas de barre de progression pour Coller (bilan à la fin).
-- Glisser vers l'extérieur : des éléments d'un même dossier à la fois, en copie seulement.
+- Glisser vers l'extérieur : des éléments d'un même dossier à la fois, en copie seulement. Un dépôt venu de l'Explorateur va dans le dossier affiché (pas sur un dossier précis de la liste).
 - Pas encore disponible : créer un fichier, historique précédent / suivant, onglets mémorisés d'une session à l'autre, navigation dans les partages réseau, connecteurs SharePoint et OneDrive (Microsoft Graph : architecture prête, connexion reportée).
 
 ## Contribuer
