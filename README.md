@@ -30,7 +30,7 @@ ExPLIA réunit dans une seule fenêtre ce qu'on va d'habitude chercher dans plus
 - 👁 **Trois affichages** : liste détaillée triable, colonnes « style Mac » et grilles de miniatures (images ou vidéos).
 - 🎬 **Aperçu et lecture intégrés** : images, texte, archives ZIP, audio et vidéo (via VLC), **plein écran** d'un double-clic.
 - 🧹 **Nettoyage** : dossiers vides, **doublons** (même contenu) et **gros fichiers** (> 50 Mo, réglable), classés du plus gros au plus petit, supprimés en un clic (vers la corbeille).
-- 📋 **Copier, coller, glisser-déposer** avec l'Explorateur et le Bureau, **sans jamais écraser** un fichier existant.
+- 📋 **Copier, couper, coller, glisser-déposer** avec l'Explorateur et le Bureau, **sans jamais écraser** un fichier existant ; **nouveau dossier** et **propriétés** Windows en un clic.
 - `>_` **PowerShell** ouvert directement dans le dossier, normal ou administrateur.
 - 🔒 **Aucune télémétrie, aucune connexion réseau.** Vos réglages restent dans un simple fichier texte.
 
@@ -97,14 +97,18 @@ La barre latérale, à gauche, montre la liste de l'intercalaire choisi ; les in
 - **Lecture audio et vidéo intégrée** (VLC, voir plus bas) : « ▶ Lire », double-clic ou Entrée ; lecture / pause (bouton ou **Espace**), arrêt, position, volume ; « ↗ Lecteur externe » pour l'application par défaut.
 - **Vidéo en plein écran** : double-clic sur la vidéo ; commandes en bas, double-clic ou **Échap** pour revenir.
 - **◀ Triangle d'échange** (en bas du volet latéral) : le volet de détail passe au centre, en grand, et la navigation sur le côté ; un clic sur le triangle les remet en place.
-- **Actions sur un dossier** (dossier sélectionné, ou dossier affiché quand rien n'est sélectionné) : **>_ PowerShell** et **>_ Admin** (console ouverte dans ce dossier ; administrateur via UAC), **📋 Chemin**, **📥 Coller ici**, renommer, **🗑 Supprimer** (y compris le dossier affiché lui-même).
+- **Actions sur un dossier** (dossier sélectionné, ou dossier affiché quand rien n'est sélectionné) : **>_ PowerShell** et **>_ Admin** (console ouverte dans ce dossier ; administrateur via UAC), **📋 Chemin**, **📁 Nouveau dossier**, **📥 Coller dans ce dossier**, **Propriétés**, renommer, **🗑 Supprimer** (y compris le dossier affiché lui-même).
 
 ### Fichiers : sélection et actions
 - **Sélection multiple** : **Ctrl+clic**, **Maj+clic** (ou **Maj+↑/↓**), ou **clic maintenu** puis un clic par élément. Un seul type à la fois (dossiers ou fichiers).
 - **Renommer** : **F2**, bouton ou clic droit, directement dans la liste ; l'extension n'est pas sélectionnée, les noms interdits par Windows sont refusés et un élément existant n'est jamais écrasé.
-- **Supprimer** : **Suppr** ou bouton, **toujours vers la corbeille** (récupérable). « Supprimer » devient « Confirmer » à la même place ; au clavier Suppr puis Entrée, Échap annule.
+- **Supprimer** : **Suppr**, bouton ou clic droit, **vers la corbeille** (récupérable). « Supprimer » devient « Confirmer » à la même place ; au clavier Suppr puis Entrée, Échap annule. Sur un partage réseau ou un disque amovible, Windows n'a pas de corbeille : la confirmation l'indique, et Windows demande lui-même son accord avant de supprimer définitivement.
 - **Copier** (clic droit, bouton, **Ctrl+C**) : les fichiers vont dans le presse-papiers de Windows, à coller dans l'Explorateur, sur le Bureau ou ailleurs. **Copier le chemin** : le chemin complet en texte.
-- **Coller** (**Ctrl+V**, clic droit « 📥 Coller dans ce dossier », bouton « 📥 Coller ici ») : copie, en arrière-plan, les fichiers du presse-papiers (d'ExPLIA ou de l'Explorateur) dans le dossier. **Jamais d'écrasement** : la copie prend le nom « nom - Copie », « nom - Copie (2) »…
+- **Couper** (clic droit, bouton, **Ctrl+X**) : les éléments apparaissent en grisé ; le prochain collage les **déplace** (dans ExPLIA comme dans l'Explorateur).
+- **Coller** (**Ctrl+V**, clic droit « 📥 Coller dans ce dossier », bouton du volet de détail) : copie ou déplace, en arrière-plan, les fichiers du presse-papiers (d'ExPLIA ou de l'Explorateur) dans le dossier. **Jamais d'écrasement** : l'élément arrivé prend le nom « nom - Copie », « nom - Copie (2) »… Entre deux lecteurs, un déplacement copie d'abord tout, et l'original n'est retiré qu'après une copie complète et sans erreur.
+- **Nouveau dossier** (**Ctrl+Maj+N**, bouton du volet de détail, clic droit sur un dossier) : crée « Nouveau dossier » (ou « Nouveau dossier (2) »…) et le passe aussitôt en renommage.
+- **Propriétés** (**Alt+Entrée**, clic droit, bouton) : la fenêtre « Propriétés » de Windows.
+- **Menus contextuels** : seules les commandes pertinentes s'affichent (fichier, dossier, exécutable, multi-sélection) et celles que la source permet.
 - **Glisser-déposer** : appuyez sur une ligne ou une tuile et faites glisser vers le Bureau ou l'Explorateur (copie) ; à l'inverse, déposez dans ExPLIA des fichiers venus de l'Explorateur : ils sont copiés dans le dossier affiché, avec les mêmes règles que Coller.
 - **Ouvrir** : double-clic (application par défaut). Clic droit sur un exécutable : « Exécuter » ou « Exécuter en tant qu'administrateur » (UAC).
 
@@ -132,7 +136,9 @@ Filtre **⏷ Sélection**, à droite de la barre de recherche, selon l'option **
 | **Entrée** | Ouvre (grilles) ; confirme une suppression |
 | **F2** | Renomme l'élément sélectionné |
 | **Suppr**, puis **Entrée** | Supprime vers la corbeille ; **Échap** annule |
-| **Ctrl+C** / **Ctrl+V** | Copie la sélection / colle les fichiers du presse-papiers (sans écraser) |
+| **Ctrl+C** / **Ctrl+X** / **Ctrl+V** | Copie / coupe la sélection ; colle les fichiers du presse-papiers (sans écraser) |
+| **Ctrl+Maj+N** | Nouveau dossier dans le dossier affiché |
+| **Alt+Entrée** | Propriétés de l'élément sélectionné (ou du dossier affiché) |
 | **Ctrl+F** | Va dans la recherche |
 | **Ctrl+T** / **Ctrl+W** | Nouvel onglet / ferme l'onglet |
 | **Espace** | Lecture / pause du lecteur intégré |
@@ -145,7 +151,9 @@ Filtre **⏷ Sélection**, à droite de la barre de recherche, selon l'option **
 - **Aucune télémétrie, aucune connexion réseau, aucun compte.**
 - ExPLIA ne touche à vos fichiers que sur une action explicite de votre part :
   - **renommer**, dans le même dossier, sans jamais écraser ;
-  - **copier** (Coller, dépôt dans la fenêtre), sans jamais écraser, sans suivre les liens ni copier un dossier dans lui-même ; **jamais de déplacement** ;
+  - **copier** (Coller, dépôt dans la fenêtre), sans jamais écraser, sans suivre les liens ni copier un dossier dans lui-même ;
+  - **déplacer** (Couper puis Coller), sans jamais écraser ni déplacer un dossier dans lui-même ; entre deux lecteurs, l'original n'est retiré qu'après une copie complète ;
+  - **créer un dossier**, sous un nom libre ;
   - **supprimer**, toujours **vers la corbeille** et après confirmation ; jamais de suppression définitive de sa propre initiative.
 - Les recherches, dossiers vides, doublons et gros fichiers sont en **lecture seule**.
 - Il lance une application ou PowerShell uniquement sur votre geste ; en administrateur, c'est Windows qui demande la confirmation (UAC).
@@ -166,7 +174,7 @@ ExPLIA n'embarque aucun lecteur. Pour lire les vidéos et les sons **dans ExPLIA
 - Lecture intégrée vérifiée avec une vidéo AVI ; MP4, MKV et le son restent à valider plus largement.
 - Pas de miniatures pour les vidéos (icône) ; pas de barre de progression pour Coller (bilan à la fin).
 - Glisser vers l'extérieur : des éléments d'un même dossier à la fois, en copie seulement.
-- Pas encore disponible : couper / déplacer, créer un dossier ou un fichier, historique précédent / suivant, onglets mémorisés d'une session à l'autre, navigation dans les partages réseau.
+- Pas encore disponible : créer un fichier, historique précédent / suivant, onglets mémorisés d'une session à l'autre, navigation dans les partages réseau, connecteurs SharePoint et OneDrive (Microsoft Graph : architecture prête, connexion reportée).
 
 ## Contribuer
 
@@ -222,16 +230,23 @@ cargo clippy -- -D warnings
 | Fichier | Rôle |
 | --- | --- |
 | `src/main.rs` | Point d'entrée, fenêtre `eframe`. |
-| `src/app.rs` | Interface : barre de menus, barre latérale, onglets, vues liste / colonnes / grilles, volet de détail, résultats, clavier. |
+| `src/app/mod.rs` | État de l'application : navigation, onglets, parcours, aperçus, lecteur, réglages. |
+| `src/app/event_manager.rs` | Réception centralisée des événements egui (clics, double-clics, clic maintenu, glisser, clavier, dépôt) et déclaration de tous les raccourcis. |
+| `src/app/action_manager.rs` | Catalogue des commandes (définies une fois : libellé, raccourci, action) et exécution des actions. |
+| `src/app/context_menu_manager.rs` | Menus contextuels construits selon la sélection et les capacités de la source. |
+| `src/app/ui/` | Dessin seulement : barres, barre latérale, liste, colonnes, grilles, volet de détail, éléments réutilisables. |
+| `src/selection_manager.rs` | Sélection, multi-sélection (un seul type à la fois), ancre Maj+clic, éléments visés. |
+| `src/storage_manager/` | Interface commune des sources (`Connector`), capacités, erreurs ; connecteur local (disques et partages SMB). |
+| `src/clipboard_manager.rs` | Copier / Couper (références) et lecture du contenu à coller. |
 | `src/fs_nav.rs` | Entrées de dossier (nom, taille, dates, caché), listage, fil d'Ariane (Home), niveaux de colonnes, taille d'un dossier. |
-| `src/view.rs` | Tri, recherche par motifs (`*`, `?`), colonnes, modes d'affichage, sélection d'une plage, défilement. |
+| `src/view.rs` | Tri, recherche par motifs (`*`, `?`), colonnes, modes d'affichage, défilement. |
 | `src/scan.rs` | Parcours en lecture seule : recherche récursive, dossiers vides, doublons (empreintes), gros fichiers. |
-| `src/copy.rs` | Copie de fichiers et dossiers sans écrasement (Coller, dépôt). |
+| `src/copy.rs` | Copie et déplacement de fichiers et dossiers sans écrasement (Coller, dépôt, Couper). |
 | `src/clipboard.rs` | Presse-papiers de Windows : liste de fichiers (`CF_HDROP`), lecture et écriture. |
 | `src/dragdrop.rs` | Glisser vers une autre application (OLE `DoDragDrop`, copie seulement). |
-| `src/fileops.rs` | Renommage : validation du nom Windows, refus d'écraser. |
+| `src/fileops.rs` | Renommage (validation du nom Windows, refus d'écraser) et création de dossier. |
 | `src/trash.rs` | Envoi à la corbeille (`SHFileOperationW` avec `FOF_ALLOWUNDO`). |
-| `src/launch.rs` | Ouverture d'un fichier, lancement d'un exécutable ou de PowerShell (`ShellExecuteW`, UAC). |
+| `src/launch.rs` | Ouverture d'un fichier, lancement d'un exécutable ou de PowerShell (`ShellExecuteW`, UAC), fenêtre Propriétés. |
 | `src/places.rs` | Lecteurs logiques, capacité, occupation, nom et format des volumes, dossier de l'utilisateur. |
 | `src/preview.rs` | Aperçus : images, texte, archives ZIP, miniatures. |
 | `src/media.rs` | En-têtes multimédia : dimensions, résolution, durée. |
