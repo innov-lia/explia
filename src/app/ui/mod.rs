@@ -26,7 +26,7 @@ impl eframe::App for ExpliaApp {
         self.drop_hint(&ctx);
 
         // Vidéo en plein écran : elle seule occupe la fenêtre.
-        if self.video_fullscreen && self.fullscreen_video(ui) {
+        if self.player.fullscreen && self.fullscreen_video(ui) {
             self.track_window_size(&ctx);
             self.save_settings_if_changed();
             return;

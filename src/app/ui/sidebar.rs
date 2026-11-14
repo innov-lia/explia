@@ -129,7 +129,7 @@ impl ExpliaApp {
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.add_space(4.0);
             for tab in SidebarTab::ALL {
-                let selected = self.sidebar_tab == tab;
+                let selected = self.sidebar.tab == tab;
                 let font = egui::TextStyle::Body.resolve(ui.style());
                 let color = if selected {
                     ui.visuals().selection.stroke.color
@@ -200,7 +200,7 @@ impl ExpliaApp {
     pub(in crate::app) fn sidebar_list(&self, ui: &mut egui::Ui) -> Option<Action> {
         // Un nom trop long est tronqué, jamais coupé sur deux lignes.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-        match self.sidebar_tab {
+        match self.sidebar.tab {
             SidebarTab::Pc => self.drives_list(ui, false),
             SidebarTab::Network => self.drives_list(ui, true),
             SidebarTab::Home => self.home_list(ui),
@@ -220,14 +220,18 @@ impl ExpliaApp {
         ui.heading(if network_only { "Réseau" } else { "Ce PC" });
         let cursor = self.sidebar_cursor_path();
         let mut any = false;
-        for drive in &self.drives {
+        for drive in &self.sidebar.drives {
             if network_only && drive.kind != DriveKind::Network {
                 continue;
             }
             any = true;
-            let info = self.drive_infos.get(&drive.path).and_then(Option::as_ref);
+            let info = self
+                .sidebar
+                .drive_infos
+                .get(&drive.path)
+                .and_then(Option::as_ref);
             let here =
-                matches!(&self.location, Location::Dir(path) if path.starts_with(&drive.path));
+                matches!(&self.nav.location, Location::Dir(path) if path.starts_with(&drive.path));
             // Pilotée au clavier : le lecteur choisi par les flèches est en surbrillance.
             let highlighted = cursor.as_ref().map_or(here, |c| *c == drive.path);
             if drive_entry(ui, drive, info, highlighted, self.show_drive_usage).clicked() {
@@ -247,7 +251,7 @@ impl ExpliaApp {
     /// Dossier de l'utilisateur et ses sous-dossiers.
     pub(in crate::app) fn home_list(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        let Some(home) = &self.home else {
+        let Some(home) = &self.sidebar.home else {
             ui.weak("Dossier de l'utilisateur introuvable.");
             return None;
         };
@@ -256,7 +260,9 @@ impl ExpliaApp {
         let marked = |path: &PathBuf| {
             cursor
                 .as_ref()
-                .map_or(self.location == Location::Dir(path.clone()), |c| c == path)
+                .map_or(self.nav.location == Location::Dir(path.clone()), |c| {
+                    c == path
+                })
         };
         if ui
             .selectable_label(
@@ -268,7 +274,7 @@ impl ExpliaApp {
         {
             action = Some(Action::SidebarGo(home.clone()));
         }
-        for entry in &self.home_dirs {
+        for entry in &self.sidebar.home_dirs {
             if entry.hidden && !self.show_hidden {
                 continue;
             }
@@ -328,7 +334,9 @@ impl ExpliaApp {
         for path in self.favorites.paths() {
             let here = cursor
                 .as_ref()
-                .map_or(self.location == Location::Dir(path.clone()), |c| c == path);
+                .map_or(self.nav.location == Location::Dir(path.clone()), |c| {
+                    c == path
+                });
             let response = ui
                 .selectable_label(here, format!("⭐ {}", favorite_name(path)))
                 .on_hover_text(path.display().to_string());

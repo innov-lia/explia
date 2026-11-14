@@ -100,7 +100,7 @@ impl ExpliaApp {
         entry: &Entry,
     ) -> Option<Action> {
         let mut action = None;
-        let Location::Dir(root) = &self.location else {
+        let Location::Dir(root) = &self.nav.location else {
             return None;
         };
         let parent = entry.path.parent()?;
@@ -337,7 +337,7 @@ impl ExpliaApp {
         ui: &mut egui::Ui,
         entry: &Entry,
     ) -> (Option<Action>, bool) {
-        match &self.player {
+        match &self.player.slot {
             PlayerSlot::Loading(path) if *path == entry.path => {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -443,8 +443,8 @@ impl ExpliaApp {
         }
         let Some(selected) = &self.selection.single else {
             // Aucun élément choisi : le volet propose d'agir sur le dossier affiché lui-même.
-            if let Location::Dir(path) = &self.location
-                && self.results.is_none()
+            if let Location::Dir(path) = &self.nav.location
+                && self.scan.results.is_none()
                 && path.parent().is_some()
             {
                 ui.label(egui::RichText::new(favorite_name(path)).strong());
@@ -474,7 +474,7 @@ impl ExpliaApp {
         ui.label(egui::RichText::new(&entry.name).strong());
         // Parmi des résultats (doublons, recherche) : où se trouve l'élément, avec de quoi aller
         // dans son dossier, remonter et supprimer un dossier parent.
-        if self.results.is_some() {
+        if self.scan.results.is_some() {
             action = self.result_location(ui, entry);
         }
         if entry.is_dir {
@@ -575,7 +575,7 @@ impl ExpliaApp {
             return action;
         }
         ui.add_space(8.0);
-        match &self.preview {
+        match &self.preview.state {
             PreviewState::Loading(_) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -652,7 +652,7 @@ impl ExpliaApp {
     }
 
     pub(in crate::app) fn status_text(&self) -> String {
-        if let Some(results) = &self.results {
+        if let Some(results) = &self.scan.results {
             let what = match results.kind {
                 ResultKind::Search => "résultat(s) de recherche",
                 ResultKind::EmptyFolders => "dossier(s) vide(s)",
@@ -661,7 +661,7 @@ impl ExpliaApp {
             };
             return format!("{} {what}", self.visible.len());
         }
-        match &self.location {
+        match &self.nav.location {
             Location::ThisPc => "Aucun dossier ouvert".to_string(),
             Location::Dir(_) => {
                 let count = if self.visible.len() == self.entries.len() {
@@ -682,7 +682,7 @@ impl ExpliaApp {
     /// Échap en sort. Renvoie `false` s'il n'y a plus de vidéo à montrer (plein écran quitté).
     pub(in crate::app) fn fullscreen_video(&mut self, ui: &mut egui::Ui) -> bool {
         let ctx = ui.ctx().clone();
-        let PlayerSlot::Ready(active) = &self.player else {
+        let PlayerSlot::Ready(active) = &self.player.slot else {
             self.set_video_fullscreen(&ctx, false);
             return false;
         };
@@ -735,7 +735,7 @@ impl ExpliaApp {
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if hovering
             && !self.drag_out_done
-            && let Location::Dir(current) = &self.location
+            && let Location::Dir(current) = &self.nav.location
         {
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,

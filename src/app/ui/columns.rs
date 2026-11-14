@@ -8,12 +8,12 @@ impl ExpliaApp {
     /// dossier traversé, puis le dossier courant). Un clic sur un dossier l'ouvre dans la
     /// colonne suivante ; un clic sur un fichier le sélectionne.
     pub(in crate::app) fn columns_view(&mut self, ui: &mut egui::Ui) -> Option<Action> {
-        let Location::Dir(current) = self.location.clone() else {
+        let Location::Dir(current) = self.nav.location.clone() else {
             return None;
         };
         // Dans Home, les colonnes commencent sous le dossier de l'utilisateur (la barre latérale
         // montre déjà son contenu) : pas de colonnes C:, Users, nom.
-        let crumbs = fs_nav::column_levels(&current, self.home.as_deref());
+        let crumbs = fs_nav::column_levels(&current, self.sidebar.home.as_deref());
         // Listings des dossiers traversés (le dernier est le dossier courant : `self.visible`),
         // lus en arrière-plan : une colonne reste vide le temps de sa lecture.
         for (_, path) in crumbs.iter().take(crumbs.len().saturating_sub(1)) {
@@ -43,11 +43,11 @@ impl ExpliaApp {
         let height = ui.available_height();
         let row_height = table_row_height(ui);
         let row_pitch = row_height + ui.spacing().item_spacing.y;
-        let scroll_target = self.scroll_to_index.take();
+        let scroll_target = self.nav.scroll_to_index.take();
         if scroll_target.is_some() {
             ui.ctx().request_repaint();
         }
-        let last_scroll = self.last_scroll;
+        let last_scroll = self.nav.last_scroll;
         let mut new_scroll = last_scroll;
         // Renommage en cours : sorti de `self` le temps de la frame (dernière colonne seulement).
         let mut rename = self.renaming.take();
@@ -63,7 +63,7 @@ impl ExpliaApp {
                         let entries: &[Entry] = if is_last {
                             &self.visible
                         } else {
-                            self.column_cache.get(dir).map_or(&[], Vec::as_slice)
+                            self.nav.column_cache.get(dir).map_or(&[], Vec::as_slice)
                         };
                         ui.vertical(|ui| {
                             ui.set_width(widths[level]);
@@ -166,7 +166,7 @@ impl ExpliaApp {
                     }
                 });
             });
-        self.last_scroll = new_scroll;
+        self.nav.last_scroll = new_scroll;
         self.renaming = rename;
         action
     }

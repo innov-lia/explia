@@ -30,10 +30,12 @@ use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
 mod action_manager;
 mod context_menu_manager;
 mod event_manager;
+mod state;
 mod ui;
 
 use action_manager::{Action, Command};
 use event_manager::ItemView;
+use state::{Navigation, Playback, PreviewData, ScanState, SidebarState};
 
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
 pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
@@ -338,31 +340,22 @@ pub struct ExpliaApp {
     saved_settings: Settings,
     /// Taille intérieure actuelle de la fenêtre, en points.
     window_size: Option<(f32, f32)>,
-    location: Location,
-    address: String,
-    /// Barre d'adresse en mode saisie (sinon : fil d'Ariane cliquable).
-    address_editing: bool,
-    focus_address: bool,
+    /// Emplacement affiché, barre d'adresse, onglets, lecture du dossier et position dans la liste.
+    nav: Navigation,
+    /// Barre latérale : lecteurs, dossier de l'utilisateur, onglet actif et main du clavier.
+    sidebar: SidebarState,
+    /// Recherche et parcours (recherche récursive, dossiers vides, doublons, gros fichiers) et leurs résultats.
+    scan: ScanState,
+    /// Lecture audio et vidéo intégrée (libVLC).
+    player: Playback,
+    /// Aperçu de l'élément sélectionné, miniatures de la grille et métadonnées multimédia du dossier.
+    preview: PreviewData,
     error: Option<String>,
-    drives: Vec<Drive>,
-    /// Capacité et occupation des lecteurs : absente tant que le calcul est en cours,
-    /// `None` si le lecteur n'est pas prêt.
-    drive_infos: HashMap<PathBuf, Option<DriveInfo>>,
     /// Option : barre d'occupation et pourcentage des lecteurs.
     show_drive_usage: bool,
     /// Disposition : côté des onglets de la barre latérale et du volet de détail.
     tabs_side: Side,
     preview_side: Side,
-    /// Onglet affiché dans la barre latérale.
-    sidebar_tab: SidebarTab,
-    /// Le clavier pilote la liste des lecteurs : ↑ / ↓ changent de lecteur, → revient au dossier.
-    sidebar_focus: bool,
-    /// Lecteur choisi au clavier (index dans `drives`).
-    sidebar_cursor: Option<usize>,
-    /// Dossier de l'utilisateur courant (onglet « Home »).
-    home: Option<PathBuf>,
-    /// Sous-dossiers du dossier de l'utilisateur.
-    home_dirs: Vec<Entry>,
     favorites: Favorites,
     /// Applications de l'onglet « Applications » (ajoutées par l'utilisateur).
     applications: Favorites,
@@ -374,30 +367,10 @@ pub struct ExpliaApp {
     visible: Vec<Entry>,
     sort_key: SortKey,
     sort_order: SortOrder,
-    /// Option « Récursive » : recherche, dossiers vides et doublons parcourent les sous-dossiers.
-    recursive: bool,
-    /// Taille minimale (Mo) des fichiers examinés pour les doublons.
-    duplicate_min_mb: u32,
-    /// Taille minimale (Mo) des fichiers listés par « Fichiers > N Mo ».
-    large_min_mb: u32,
-    /// Résultats affichés à la place du contenu du dossier.
-    results: Option<Results>,
-    /// Éléments trouvés par le parcours en cours ou terminé.
-    result_entries: Vec<Entry>,
-    /// Numéro de groupe (à partir de 1) de chaque fichier en doublon.
-    duplicate_groups: HashMap<PathBuf, usize>,
-    /// Identifie le parcours courant ; l'incrémenter l'annule.
-    scan_generation: Arc<AtomicU64>,
-    /// Recherche (barre au-dessus de la liste) : motifs de noms, voir `view::matches_query`.
-    search: String,
-    /// Donne le focus à la barre de recherche à la prochaine image (Ctrl+F).
-    focus_search: bool,
     show_preview: bool,
     /// Volet d'aperçu agrandi (flèche « < » / « > »).
     /// Volet de détail au centre et navigation dans le volet latéral (triangle d'échange).
     detail_central: bool,
-    /// Vidéo en plein écran (double-clic sur la vidéo du volet de détail).
-    video_fullscreen: bool,
     /// Option : ne pas calculer la taille des dossiers.
     skip_folder_sizes: bool,
     /// Identifie le listing courant ; l'incrémenter annule les calculs en cours.
@@ -408,29 +381,8 @@ pub struct ExpliaApp {
     show_hidden: bool,
     /// Colonnes affichées dans le tableau.
     columns: Columns,
-    /// Métadonnées multimédia lues en arrière-plan pour le listing courant.
-    media: HashMap<PathBuf, MediaInfo>,
-    /// Identifie le listing pour lequel les métadonnées sont lues ; l'incrémenter annule.
-    media_generation: Arc<AtomicU64>,
-    /// Listings des dossiers parents, pour la vue en colonnes.
-    column_cache: HashMap<PathBuf, Vec<Entry>>,
-    /// Dossiers de la vue en colonnes en cours de lecture.
-    column_requests: HashSet<PathBuf>,
-    /// Identifie les lectures de la vue en colonnes ; l'incrémenter rend les anciennes caduques.
-    column_generation: u64,
-    /// Lecture de dossier en cours (ouverture ou relecture).
-    pending_listing: Option<PendingListing>,
-    /// Identifie la dernière lecture demandée.
-    listing_generation: u64,
-    /// Miniatures de la grille d'images.
-    thumbs: HashMap<PathBuf, egui::TextureHandle>,
-    /// Miniatures en cours de décodage ou déjà en échec (inutile de les redemander).
-    thumbs_requested: HashSet<PathBuf>,
-    thumbs_in_flight: usize,
     /// Nombre de tuiles par ligne dans la grille (pour les flèches haut / bas).
     gallery_columns: usize,
-    /// Lecture audio / vidéo intégrée (libVLC).
-    player: PlayerSlot,
     window_sized: bool,
     /// Élément sélectionné, multi-sélection et point d'ancrage (voir `selection_manager`).
     selection: Selection,
@@ -450,23 +402,12 @@ pub struct ExpliaApp {
     paste_keys_were_down: bool,
     /// Une copie est en cours en arrière-plan.
     copying: bool,
-    /// Onglets : dossier de chaque onglet ; vide tant qu'un seul dossier est ouvert.
-    tabs: Vec<PathBuf>,
-    /// Onglet affiché.
-    active_tab: usize,
     /// Message d'information (non erroné) affiché dans la barre d'état.
     notice: Option<String>,
     /// Renommage en cours (une seule ligne à la fois).
     renaming: Option<RenameState>,
     /// Instant (secondes) où « Supprimer » a été demandé : sert à armer « Confirmer ».
     delete_asked_at: Option<f64>,
-    /// Dernière ligne atteinte (clic ou flèches) : point de départ des flèches.
-    cursor: Option<PathBuf>,
-    /// Ligne à rendre visible au prochain dessin de la liste (navigation au clavier).
-    scroll_to_index: Option<usize>,
-    /// Dernier état de défilement de la liste : (décalage, hauteur visible), en points.
-    last_scroll: (f32, f32),
-    preview: PreviewState,
     event_tx: Sender<Event>,
     event_rx: Receiver<Event>,
 }
@@ -474,26 +415,19 @@ pub struct ExpliaApp {
 impl ExpliaApp {
     pub fn new(ctx: egui::Context, settings: Settings, settings_file: Option<PathBuf>) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
-        let location = Location::ThisPc;
         let mut app = Self {
             ctx,
+            nav: Navigation::new(),
+            sidebar: SidebarState::new(),
+            scan: ScanState::new(&settings),
+            player: Playback::default(),
+            preview: PreviewData::default(),
             settings_file,
             window_size: settings.window_size,
-            address_editing: false,
-            focus_address: false,
-            address: location.display(),
-            location,
             error: None,
-            drives: Vec::new(),
-            drive_infos: HashMap::new(),
             show_drive_usage: settings.show_drive_usage,
             tabs_side: settings.tabs_side,
             preview_side: settings.preview_side,
-            sidebar_tab: SidebarTab::Pc,
-            sidebar_focus: false,
-            sidebar_cursor: None,
-            home: places::user_home().filter(|home| home.is_dir()),
-            home_dirs: Vec::new(),
             favorites: Favorites::from_paths(settings.favorites.clone()),
             applications: Favorites::from_paths(settings.applications.clone()),
             own_exe: std::env::current_exe().ok(),
@@ -501,34 +435,13 @@ impl ExpliaApp {
             visible: Vec::new(),
             sort_key: settings.sort_key,
             sort_order: settings.sort_order,
-            search: String::new(),
-            recursive: settings.recursive,
-            duplicate_min_mb: settings.duplicate_min_mb,
-            large_min_mb: settings.large_min_mb,
-            results: None,
-            result_entries: Vec::new(),
-            duplicate_groups: HashMap::new(),
-            scan_generation: Arc::new(AtomicU64::new(0)),
-            focus_search: false,
             show_preview: settings.show_preview,
             detail_central: settings.detail_central,
-            video_fullscreen: false,
             skip_folder_sizes: settings.skip_folder_sizes,
             view_mode: settings.view_mode,
             show_hidden: settings.show_hidden,
             columns: settings.columns,
-            media: HashMap::new(),
-            media_generation: Arc::new(AtomicU64::new(0)),
-            column_cache: HashMap::new(),
-            column_requests: HashSet::new(),
-            column_generation: 0,
-            pending_listing: None,
-            listing_generation: 0,
-            thumbs: HashMap::new(),
-            thumbs_requested: HashSet::new(),
-            thumbs_in_flight: 0,
             gallery_columns: 1,
-            player: PlayerSlot::None,
             folder_generation: Arc::new(AtomicU64::new(0)),
             // Une taille mémorisée est appliquée dès la création de la fenêtre (voir `main`).
             window_sized: settings.window_size.is_some(),
@@ -542,15 +455,9 @@ impl ExpliaApp {
             drag_out_ended_at: None,
             paste_keys_were_down: false,
             copying: false,
-            tabs: Vec::new(),
-            active_tab: 0,
             notice: None,
             renaming: None,
             delete_asked_at: None,
-            cursor: None,
-            scroll_to_index: None,
-            last_scroll: (0.0, 0.0),
-            preview: PreviewState::None,
             event_tx,
             event_rx,
         };
@@ -558,11 +465,11 @@ impl ExpliaApp {
         app.refresh_home_dirs();
         // Au lancement : le dossier de l'utilisateur courant (à défaut, le premier lecteur).
         // La vue du centre n'affiche jamais la liste des lecteurs : elle est dans la barre latérale.
-        let start = match &app.home {
+        let start = match &app.sidebar.home {
             Some(home) => Some(home.clone()),
-            None => app.drives.first().map(|drive| drive.path.clone()),
+            None => app.sidebar.drives.first().map(|drive| drive.path.clone()),
         };
-        app.sidebar_tab = if app.home.is_some() {
+        app.sidebar.tab = if app.sidebar.home.is_some() {
             SidebarTab::Home
         } else {
             SidebarTab::Pc
@@ -576,9 +483,11 @@ impl ExpliaApp {
     /// Relit les lecteurs et calcule leur capacité dans un thread (un lecteur réseau peut
     /// être lent). Les valeurs déjà connues restent affichées jusqu'à leur mise à jour.
     fn refresh_drives(&mut self) {
-        self.drives = places::detect_drives();
-        let roots: Vec<PathBuf> = self.drives.iter().map(|d| d.path.clone()).collect();
-        self.drive_infos.retain(|path, _| roots.contains(path));
+        self.sidebar.drives = places::detect_drives();
+        let roots: Vec<PathBuf> = self.sidebar.drives.iter().map(|d| d.path.clone()).collect();
+        self.sidebar
+            .drive_infos
+            .retain(|path, _| roots.contains(path));
         let tx = self.event_tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
@@ -592,7 +501,8 @@ impl ExpliaApp {
 
     /// Relit les sous-dossiers du dossier de l'utilisateur (onglet « Home »).
     fn refresh_home_dirs(&mut self) {
-        self.home_dirs = self
+        self.sidebar.home_dirs = self
+            .sidebar
             .home
             .as_deref()
             .and_then(|home| self.storage.list(&ItemId::path(home)).ok())
@@ -602,9 +512,9 @@ impl ExpliaApp {
 
     /// Affiche un onglet du classeur ; son contenu est relu (lecteurs, dossiers).
     fn set_sidebar_tab(&mut self, tab: SidebarTab) {
-        self.sidebar_tab = tab;
-        self.sidebar_focus = false;
-        self.sidebar_cursor = None;
+        self.sidebar.tab = tab;
+        self.sidebar.focus = false;
+        self.sidebar.cursor = None;
         match tab {
             SidebarTab::Pc | SidebarTab::Network => self.refresh_drives(),
             SidebarTab::Home => self.refresh_home_dirs(),
@@ -685,18 +595,19 @@ impl ExpliaApp {
 
     /// Oublie les listings de la vue en colonnes (tri, recherche, cachés ou contenu modifiés).
     fn invalidate_columns(&mut self) {
-        self.column_cache.clear();
-        self.column_requests.clear();
-        self.column_generation += 1;
+        self.nav.column_cache.clear();
+        self.nav.column_requests.clear();
+        self.nav.column_generation += 1;
     }
 
     /// Demande en arrière-plan la lecture d'un dossier parent pour la vue en colonnes.
     fn request_column(&mut self, path: &Path) {
-        if self.column_cache.contains_key(path) || !self.column_requests.insert(path.to_path_buf())
+        if self.nav.column_cache.contains_key(path)
+            || !self.nav.column_requests.insert(path.to_path_buf())
         {
             return;
         }
-        let generation = self.column_generation;
+        let generation = self.nav.column_generation;
         let path = path.to_path_buf();
         let storage = self.storage.clone();
         let tx = self.event_tx.clone();
@@ -720,7 +631,7 @@ impl ExpliaApp {
             .iter()
             .filter(|entry| {
                 (self.show_hidden || !entry.hidden)
-                    && (!with_search || view::matches_query(&entry.name, &self.search))
+                    && (!with_search || view::matches_query(&entry.name, &self.scan.search))
             })
             .cloned()
             .collect();
@@ -729,13 +640,15 @@ impl ExpliaApp {
     }
 
     fn recompute_visible(&mut self) {
-        if let Some(results) = &self.results {
+        if let Some(results) = &self.scan.results {
             let mut list: Vec<Entry> = self
+                .scan
                 .result_entries
                 .iter()
                 // La recherche de la barre filtre aussi les autres résultats (hors recherche récursive).
                 .filter(|e| {
-                    results.kind == ResultKind::Search || view::matches_query(&e.name, &self.search)
+                    results.kind == ResultKind::Search
+                        || view::matches_query(&e.name, &self.scan.search)
                 })
                 .cloned()
                 .collect();
@@ -799,7 +712,7 @@ impl ExpliaApp {
         if mode == ClipMode::Cut && !report.arrived.is_empty() && report.errors.is_empty() {
             self.clipboard.moved();
         }
-        if self.location == Location::Dir(dest.to_path_buf()) {
+        if self.nav.location == Location::Dir(dest.to_path_buf()) {
             // Le premier élément arrivé est sélectionné, une fois le dossier relu.
             let then = report
                 .arrived
@@ -835,20 +748,23 @@ impl ExpliaApp {
 
     /// Ferme un onglet ; s'il était affiché, on passe à son voisin.
     fn close_tab(&mut self, index: usize) {
-        if index >= self.tabs.len() {
+        if index >= self.nav.tabs.len() {
             return;
         }
-        let was_active = index == self.active_tab;
-        self.tabs.remove(index);
-        if index < self.active_tab {
-            self.active_tab -= 1;
+        let was_active = index == self.nav.active_tab;
+        self.nav.tabs.remove(index);
+        if index < self.nav.active_tab {
+            self.nav.active_tab -= 1;
         }
-        self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
-        let next = self.tabs.get(self.active_tab).cloned();
-        if self.tabs.len() <= 1 {
+        self.nav.active_tab = self
+            .nav
+            .active_tab
+            .min(self.nav.tabs.len().saturating_sub(1));
+        let next = self.nav.tabs.get(self.nav.active_tab).cloned();
+        if self.nav.tabs.len() <= 1 {
             // Un seul dossier ouvert : plus de barre d'onglets.
-            self.tabs.clear();
-            self.active_tab = 0;
+            self.nav.tabs.clear();
+            self.nav.active_tab = 0;
         }
         if was_active && let Some(path) = next {
             self.navigate(Location::Dir(path));
@@ -857,39 +773,39 @@ impl ExpliaApp {
 
     /// Annule le parcours en cours et ferme les résultats.
     fn close_results(&mut self) {
-        self.scan_generation.fetch_add(1, Ordering::SeqCst);
-        self.results = None;
-        self.result_entries.clear();
-        self.duplicate_groups.clear();
+        self.scan.generation.fetch_add(1, Ordering::SeqCst);
+        self.scan.results = None;
+        self.scan.result_entries.clear();
+        self.scan.duplicate_groups.clear();
     }
 
     /// Lance un parcours en arrière-plan sur le dossier affiché ; les résultats remplacent le
     /// contenu du dossier dans la liste. Un parcours précédent est annulé.
     fn start_scan(&mut self, kind: ResultKind) {
-        let Location::Dir(root) = self.location.clone() else {
+        let Location::Dir(root) = self.nav.location.clone() else {
             return;
         };
-        let generation = self.scan_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        self.results = Some(Results {
+        let generation = self.scan.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.scan.results = Some(Results {
             kind,
             running: true,
             truncated: false,
             progress: None,
         });
-        self.result_entries.clear();
-        self.duplicate_groups.clear();
+        self.scan.result_entries.clear();
+        self.scan.duplicate_groups.clear();
         self.clear_multi();
         self.selection.single = None;
-        self.preview = PreviewState::None;
+        self.preview.state = PreviewState::None;
         self.error = None;
         self.notice = None;
         self.recompute_visible();
-        let query = self.search.clone();
-        let recursive = self.recursive;
+        let query = self.scan.search.clone();
+        let recursive = self.scan.recursive;
         let show_hidden = self.show_hidden;
-        let min_bytes = u64::from(self.duplicate_min_mb) * 1024 * 1024;
-        let large_min_bytes = u64::from(self.large_min_mb) * 1024 * 1024;
-        let current = Arc::clone(&self.scan_generation);
+        let min_bytes = u64::from(self.scan.duplicate_min_mb) * 1024 * 1024;
+        let large_min_bytes = u64::from(self.scan.large_min_mb) * 1024 * 1024;
+        let current = Arc::clone(&self.scan.generation);
         let tx = self.event_tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
@@ -984,14 +900,15 @@ impl ExpliaApp {
     /// Le texte de la barre de recherche a changé : recherche récursive en arrière-plan, ou
     /// filtre immédiat du dossier affiché.
     fn on_search_changed(&mut self) {
-        let searching = self.recursive
-            && !self.search.trim().is_empty()
-            && matches!(self.location, Location::Dir(_));
+        let searching = self.scan.recursive
+            && !self.scan.search.trim().is_empty()
+            && matches!(self.nav.location, Location::Dir(_));
         if searching {
             self.start_scan(ResultKind::Search);
             return;
         }
         if self
+            .scan
             .results
             .as_ref()
             .is_some_and(|r| r.kind == ResultKind::Search)
@@ -1005,13 +922,13 @@ impl ExpliaApp {
 
     /// L'option « Récursive » a changé : les résultats affichés sont recalculés.
     fn on_recursive_changed(&mut self) {
-        if let Some(kind) = self.results.as_ref().map(|r| r.kind) {
+        if let Some(kind) = self.scan.results.as_ref().map(|r| r.kind) {
             if kind == ResultKind::Search {
                 self.on_search_changed();
             } else {
                 self.start_scan(kind);
             }
-        } else if self.recursive && !self.search.trim().is_empty() {
+        } else if self.scan.recursive && !self.scan.search.trim().is_empty() {
             self.on_search_changed();
         }
     }
@@ -1027,7 +944,7 @@ impl ExpliaApp {
             .is_some_and(|selected| !self.visible.iter().any(|e| e.path == selected.path));
         if provisional {
             self.selection.single = None;
-            self.preview = PreviewState::None;
+            self.preview.state = PreviewState::None;
         }
     }
 
@@ -1048,9 +965,9 @@ impl ExpliaApp {
     /// (dimensions, durée, résolution) pour les colonnes demandées. Annule la lecture précédente.
     /// `keep` : conserve les informations déjà lues (changement de colonnes, pas de dossier).
     fn start_media(&mut self, keep: bool) {
-        let generation = self.media_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.preview.media_generation.fetch_add(1, Ordering::SeqCst) + 1;
         if !keep {
-            self.media.clear();
+            self.preview.media.clear();
         }
         if !self.columns.needs_media_info() {
             return;
@@ -1058,7 +975,7 @@ impl ExpliaApp {
         let files: Vec<PathBuf> = self
             .entries
             .iter()
-            .filter(|e| self.media_needed(e) && !self.media.contains_key(&e.path))
+            .filter(|e| self.media_needed(e) && !self.preview.media.contains_key(&e.path))
             .map(|e| e.path.clone())
             .rev() // `pop` prend par la fin : les premiers fichiers de la liste d'abord
             .collect();
@@ -1071,7 +988,7 @@ impl ExpliaApp {
             .min(MAX_SIZE_WORKERS);
         for _ in 0..workers {
             let queue = Arc::clone(&queue);
-            let current = Arc::clone(&self.media_generation);
+            let current = Arc::clone(&self.preview.media_generation);
             let tx = self.event_tx.clone();
             let ctx = self.ctx.clone();
             std::thread::spawn(move || {
@@ -1100,13 +1017,15 @@ impl ExpliaApp {
     /// Demande le décodage des miniatures manquantes (grille d'images), quelques-unes à la fois.
     fn request_thumbs(&mut self, paths: &[PathBuf]) {
         for path in paths {
-            if self.thumbs_in_flight >= MAX_THUMBS_IN_FLIGHT {
+            if self.preview.thumbs_in_flight >= MAX_THUMBS_IN_FLIGHT {
                 break;
             }
-            if self.thumbs.contains_key(path) || !self.thumbs_requested.insert(path.clone()) {
+            if self.preview.thumbs.contains_key(path)
+                || !self.preview.thumbs_requested.insert(path.clone())
+            {
                 continue;
             }
-            self.thumbs_in_flight += 1;
+            self.preview.thumbs_in_flight += 1;
             let path = path.clone();
             let tx = self.event_tx.clone();
             let ctx = self.ctx.clone();
@@ -1134,8 +1053,8 @@ impl ExpliaApp {
             Location::ThisPc => {
                 self.set_sidebar_tab(SidebarTab::Pc);
                 // Les flèches ↑ / ↓ changent alors de lecteur.
-                self.sidebar_focus = true;
-                self.address = self.location.display();
+                self.sidebar.focus = true;
+                self.nav.address = self.nav.location.display();
                 return;
             }
             Location::Dir(path) => path,
@@ -1143,8 +1062,8 @@ impl ExpliaApp {
         // Une lecture en cours ne suit pas dans un autre dossier.
         self.stop_player();
         if let Some(index) = sidebar {
-            self.sidebar_focus = true;
-            self.sidebar_cursor = Some(index);
+            self.sidebar.focus = true;
+            self.sidebar.cursor = Some(index);
         }
         self.notice = Some(format!("Ouverture de « {} »…", path.display()));
         self.request_listing(path, ListingKind::Open { sidebar }, then);
@@ -1153,9 +1072,9 @@ impl ExpliaApp {
     /// Lit `path` en arrière-plan ; le résultat arrive par `Event::Listing`. Une demande
     /// plus récente remplace la précédente (son résultat sera ignoré).
     fn request_listing(&mut self, path: PathBuf, kind: ListingKind, then: AfterListing) {
-        self.listing_generation += 1;
-        let generation = self.listing_generation;
-        self.pending_listing = Some(PendingListing {
+        self.nav.listing_generation += 1;
+        let generation = self.nav.listing_generation;
+        self.nav.pending_listing = Some(PendingListing {
             generation,
             path: path.clone(),
             kind,
@@ -1173,12 +1092,13 @@ impl ExpliaApp {
 
     /// Un dossier est en cours de lecture.
     fn listing_pending(&self) -> bool {
-        self.pending_listing.is_some()
+        self.nav.pending_listing.is_some()
     }
 
     /// Fin d'une lecture de dossier demandée par `request_listing`.
     fn on_listing(&mut self, generation: u64, result: Result<Vec<Entry>, StorageError>) {
         let Some(pending) = self
+            .nav
             .pending_listing
             .take_if(|pending| pending.generation == generation)
         else {
@@ -1195,11 +1115,11 @@ impl ExpliaApp {
                     "Impossible d'ouvrir « {} » : {err}",
                     pending.path.display()
                 ));
-                self.address = self.location.display();
+                self.nav.address = self.nav.location.display();
             }
             (ListingKind::Refresh, Ok(entries)) => {
                 // Le dossier a pu changer entre-temps : seule la relecture du dossier affiché compte.
-                if self.location == Location::Dir(pending.path) {
+                if self.nav.location == Location::Dir(pending.path) {
                     self.entries = entries;
                     // Les listings mis en cache pour la vue en colonnes ne sont plus à jour.
                     self.invalidate_columns();
@@ -1218,7 +1138,7 @@ impl ExpliaApp {
     /// Le dossier `path` est lu : il devient l'emplacement affiché.
     fn finish_open(&mut self, path: PathBuf, entries: Vec<Entry>, sidebar: Option<usize>) {
         // Dossier quitté : si on remonte d'un niveau, on le resélectionne (comme l'Explorateur).
-        let came_from = match &self.location {
+        let came_from = match &self.nav.location {
             Location::Dir(path) => Some(path.clone()),
             Location::ThisPc => None,
         };
@@ -1228,40 +1148,40 @@ impl ExpliaApp {
         self.error = None;
         self.notice = None;
         if sidebar.is_none() {
-            self.sidebar_focus = false;
-            self.sidebar_cursor = None;
+            self.sidebar.focus = false;
+            self.sidebar.cursor = None;
         }
         // La recherche et les résultats valent pour le dossier affiché : un nouveau dossier
         // repart sans filtre.
         self.close_results();
-        self.search.clear();
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+        self.scan.search.clear();
+        if let Some(tab) = self.nav.tabs.get_mut(self.nav.active_tab) {
             tab.clone_from(&path);
         }
         let target = Location::Dir(path);
-        self.address = target.display();
-        self.location = target;
+        self.nav.address = target.display();
+        self.nav.location = target;
         self.selection.single = None;
         self.clear_multi();
         self.selection.anchor = None;
-        self.cursor = None;
-        self.scroll_to_index = None;
+        self.nav.cursor = None;
+        self.nav.scroll_to_index = None;
         self.renaming = None;
-        self.preview = PreviewState::None;
+        self.preview.state = PreviewState::None;
         // Les miniatures de la grille et les colonnes appartiennent au dossier quitté.
-        self.thumbs.clear();
-        self.thumbs_requested.clear();
+        self.preview.thumbs.clear();
+        self.preview.thumbs_requested.clear();
         self.recompute_visible();
         // Remontée d'un niveau : le dossier quitté redevient la ligne courante.
         if let Some(previous) = came_from
-            && let Location::Dir(now) = &self.location
+            && let Location::Dir(now) = &self.nav.location
             && previous.parent() == Some(now.as_path())
             && let Some(index) = self.visible.iter().position(|e| e.path == previous)
         {
-            self.cursor = Some(previous.clone());
+            self.nav.cursor = Some(previous.clone());
             self.selection.anchor = Some(previous);
             self.selection.single = Some(self.visible[index].clone());
-            self.scroll_to_index = Some(index);
+            self.nav.scroll_to_index = Some(index);
         }
     }
 
@@ -1275,7 +1195,7 @@ impl ExpliaApp {
             AfterListing::SelectFirst => {
                 if let Some(first) = self.visible.first().cloned() {
                     self.select(&ctx, first);
-                    self.scroll_to_index = Some(0);
+                    self.nav.scroll_to_index = Some(0);
                 }
             }
             AfterListing::Select(id) | AfterListing::Rename(id)
@@ -1284,14 +1204,14 @@ impl ExpliaApp {
                 if let Some(index) = position(self, &id) {
                     let entry = self.visible[index].clone();
                     self.select(&ctx, entry);
-                    self.scroll_to_index = Some(index);
+                    self.nav.scroll_to_index = Some(index);
                 }
             }
             AfterListing::Rename(id) => {
                 if let Some(index) = position(self, &id) {
                     let entry = self.visible[index].clone();
                     self.select(&ctx, entry.clone());
-                    self.scroll_to_index = Some(index);
+                    self.nav.scroll_to_index = Some(index);
                     self.start_rename(&entry);
                 }
             }
@@ -1324,20 +1244,23 @@ impl ExpliaApp {
 
     /// Dossiers de la liste de l'onglet actif, dans l'ordre affiché (navigation aux flèches).
     fn sidebar_items(&self) -> Vec<PathBuf> {
-        match self.sidebar_tab {
-            SidebarTab::Pc => self.drives.iter().map(|d| d.path.clone()).collect(),
+        match self.sidebar.tab {
+            SidebarTab::Pc => self.sidebar.drives.iter().map(|d| d.path.clone()).collect(),
             SidebarTab::Network => self
+                .sidebar
                 .drives
                 .iter()
                 .filter(|d| d.kind == DriveKind::Network)
                 .map(|d| d.path.clone())
                 .collect(),
             SidebarTab::Home => self
+                .sidebar
                 .home
                 .iter()
                 .cloned()
                 .chain(
-                    self.home_dirs
+                    self.sidebar
+                        .home_dirs
                         .iter()
                         .filter(|e| self.show_hidden || !e.hidden)
                         .map(|e| e.path.clone()),
@@ -1350,10 +1273,11 @@ impl ExpliaApp {
 
     /// Dossier choisi aux flèches dans la barre latérale, quand elle a la main.
     fn sidebar_cursor_path(&self) -> Option<PathBuf> {
-        if !self.sidebar_focus {
+        if !self.sidebar.focus {
             return None;
         }
-        self.sidebar_cursor
+        self.sidebar
+            .cursor
             .and_then(|index| self.sidebar_items().get(index).cloned())
     }
 
@@ -1361,10 +1285,10 @@ impl ExpliaApp {
     /// latérale (lecteurs, dossiers de Home, favoris) et l'ouvre ; le clavier garde la main.
     fn step_sidebar(&mut self, delta: i32) {
         let items = self.sidebar_items();
-        let current = self.sidebar_cursor.or(match &self.location {
+        let current = self.sidebar.cursor.or(match &self.nav.location {
             Location::Dir(path) => items.iter().position(|p| p == path).or_else(|| {
                 // Lecteurs : le dossier affiché peut être n'importe où sur le lecteur.
-                matches!(self.sidebar_tab, SidebarTab::Pc | SidebarTab::Network)
+                matches!(self.sidebar.tab, SidebarTab::Pc | SidebarTab::Network)
                     .then(|| items.iter().position(|root| path.starts_with(root)))
                     .flatten()
             }),
@@ -1388,9 +1312,9 @@ impl ExpliaApp {
         match self.selection.select_range(&list, &entry.path) {
             Ok(()) => {
                 self.confirm_delete = false;
-                self.preview = PreviewState::None;
+                self.preview.state = PreviewState::None;
                 self.error = None;
-                self.cursor = Some(entry.path.clone());
+                self.nav.cursor = Some(entry.path.clone());
             }
             Err(SelectionError::MixedTypes) => {
                 self.error = Some(MIXED_TYPES_MESSAGE.to_string());
@@ -1404,15 +1328,16 @@ impl ExpliaApp {
     /// `then`. Si un autre dossier est en cours d'ouverture, sa lecture suffit.
     fn refresh_listing(&mut self, then: AfterListing) {
         // Parmi les résultats, on retire ce qui n'existe plus (supprimé, renommé).
-        self.result_entries.retain(|e| e.path.exists());
+        self.scan.result_entries.retain(|e| e.path.exists());
         if self
+            .nav
             .pending_listing
             .as_ref()
             .is_some_and(|p| matches!(p.kind, ListingKind::Open { .. }))
         {
             return;
         }
-        let Location::Dir(path) = self.location.clone() else {
+        let Location::Dir(path) = self.nav.location.clone() else {
             return;
         };
         self.request_listing(path, ListingKind::Refresh, then);
@@ -1421,19 +1346,19 @@ impl ExpliaApp {
     /// Ajoute ou retire une ligne de la multi-sélection. Un seul type à la fois :
     /// on ne mélange pas dossiers et fichiers.
     fn toggle_multi(&mut self, entry: Entry) {
-        self.sidebar_focus = false;
+        self.sidebar.focus = false;
         self.confirm_delete = false;
         let path = entry.path.clone();
         match self.selection.toggle(entry) {
             Ok(Toggle::Added) => {
-                self.preview = PreviewState::None;
+                self.preview.state = PreviewState::None;
                 self.error = None;
-                self.cursor = Some(path);
+                self.nav.cursor = Some(path);
             }
-            Ok(Toggle::Removed | Toggle::Deselected) => self.preview = PreviewState::None,
+            Ok(Toggle::Removed | Toggle::Deselected) => self.preview.state = PreviewState::None,
             Err(_) => {
                 if self.selection.single.is_none() {
-                    self.preview = PreviewState::None;
+                    self.preview.state = PreviewState::None;
                 }
                 self.error = Some(MIXED_TYPES_MESSAGE.to_string());
             }
@@ -1462,7 +1387,7 @@ impl ExpliaApp {
                 self.error = None;
                 self.notice = Some(format!("{count} élément(s) envoyé(s) à la corbeille."));
                 // Le dossier affiché a lui-même été supprimé : on remonte au dossier parent.
-                if let Location::Dir(current) = self.location.clone()
+                if let Location::Dir(current) = self.nav.location.clone()
                     && !current.exists()
                     && let Some(parent) = current.parent()
                 {
@@ -1483,7 +1408,7 @@ impl ExpliaApp {
         // Dans tous les cas, on relit le dossier : certains éléments ont pu être supprimés.
         self.clear_multi();
         self.selection.single = None;
-        self.preview = PreviewState::None;
+        self.preview.state = PreviewState::None;
         self.refresh_listing(AfterListing::None);
     }
 
@@ -1494,8 +1419,8 @@ impl ExpliaApp {
             Ok(id) => {
                 let name = id.as_path().map(favorite_name).unwrap_or_default();
                 let then = AfterListing::Rename(id);
-                if self.location == Location::Dir(parent.clone()) {
-                    if self.results.is_some() {
+                if self.nav.location == Location::Dir(parent.clone()) {
+                    if self.scan.results.is_some() {
                         self.close_results();
                     }
                     self.refresh_listing(then);
@@ -1512,7 +1437,7 @@ impl ExpliaApp {
     /// Démarre le renommage de `entry` directement dans la liste.
     fn start_rename(&mut self, entry: &Entry) {
         // Seul un élément de la liste affichée se renomme (pas le dossier courant lui-même).
-        if !matches!(self.location, Location::Dir(_))
+        if !matches!(self.nav.location, Location::Dir(_))
             || !self.visible.iter().any(|e| e.path == entry.path)
         {
             return;
@@ -1561,8 +1486,8 @@ impl ExpliaApp {
     }
 
     fn submit_address(&mut self) {
-        let Some(target) = fs_nav::parse_address(&self.address) else {
-            self.address = self.location.display();
+        let Some(target) = fs_nav::parse_address(&self.nav.address) else {
+            self.nav.address = self.nav.location.display();
             return;
         };
         if let Location::Dir(path) = &target
@@ -1579,15 +1504,15 @@ impl ExpliaApp {
 
     /// Entre en plein écran (fenêtre en plein écran, vidéo seule) ou en sort.
     fn set_video_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
-        if self.video_fullscreen != on {
-            self.video_fullscreen = on;
+        if self.player.fullscreen != on {
+            self.player.fullscreen = on;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
         }
     }
 
     /// Arrête la lecture intégrée (libère le fichier et la mémoire).
     fn stop_player(&mut self) {
-        self.player = PlayerSlot::None;
+        self.player.slot = PlayerSlot::None;
     }
 
     /// Lance la lecture dans le volet d'aperçu. VLC se charge en arrière-plan ; sans VLC, le
@@ -1604,7 +1529,7 @@ impl ExpliaApp {
             return;
         }
         self.error = None;
-        self.player = PlayerSlot::Loading(path.clone());
+        self.player.slot = PlayerSlot::Loading(path.clone());
         let tx = self.event_tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
@@ -1616,10 +1541,10 @@ impl ExpliaApp {
 
     /// Traite la fin du chargement de VLC : le lecteur est affiché s'il est toujours attendu.
     fn on_player_ready(&mut self, path: PathBuf, result: Result<Player, String>) {
-        let still_wanted = matches!(&self.player, PlayerSlot::Loading(p) if *p == path);
+        let still_wanted = matches!(&self.player.slot, PlayerSlot::Loading(p) if *p == path);
         match result {
             Ok(player) if still_wanted => {
-                self.player = PlayerSlot::Ready(Box::new(ActivePlayer {
+                self.player.slot = PlayerSlot::Ready(Box::new(ActivePlayer {
                     path,
                     player,
                     texture: None,
@@ -1629,7 +1554,7 @@ impl ExpliaApp {
             // Sélection abandonnée entre-temps : le lecteur est simplement libéré.
             Ok(_) => {}
             Err(message) if still_wanted => {
-                self.player = PlayerSlot::None;
+                self.player.slot = PlayerSlot::None;
                 self.error = Some(format!(
                     "{message} Ouverture avec l'application par défaut."
                 ));
@@ -1645,7 +1570,7 @@ impl ExpliaApp {
 
     /// Met à jour la texture de l'image vidéo et demande les images suivantes pendant la lecture.
     fn update_player(&mut self, ctx: &egui::Context) {
-        let PlayerSlot::Ready(active) = &mut self.player else {
+        let PlayerSlot::Ready(active) = &mut self.player.slot else {
             return;
         };
         if let Some(frame) = active.player.frame_newer_than(active.frame_version) {
@@ -1677,10 +1602,10 @@ impl ExpliaApp {
     }
 
     fn select(&mut self, ctx: &egui::Context, entry: Entry) {
-        self.sidebar_focus = false;
+        self.sidebar.focus = false;
         // Choisir un autre élément arrête la lecture en cours.
-        if !matches!(&self.player, PlayerSlot::None) {
-            let same = match &self.player {
+        if !matches!(&self.player.slot, PlayerSlot::None) {
+            let same = match &self.player.slot {
                 PlayerSlot::Loading(path) => *path == entry.path,
                 PlayerSlot::Ready(active) => active.path == entry.path,
                 PlayerSlot::None => false,
@@ -1691,11 +1616,11 @@ impl ExpliaApp {
         }
         // Un clic simple remplace toute sélection multiple.
         self.clear_multi();
-        self.preview = PreviewState::None;
+        self.preview.state = PreviewState::None;
         if !entry.is_dir && preview::is_previewable(&entry.path) {
             // Le décodage se fait hors du thread d'interface.
             let path = entry.path.clone();
-            self.preview = PreviewState::Loading(path.clone());
+            self.preview.state = PreviewState::Loading(path.clone());
             let tx = self.event_tx.clone();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
@@ -1704,7 +1629,7 @@ impl ExpliaApp {
                 ctx.request_repaint();
             });
         }
-        self.cursor = Some(entry.path.clone());
+        self.nav.cursor = Some(entry.path.clone());
         self.selection.select_one(entry);
     }
 
@@ -1720,15 +1645,15 @@ impl ExpliaApp {
                     path,
                     entries,
                 } => {
-                    if generation == self.column_generation {
-                        self.column_requests.remove(&path);
+                    if generation == self.nav.column_generation {
+                        self.nav.column_requests.remove(&path);
                         let processed = self.filtered_and_sorted(&entries, false);
-                        self.column_cache.insert(path, processed);
+                        self.nav.column_cache.insert(path, processed);
                     }
                 }
                 Event::Preview(path, result) => self.on_preview(ctx, path, result),
                 Event::DriveInfo(path, info) => {
-                    self.drive_infos.insert(path, info);
+                    self.sidebar.drive_infos.insert(path, info);
                 }
                 Event::FolderSize {
                     generation,
@@ -1749,8 +1674,8 @@ impl ExpliaApp {
                     path,
                     info,
                 } => {
-                    if generation == self.media_generation.load(Ordering::SeqCst) {
-                        self.media.insert(path, info);
+                    if generation == self.preview.media_generation.load(Ordering::SeqCst) {
+                        self.preview.media.insert(path, info);
                     }
                 }
                 Event::PlayerReady(path, result) => self.on_player_ready(path, result),
@@ -1758,23 +1683,25 @@ impl ExpliaApp {
                     generation,
                     entries,
                 } => {
-                    if generation == self.scan_generation.load(Ordering::SeqCst)
-                        && self.results.is_some()
+                    if generation == self.scan.generation.load(Ordering::SeqCst)
+                        && self.scan.results.is_some()
                     {
-                        self.result_entries.extend(entries);
+                        self.scan.result_entries.extend(entries);
                         results_changed = true;
                     }
                 }
                 Event::ScanGroups { generation, groups } => {
-                    if generation == self.scan_generation.load(Ordering::SeqCst)
-                        && self.results.is_some()
+                    if generation == self.scan.generation.load(Ordering::SeqCst)
+                        && self.scan.results.is_some()
                     {
-                        self.duplicate_groups.clear();
-                        self.result_entries.clear();
+                        self.scan.duplicate_groups.clear();
+                        self.scan.result_entries.clear();
                         for (index, group) in groups.into_iter().enumerate() {
                             for entry in group {
-                                self.duplicate_groups.insert(entry.path.clone(), index + 1);
-                                self.result_entries.push(entry);
+                                self.scan
+                                    .duplicate_groups
+                                    .insert(entry.path.clone(), index + 1);
+                                self.scan.result_entries.push(entry);
                             }
                         }
                         results_changed = true;
@@ -1782,8 +1709,8 @@ impl ExpliaApp {
                 }
                 Event::CopyDone { dest, report, mode } => self.on_copy_done(&dest, report, mode),
                 Event::ScanProgress { generation, text } => {
-                    if generation == self.scan_generation.load(Ordering::SeqCst)
-                        && let Some(results) = &mut self.results
+                    if generation == self.scan.generation.load(Ordering::SeqCst)
+                        && let Some(results) = &mut self.scan.results
                     {
                         results.progress = Some(text);
                     }
@@ -1792,8 +1719,8 @@ impl ExpliaApp {
                     generation,
                     truncated,
                 } => {
-                    if generation == self.scan_generation.load(Ordering::SeqCst)
-                        && let Some(results) = &mut self.results
+                    if generation == self.scan.generation.load(Ordering::SeqCst)
+                        && let Some(results) = &mut self.scan.results
                     {
                         results.running = false;
                         results.truncated = truncated;
@@ -1809,10 +1736,10 @@ impl ExpliaApp {
                     }
                 }
                 Event::Thumb(path, thumb) => {
-                    self.thumbs_in_flight = self.thumbs_in_flight.saturating_sub(1);
+                    self.preview.thumbs_in_flight = self.preview.thumbs_in_flight.saturating_sub(1);
                     // Une miniature en échec reste dans `thumbs_requested` : on ne la redemande pas.
                     if let Some(img) = thumb
-                        && self.thumbs_requested.contains(&path)
+                        && self.preview.thumbs_requested.contains(&path)
                     {
                         let color = egui::ColorImage::from_rgba_unmultiplied(img.size, &img.rgba);
                         let texture = ctx.load_texture(
@@ -1820,7 +1747,7 @@ impl ExpliaApp {
                             color,
                             egui::TextureOptions::LINEAR,
                         );
-                        self.thumbs.insert(path, texture);
+                        self.preview.thumbs.insert(path, texture);
                     }
                 }
             }
@@ -1838,10 +1765,10 @@ impl ExpliaApp {
     ) {
         {
             // Ignore les résultats d'une sélection déjà abandonnée.
-            if !matches!(&self.preview, PreviewState::Loading(p) if *p == path) {
+            if !matches!(&self.preview.state, PreviewState::Loading(p) if *p == path) {
                 return;
             }
-            self.preview = match result {
+            self.preview.state = match result {
                 Ok(PreviewContent::Image(img)) => {
                     let color = egui::ColorImage::from_rgba_unmultiplied(img.size, &img.rgba);
                     let texture = ctx.load_texture(
@@ -1876,9 +1803,9 @@ impl ExpliaApp {
             detail_central: self.detail_central,
             skip_folder_sizes: self.skip_folder_sizes,
             show_drive_usage: self.show_drive_usage,
-            recursive: self.recursive,
-            duplicate_min_mb: self.duplicate_min_mb,
-            large_min_mb: self.large_min_mb,
+            recursive: self.scan.recursive,
+            duplicate_min_mb: self.scan.duplicate_min_mb,
+            large_min_mb: self.scan.large_min_mb,
             view_mode: self.view_mode,
             show_hidden: self.show_hidden,
             columns: self.columns,
@@ -1925,7 +1852,8 @@ impl ExpliaApp {
 
     /// Position, dans la liste affichée, de la ligne courante (curseur ou sélection).
     fn cursor_index(&self) -> Option<usize> {
-        self.cursor
+        self.nav
+            .cursor
             .as_ref()
             .or(self.selection.single.as_ref().map(|s| &s.path))
             .and_then(|path| self.nav_list().iter().position(|e| e.path == *path))
@@ -1933,7 +1861,7 @@ impl ExpliaApp {
 
     /// Le dossier affiché est dans le dossier de l'utilisateur (« Home »).
     fn in_home(&self) -> bool {
-        match (&self.location, &self.home) {
+        match (&self.nav.location, &self.sidebar.home) {
             (Location::Dir(path), Some(home)) => path.starts_with(home),
             _ => false,
         }
@@ -2037,7 +1965,7 @@ mod tests {
         let mut app = ExpliaApp::new(ctx.clone(), Settings::default(), None);
         app.navigate(Location::Dir(tree.0.clone()));
         settle(&mut app, &ctx);
-        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        assert_eq!(app.nav.location, Location::Dir(tree.0.clone()));
         (app, ctx)
     }
 
@@ -2062,7 +1990,7 @@ mod tests {
         let start = Instant::now();
         loop {
             app.poll_events(ctx);
-            if app.results.as_ref().is_some_and(|r| !r.running) {
+            if app.scan.results.as_ref().is_some_and(|r| !r.running) {
                 return;
             }
             assert!(
@@ -2094,14 +2022,14 @@ mod tests {
         assert_eq!(app.selection.multi.len(), 2);
         assert!(app.selection.multi.iter().all(|e| e.is_dir));
         // Sans récursivité : seulement les sous-dossiers directs.
-        app.recursive = false;
+        app.scan.recursive = false;
         app.on_recursive_changed();
         wait_scan(&mut app, &ctx);
         assert_eq!(names(&app), ["vide"]);
         // Fermer revient au contenu du dossier.
         app.apply(&ctx, Action::CloseResults);
         settle(&mut app, &ctx);
-        assert!(app.results.is_none());
+        assert!(app.scan.results.is_none());
         assert_eq!(names(&app), ["b", "vide"]);
     }
 
@@ -2114,19 +2042,19 @@ mod tests {
         tree.file("sub/c.bin", &big);
         tree.file("autre.bin", &vec![4u8; 1_200_000]);
         let (mut app, ctx) = app_in(&tree);
-        app.duplicate_min_mb = 1;
+        app.scan.duplicate_min_mb = 1;
         app.apply(&ctx, Action::FindDuplicates);
         settle(&mut app, &ctx);
         wait_scan(&mut app, &ctx);
         assert_eq!(names(&app), ["a.bin", "b.bin", "c.bin"]);
-        assert_eq!(app.duplicate_groups.len(), 3);
+        assert_eq!(app.scan.duplicate_groups.len(), 3);
         app.apply(&ctx, Action::SelectDuplicateCopies);
         settle(&mut app, &ctx);
         assert_eq!(app.selection.multi.len(), 2);
         // Le premier fichier du groupe (ordre des chemins) est conservé.
         assert!(app.selection.multi.iter().all(|e| e.name != "a.bin"));
         // Seuil plus haut que les fichiers : aucun doublon.
-        app.duplicate_min_mb = 2;
+        app.scan.duplicate_min_mb = 2;
         app.apply(&ctx, Action::FindDuplicates);
         settle(&mut app, &ctx);
         wait_scan(&mut app, &ctx);
@@ -2140,7 +2068,7 @@ mod tests {
         tree.file("sub/gros.bin", &vec![1u8; 2_500_000]);
         tree.file("petit.bin", &vec![1u8; 500_000]);
         let (mut app, ctx) = app_in(&tree);
-        app.large_min_mb = 1;
+        app.scan.large_min_mb = 1;
         app.apply(&ctx, Action::FindLargeFiles);
         settle(&mut app, &ctx);
         wait_scan(&mut app, &ctx);
@@ -2154,7 +2082,7 @@ mod tests {
         // Rien n'est sélectionné d'office (ce ne sont pas forcément des fichiers à supprimer).
         assert!(app.selection.multi.is_empty());
         // Sans récursivité : seulement les fichiers du dossier affiché.
-        app.recursive = false;
+        app.scan.recursive = false;
         app.on_recursive_changed();
         wait_scan(&mut app, &ctx);
         assert_eq!(names(&app), ["moyen.bin"]);
@@ -2167,20 +2095,20 @@ mod tests {
         tree.file("sous/dossier/outil.exe", b"x");
         tree.file("sous/note.txt", b"x");
         let (mut app, ctx) = app_in(&tree);
-        app.search = "*.exe".to_string();
-        app.recursive = true;
+        app.scan.search = "*.exe".to_string();
+        app.scan.recursive = true;
         app.on_search_changed();
         wait_scan(&mut app, &ctx);
         assert_eq!(names(&app), ["outil.exe", "racine.exe"]);
         // Effacer la recherche ferme les résultats.
-        app.search.clear();
+        app.scan.search.clear();
         app.on_search_changed();
-        assert!(app.results.is_none());
+        assert!(app.scan.results.is_none());
         // Non récursive : simple filtre du dossier affiché.
-        app.recursive = false;
-        app.search = "*.exe".to_string();
+        app.scan.recursive = false;
+        app.scan.search = "*.exe".to_string();
         app.on_search_changed();
-        assert!(app.results.is_none());
+        assert!(app.scan.results.is_none());
         assert_eq!(names(&app), ["racine.exe"]);
     }
 
@@ -2191,11 +2119,11 @@ mod tests {
         let (mut app, ctx) = app_in(&tree);
         app.apply(&ctx, Action::FindEmptyFolders);
         settle(&mut app, &ctx);
-        assert!(app.results.is_some());
+        assert!(app.scan.results.is_some());
         app.navigate(Location::Dir(tree.0.join("sous")));
         settle(&mut app, &ctx);
-        assert!(app.results.is_none());
-        assert!(app.result_entries.is_empty());
+        assert!(app.scan.results.is_none());
+        assert!(app.scan.result_entries.is_empty());
     }
 
     #[test]
@@ -2229,7 +2157,7 @@ mod tests {
         tree.file("a/b/copie1.bin", &big);
         tree.file("c/copie2.bin", &big);
         let (mut app, ctx) = app_in(&tree);
-        app.duplicate_min_mb = 1;
+        app.scan.duplicate_min_mb = 1;
         app.apply(&ctx, Action::FindDuplicates);
         settle(&mut app, &ctx);
         wait_scan(&mut app, &ctx);
@@ -2264,8 +2192,8 @@ mod tests {
             },
         );
         settle(&mut app, &ctx);
-        assert!(app.results.is_none());
-        assert_eq!(app.location, Location::Dir(parent));
+        assert!(app.scan.results.is_none());
+        assert_eq!(app.nav.location, Location::Dir(parent));
         assert_eq!(
             app.selection.single.as_ref().map(|e| e.name.clone()),
             Some(first.name)
@@ -2278,10 +2206,10 @@ mod tests {
         let (mut app, ctx) = app_in(&tree);
         app.apply(&ctx, Action::ToggleVideoFullscreen);
         settle(&mut app, &ctx);
-        assert!(app.video_fullscreen);
+        assert!(app.player.fullscreen);
         app.apply(&ctx, Action::ToggleVideoFullscreen);
         settle(&mut app, &ctx);
-        assert!(!app.video_fullscreen);
+        assert!(!app.player.fullscreen);
     }
 
     #[test]
@@ -2374,7 +2302,7 @@ mod tests {
             },
         );
         settle(&mut app, &ctx);
-        assert_eq!(app.location, Location::Dir(tree.0.join("existant")));
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("existant")));
         assert!(tree.0.join("existant/Nouveau dossier").is_dir());
     }
 
@@ -2386,16 +2314,16 @@ mod tests {
         let (mut app, ctx) = app_in(&tree);
         app.navigate(Location::Dir(tree.0.join("a")));
         // L'emplacement ne change qu'une fois le dossier lu.
-        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        assert_eq!(app.nav.location, Location::Dir(tree.0.clone()));
         assert!(app.listing_pending());
         // Une demande plus récente l'emporte sur la précédente.
         app.navigate(Location::Dir(tree.0.join("b")));
         settle(&mut app, &ctx);
-        assert_eq!(app.location, Location::Dir(tree.0.join("b")));
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("b")));
         // Dossier illisible : on reste où l'on est, avec un message.
         app.navigate(Location::Dir(tree.0.join("absent")));
         settle(&mut app, &ctx);
-        assert_eq!(app.location, Location::Dir(tree.0.join("b")));
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("b")));
         assert!(
             app.error
                 .as_deref()
@@ -2409,35 +2337,35 @@ mod tests {
         tree.dir("a");
         tree.dir("b");
         let (mut app, ctx) = app_in(&tree);
-        assert!(app.tabs.is_empty());
+        assert!(app.nav.tabs.is_empty());
         app.apply(&ctx, Action::NewTab(tree.0.join("a")));
         settle(&mut app, &ctx);
-        assert_eq!(app.tabs, [tree.0.clone(), tree.0.join("a")]);
-        assert_eq!(app.active_tab, 1);
-        assert_eq!(app.location, Location::Dir(tree.0.join("a")));
+        assert_eq!(app.nav.tabs, [tree.0.clone(), tree.0.join("a")]);
+        assert_eq!(app.nav.active_tab, 1);
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("a")));
         // Naviguer change le dossier de l'onglet affiché.
         app.navigate(Location::Dir(tree.0.join("b")));
         settle(&mut app, &ctx);
-        assert_eq!(app.tabs[1], tree.0.join("b"));
+        assert_eq!(app.nav.tabs[1], tree.0.join("b"));
         app.apply(&ctx, Action::SwitchTab(0));
         settle(&mut app, &ctx);
-        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        assert_eq!(app.nav.location, Location::Dir(tree.0.clone()));
         // Fermer l'onglet affiché passe au voisin ; avec un seul dossier, plus d'onglets.
         app.apply(&ctx, Action::CloseTab(0));
         settle(&mut app, &ctx);
-        assert!(app.tabs.is_empty());
-        assert_eq!(app.location, Location::Dir(tree.0.join("b")));
+        assert!(app.nav.tabs.is_empty());
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("b")));
         // Trois onglets : fermer un onglet non affiché garde le dossier affiché.
         app.apply(&ctx, Action::NewTab(tree.0.join("a")));
         settle(&mut app, &ctx);
         app.apply(&ctx, Action::NewTab(tree.0.clone()));
         settle(&mut app, &ctx);
-        assert_eq!(app.tabs.len(), 3);
+        assert_eq!(app.nav.tabs.len(), 3);
         app.apply(&ctx, Action::CloseTab(0));
         settle(&mut app, &ctx);
-        assert_eq!(app.tabs.len(), 2);
-        assert_eq!(app.active_tab, 1);
-        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        assert_eq!(app.nav.tabs.len(), 2);
+        assert_eq!(app.nav.active_tab, 1);
+        assert_eq!(app.nav.location, Location::Dir(tree.0.clone()));
     }
 
     #[test]
@@ -2447,7 +2375,7 @@ mod tests {
         tree.dir("build");
         tree.dir("Contacts");
         let (mut app, ctx) = app_in(&tree);
-        app.home = Some(tree.0.clone());
+        app.sidebar.home = Some(tree.0.clone());
         app.set_sidebar_tab(SidebarTab::Home);
         assert_eq!(
             app.sidebar_items(),
@@ -2460,24 +2388,24 @@ mod tests {
         );
         app.apply(&ctx, Action::SidebarGo(tree.0.join("build")));
         settle(&mut app, &ctx);
-        assert!(app.sidebar_focus);
+        assert!(app.sidebar.focus);
         app.step_sidebar(1);
         settle(&mut app, &ctx);
-        assert_eq!(app.location, Location::Dir(tree.0.join("Contacts")));
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("Contacts")));
         app.step_sidebar(-1);
         settle(&mut app, &ctx);
         app.step_sidebar(-1);
         settle(&mut app, &ctx);
-        assert_eq!(app.location, Location::Dir(tree.0.join("Apple")));
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("Apple")));
         // Le titre (le dossier de l'utilisateur) est le premier élément.
         app.step_sidebar(-1);
         settle(&mut app, &ctx);
-        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        assert_eq!(app.nav.location, Location::Dir(tree.0.clone()));
         assert_eq!(app.sidebar_cursor_path(), Some(tree.0.clone()));
         // Un clic dans la zone centrale ne donne pas la main à la barre latérale.
         app.apply(&ctx, Action::Go(Location::Dir(tree.0.join("Apple"))));
         settle(&mut app, &ctx);
-        assert!(!app.sidebar_focus);
+        assert!(!app.sidebar.focus);
     }
 
     #[test]
@@ -2501,7 +2429,7 @@ mod tests {
             },
         );
         settle(&mut app, &ctx);
-        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        assert_eq!(app.nav.location, Location::Dir(tree.0.clone()));
         let mut selected: Vec<String> =
             app.selection.multi.iter().map(|e| e.name.clone()).collect();
         selected.sort();

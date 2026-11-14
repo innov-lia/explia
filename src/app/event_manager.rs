@@ -321,7 +321,7 @@ impl ExpliaApp {
         let pressed = |shortcut: Shortcut| ctx.input(|i| shortcut.pressed(i));
         // Échap annule la confirmation de suppression, sinon quitte la multi-sélection
         // (sauf pendant la saisie d'un chemin).
-        if !self.address_editing && !self.video_fullscreen && pressed(Shortcut::Cancel) {
+        if !self.nav.address_editing && !self.player.fullscreen && pressed(Shortcut::Cancel) {
             if self.confirm_delete {
                 self.cancel_delete();
             } else if !self.selection.multi.is_empty() {
@@ -330,15 +330,15 @@ impl ExpliaApp {
         }
         let mut action = None;
         if pressed(Shortcut::Find) {
-            self.focus_search = true;
+            self.scan.focus_search = true;
         }
         let typing =
-            ctx.egui_wants_keyboard_input() || self.address_editing || self.renaming.is_some();
-        if !typing && let Location::Dir(current) = &self.location {
+            ctx.egui_wants_keyboard_input() || self.nav.address_editing || self.renaming.is_some();
+        if !typing && let Location::Dir(current) = &self.nav.location {
             if pressed(Shortcut::NewTab) {
                 action = Some(Action::NewTab(current.clone()));
-            } else if pressed(Shortcut::CloseTab) && !self.tabs.is_empty() {
-                action = Some(Action::CloseTab(self.active_tab));
+            } else if pressed(Shortcut::CloseTab) && !self.nav.tabs.is_empty() {
+                action = Some(Action::CloseTab(self.nav.active_tab));
             }
         }
         // Coller : détecté à l'appui de Ctrl+V.
@@ -347,7 +347,7 @@ impl ExpliaApp {
             && !self.paste_keys_were_down
             && !typing
             && self.clipboard.has_files()
-            && let Location::Dir(current) = &self.location
+            && let Location::Dir(current) = &self.nav.location
         {
             action = Some(Action::Paste {
                 dest: current.clone(),
@@ -359,9 +359,10 @@ impl ExpliaApp {
         }
         // Raccourcis sur la sélection (jamais pendant une saisie) : F2 renomme ; Suppr demande
         // la suppression, puis Entrée la confirme (Échap l'annule).
-        if !ctx.egui_wants_keyboard_input() && self.renaming.is_none() && !self.address_editing {
+        if !ctx.egui_wants_keyboard_input() && self.renaming.is_none() && !self.nav.address_editing
+        {
             if pressed(Shortcut::PlayPause)
-                && let PlayerSlot::Ready(active) = &self.player
+                && let PlayerSlot::Ready(active) = &self.player.slot
             {
                 active.player.toggle_pause();
             }
@@ -372,7 +373,7 @@ impl ExpliaApp {
             };
             let targets = self.delete_targets();
             let paths = || targets.iter().map(|e| e.path.clone()).collect::<Vec<_>>();
-            let current_dir = match &self.location {
+            let current_dir = match &self.nav.location {
                 Location::Dir(dir) => Some(dir.clone()),
                 Location::ThisPc => None,
             };
@@ -429,23 +430,23 @@ impl ExpliaApp {
         // La barre latérale a la main (clic sur un lecteur, un dossier de Home ou un favori, ou
         // flèche gauche au plus haut d'un lecteur) : ↑ / ↓ changent d'élément, → rend la main
         // au dossier.
-        if self.sidebar_focus {
+        if self.sidebar.focus {
             if up || down {
                 self.step_sidebar(vertical);
             } else if right || (enter && gallery) {
-                self.sidebar_focus = false;
-                self.sidebar_cursor = None;
-                self.scroll_to_index = Some(0);
+                self.sidebar.focus = false;
+                self.sidebar.cursor = None;
+                self.nav.scroll_to_index = Some(0);
                 return self.visible.first().cloned().map(Action::Select);
             }
             return None;
         }
-        match &self.location {
+        match &self.nav.location {
             Location::ThisPc => None,
             Location::Dir(_) => {
                 // Retour arrière : dossier parent, dans tous les modes d'affichage.
                 if backspace {
-                    return self.location.parent().map(Action::Go);
+                    return self.nav.location.parent().map(Action::Go);
                 }
                 // Grille d'images : les quatre flèches déplacent la sélection dans la grille
                 // et Entrée ouvre l'élément (dossier ou fichier).
@@ -462,7 +463,7 @@ impl ExpliaApp {
                         let list = self.nav_list();
                         let next = view::step_index(self.cursor_index(), list.len(), delta)?;
                         let entry = list[next].clone();
-                        self.scroll_to_index = Some(next);
+                        self.nav.scroll_to_index = Some(next);
                         return Some(if shift {
                             Action::SelectRange(entry)
                         } else {
@@ -481,7 +482,7 @@ impl ExpliaApp {
                     let current = self.cursor_index();
                     let next = view::step_index(current, self.visible.len(), vertical)?;
                     let entry = self.visible[next].clone();
-                    self.scroll_to_index = Some(next);
+                    self.nav.scroll_to_index = Some(next);
                     return Some(if shift {
                         Action::SelectRange(entry)
                     } else {
@@ -489,7 +490,7 @@ impl ExpliaApp {
                     });
                 }
                 if left {
-                    return self.location.parent().map(Action::Go);
+                    return self.nav.location.parent().map(Action::Go);
                 }
                 match &self.selection.single {
                     Some(entry) if right && entry.is_dir && self.selection.multi.is_empty() => {
@@ -519,7 +520,7 @@ impl ExpliaApp {
         let own_drag = self
             .drag_out_ended_at
             .is_some_and(|ended| now - ended < OWN_DROP_GUARD_SECONDS);
-        match &self.location {
+        match &self.nav.location {
             Location::Dir(current) if !dropped.is_empty() && !own_drag => Some(Action::CopyInto {
                 sources: dropped,
                 dest: current.clone(),

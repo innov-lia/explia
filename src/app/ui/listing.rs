@@ -7,10 +7,10 @@ impl ExpliaApp {
     pub(in crate::app) fn central(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         // Les résultats d'un parcours (recherche récursive, dossiers vides, doublons) s'affichent
         // toujours en liste, quel que soit le mode d'affichage.
-        if self.results.is_some() && matches!(self.location, Location::Dir(_)) {
+        if self.scan.results.is_some() && matches!(self.nav.location, Location::Dir(_)) {
             return self.listing_view(ui);
         }
-        match (&self.location, self.view_mode) {
+        match (&self.nav.location, self.view_mode) {
             (Location::ThisPc, _) => {
                 ui.label("Choisissez un dossier ou un lecteur dans la barre latérale.");
                 None
@@ -24,13 +24,13 @@ impl ExpliaApp {
     pub(in crate::app) fn listing_view(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         // Première ligne : « .. » revient au dossier précédent (le parent).
-        let parent = if self.results.is_some() {
+        let parent = if self.scan.results.is_some() {
             None
         } else {
-            self.location.parent()
+            self.nav.location.parent()
         };
         let shift = usize::from(parent.is_some());
-        let empty_message = if let Some(results) = &self.results {
+        let empty_message = if let Some(results) = &self.scan.results {
             if !self.visible.is_empty() {
                 None
             } else if results.running {
@@ -72,10 +72,10 @@ impl ExpliaApp {
                     | egui::scroll_area::ScrollSource::MOUSE_WHEEL,
             );
         // Navigation au clavier : la ligne atteinte doit rester visible.
-        if let Some(index) = self.scroll_to_index.take() {
+        if let Some(index) = self.nav.scroll_to_index.take() {
             // Une seconde image est nécessaire : les lignes affichées dépendent du décalage appliqué.
             ui.ctx().request_repaint();
-            let (offset, view_height) = self.last_scroll;
+            let (offset, view_height) = self.nav.last_scroll;
             area = area.vertical_scroll_offset(view::scroll_offset_for(
                 index + shift,
                 row_pitch,
@@ -138,7 +138,7 @@ impl ExpliaApp {
                 });
             }
         });
-        self.last_scroll = (output.state.clamped_offset().y, output.inner_rect.height());
+        self.nav.last_scroll = (output.state.clamped_offset().y, output.inner_rect.height());
         self.renaming = rename;
         action
     }
@@ -146,14 +146,15 @@ impl ExpliaApp {
     /// Libellé d'une ligne de la liste. Parmi des résultats : numéro de groupe (doublons) et
     /// dossier d'origine, relatif au dossier affiché.
     pub(in crate::app) fn row_label(&self, icon: &str, entry: &Entry) -> String {
-        if self.results.is_none() {
+        if self.scan.results.is_none() {
             return format!("{icon} {}", entry.name);
         }
         let group = self
+            .scan
             .duplicate_groups
             .get(&entry.path)
             .map_or(String::new(), |group| format!("#{group}  "));
-        let origin = match (&self.location, entry.path.parent()) {
+        let origin = match (&self.nav.location, entry.path.parent()) {
             (Location::Dir(root), Some(parent)) => parent.strip_prefix(root).map_or_else(
                 |_| parent.display().to_string(),
                 |p| p.display().to_string(),
@@ -172,7 +173,7 @@ impl ExpliaApp {
     pub(in crate::app) fn entry_size_text(&self, entry: &Entry) -> String {
         match entry.size {
             Some(bytes) => fs_nav::format_size(bytes),
-            None if entry.is_dir && !self.skip_folder_sizes && self.results.is_none() => {
+            None if entry.is_dir && !self.skip_folder_sizes && self.scan.results.is_none() => {
                 "Calcul…".to_string()
             }
             None => String::new(),
@@ -225,7 +226,7 @@ impl ExpliaApp {
                 if !wanted {
                     return String::new();
                 }
-                match self.media.get(&entry.path) {
+                match self.preview.media.get(&entry.path) {
                     None => "…".to_string(),
                     Some(info) => match column {
                         Column::Dimensions => info

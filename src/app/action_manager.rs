@@ -333,8 +333,8 @@ impl ExpliaApp {
                 self.report_launch(result);
             }
             Action::EditAddress => {
-                self.address_editing = true;
-                self.focus_address = true;
+                self.nav.address_editing = true;
+                self.nav.focus_address = true;
             }
             Action::LongPress(entry) => {
                 self.long_press_done = true;
@@ -347,7 +347,7 @@ impl ExpliaApp {
                         .is_some_and(|s| s.path == entry.path)
                 {
                     self.selection.single = None;
-                    self.preview = PreviewState::None;
+                    self.preview.state = PreviewState::None;
                 }
                 self.toggle_multi(entry);
                 // Après un clic maintenu, chaque clic ajoute ou retire une ligne.
@@ -364,7 +364,7 @@ impl ExpliaApp {
                 if entries != self.delete_targets() {
                     self.clear_multi();
                     self.selection.single = None;
-                    self.preview = PreviewState::None;
+                    self.preview.state = PreviewState::None;
                     match <[Entry; 1]>::try_from(entries) {
                         Ok([entry]) => self.selection.select_one(entry),
                         Err(entries) => {
@@ -434,19 +434,19 @@ impl ExpliaApp {
                 }
             }
             Action::NewTab(path) => {
-                if self.tabs.is_empty()
-                    && let Location::Dir(current) = &self.location
+                if self.nav.tabs.is_empty()
+                    && let Location::Dir(current) = &self.nav.location
                 {
-                    self.tabs.push(current.clone());
-                    self.active_tab = 0;
+                    self.nav.tabs.push(current.clone());
+                    self.nav.active_tab = 0;
                 }
-                self.tabs.push(path.clone());
-                self.active_tab = self.tabs.len() - 1;
+                self.nav.tabs.push(path.clone());
+                self.nav.active_tab = self.nav.tabs.len() - 1;
                 self.navigate(Location::Dir(path));
             }
             Action::SwitchTab(index) => {
-                if let Some(path) = self.tabs.get(index).cloned() {
-                    self.active_tab = index;
+                if let Some(path) = self.nav.tabs.get(index).cloned() {
+                    self.nav.active_tab = index;
                     self.navigate(Location::Dir(path));
                 }
             }
@@ -454,7 +454,9 @@ impl ExpliaApp {
             Action::OpenPowerShell { dir, admin } => {
                 self.report_launch(launch::open_powershell(&dir, admin));
             }
-            Action::ToggleVideoFullscreen => self.set_video_fullscreen(ctx, !self.video_fullscreen),
+            Action::ToggleVideoFullscreen => {
+                self.set_video_fullscreen(ctx, !self.player.fullscreen)
+            }
             Action::FindEmptyFolders => self.start_scan(ResultKind::EmptyFolders),
             Action::FindDuplicates => self.start_scan(ResultKind::Duplicates),
             Action::FindLargeFiles => self.start_scan(ResultKind::LargeFiles),
@@ -465,7 +467,8 @@ impl ExpliaApp {
                     .visible
                     .iter()
                     .filter(|e| {
-                        self.duplicate_groups
+                        self.scan
+                            .duplicate_groups
                             .get(&e.path)
                             .is_some_and(|group| !seen.insert(*group))
                     })
@@ -474,23 +477,24 @@ impl ExpliaApp {
                 if !copies.is_empty() {
                     self.clear_multi();
                     self.selection.single = None;
-                    self.preview = PreviewState::None;
+                    self.preview.state = PreviewState::None;
                     self.selection.anchor = copies.first().map(|e| e.path.clone());
                     self.selection.multi = copies;
                 }
             }
             Action::CloseResults => {
                 let was_search = self
+                    .scan
                     .results
                     .as_ref()
                     .is_some_and(|r| r.kind == ResultKind::Search);
                 self.close_results();
                 if was_search {
-                    self.search.clear();
+                    self.scan.search.clear();
                 }
                 self.clear_multi();
                 self.selection.single = None;
-                self.preview = PreviewState::None;
+                self.preview.state = PreviewState::None;
                 self.recompute_visible();
             }
             Action::AskDeleteFolder(path) => {
@@ -507,7 +511,7 @@ impl ExpliaApp {
             }
             Action::SetViewMode(mode) => {
                 self.view_mode = mode;
-                self.scroll_to_index = self.cursor_index();
+                self.nav.scroll_to_index = self.cursor_index();
             }
             Action::ToggleHidden => {
                 self.show_hidden = !self.show_hidden;

@@ -7,31 +7,40 @@ use super::widgets::*;
 impl ExpliaApp {
     /// Bandeau des résultats d'un parcours : titre, avancement, actions et fermeture.
     pub(in crate::app) fn results_banner(&self, ui: &mut egui::Ui) -> Option<Action> {
-        let results = self.results.as_ref()?;
+        let results = self.scan.results.as_ref()?;
         let mut action = None;
         let count = self.visible.len();
         let title = match results.kind {
             ResultKind::Search => {
-                format!("Recherche « {} » : {count} résultat(s)", self.search.trim())
+                format!(
+                    "Recherche « {} » : {count} résultat(s)",
+                    self.scan.search.trim()
+                )
             }
             ResultKind::EmptyFolders => format!("Dossiers vides : {count}"),
             ResultKind::Duplicates => {
-                let groups = self.duplicate_groups.values().copied().max().unwrap_or(0);
+                let groups = self
+                    .scan
+                    .duplicate_groups
+                    .values()
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
                 format!(
                     "Doublons > {} Mo : {groups} groupe(s), {count} fichier(s)",
-                    self.duplicate_min_mb
+                    self.scan.duplicate_min_mb
                 )
             }
             ResultKind::LargeFiles => {
                 let total: u64 = self.visible.iter().filter_map(|e| e.size).sum();
                 format!(
                     "Fichiers > {} Mo : {count} fichier(s), {} au total",
-                    self.large_min_mb,
+                    self.scan.large_min_mb,
                     fs_nav::format_size(total)
                 )
             }
         };
-        let scope = if self.recursive {
+        let scope = if self.scan.recursive {
             "sous-dossiers inclus"
         } else {
             "dossier courant seulement"
@@ -97,7 +106,7 @@ impl ExpliaApp {
                 egui::vec2(address_width, ui.spacing().interact_size.y),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    if self.address_editing {
+                    if self.nav.address_editing {
                         self.address_edit(ui);
                     } else {
                         let crumb_action = self.breadcrumb_bar(ui);
@@ -106,7 +115,7 @@ impl ExpliaApp {
                 },
             );
             if ui
-                .checkbox(&mut self.recursive, "Récursive")
+                .checkbox(&mut self.scan.recursive, "Récursive")
                 .on_hover_text(
                     "Recherche, dossiers vides et doublons parcourent aussi les sous-dossiers",
                 )
@@ -126,8 +135,8 @@ impl ExpliaApp {
     /// gros au plus petit) et fichiers plus gros qu'un seuil, selon l'option « Récursive ».
     pub(in crate::app) fn selection_menu(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        let on_dir = matches!(self.location, Location::Dir(_));
-        let scope = if self.recursive {
+        let on_dir = matches!(self.nav.location, Location::Dir(_));
+        let scope = if self.scan.recursive {
             "sous-dossiers compris"
         } else {
             "dossier courant seulement"
@@ -156,7 +165,7 @@ impl ExpliaApp {
                 }
                 ui.label(">");
                 ui.add(
-                    egui::DragValue::new(&mut self.duplicate_min_mb)
+                    egui::DragValue::new(&mut self.scan.duplicate_min_mb)
                         .range(1..=1_000_000)
                         .suffix(" Mo"),
                 )
@@ -175,7 +184,7 @@ impl ExpliaApp {
                 }
                 ui.label(">");
                 ui.add(
-                    egui::DragValue::new(&mut self.large_min_mb)
+                    egui::DragValue::new(&mut self.scan.large_min_mb)
                         .range(1..=1_000_000)
                         .suffix(" Mo"),
                 )
@@ -190,15 +199,15 @@ impl ExpliaApp {
     /// Échap l'efface.
     pub(in crate::app) fn search_box(&mut self, ui: &mut egui::Ui, width: f32) {
         let edit = ui.add(
-            egui::TextEdit::singleline(&mut self.search)
+            egui::TextEdit::singleline(&mut self.scan.search)
                 .desired_width(width)
                 .hint_text("🔍 Rechercher : nom, *.exe, a*.txt…"),
         );
-        if std::mem::take(&mut self.focus_search) {
+        if std::mem::take(&mut self.scan.focus_search) {
             edit.request_focus();
         }
         if edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.search.clear();
+            self.scan.search.clear();
             edit.surrender_focus();
             self.on_search_changed();
         } else if edit.changed() {
@@ -209,13 +218,13 @@ impl ExpliaApp {
     /// Mode saisie : Entrée valide, Échap ou clic ailleurs annule.
     pub(in crate::app) fn address_edit(&mut self, ui: &mut egui::Ui) {
         let edit = ui.add(
-            egui::TextEdit::singleline(&mut self.address)
+            egui::TextEdit::singleline(&mut self.nav.address)
                 .desired_width(f32::INFINITY)
                 .hint_text("Saisir un chemin Windows, par exemple C:\\Users"),
         );
-        if self.focus_address {
+        if self.nav.focus_address {
             edit.request_focus();
-            self.focus_address = false;
+            self.nav.focus_address = false;
             return;
         }
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -224,9 +233,9 @@ impl ExpliaApp {
             if enter {
                 self.submit_address();
             } else if escape || !edit.has_focus() {
-                self.address = self.location.display();
+                self.nav.address = self.nav.location.display();
             }
-            self.address_editing = false;
+            self.nav.address_editing = false;
         }
     }
 
@@ -234,10 +243,12 @@ impl ExpliaApp {
     /// l'espace libre passe en mode saisie.
     pub(in crate::app) fn breadcrumb_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        let crumbs = match &self.location {
+        let crumbs = match &self.nav.location {
             Location::ThisPc => Vec::new(),
             // Dans le dossier de l'utilisateur : « Home > Videos » plutôt que C: > Users > nom > Videos.
-            Location::Dir(path) => fs_nav::breadcrumbs_with_home(path, self.home.as_deref()),
+            Location::Dir(path) => {
+                fs_nav::breadcrumbs_with_home(path, self.sidebar.home.as_deref())
+            }
         };
         let height = ui.spacing().interact_size.y;
         let frame = egui::Frame::new()
@@ -359,14 +370,14 @@ impl ExpliaApp {
                 );
             });
             // Onglets : après le menu Option, dès que plusieurs dossiers sont ouverts.
-            if self.tabs.len() > 1 {
+            if self.nav.tabs.len() > 1 {
                 ui.separator();
-                for (index, path) in self.tabs.iter().enumerate() {
+                for (index, path) in self.nav.tabs.iter().enumerate() {
                     let mut name = favorite_name(path);
                     if name.chars().count() > 22 {
                         name = name.chars().take(21).collect::<String>() + "…";
                     }
-                    let active = index == self.active_tab;
+                    let active = index == self.nav.active_tab;
                     if ui
                         .add(egui::Button::new(format!("🗂 {name}")).selected(active))
                         .on_hover_text(path.display().to_string())

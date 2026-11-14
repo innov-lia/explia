@@ -16,7 +16,7 @@ impl ExpliaApp {
         let height = ui.available_height();
         let gap = ui.spacing().item_spacing.x * 2.0 + 1.0;
         // Les lecteurs ne sont pas répétés quand l'onglet « Ce PC » de la barre latérale les montre.
-        let show_drives = self.sidebar_tab != SidebarTab::Pc;
+        let show_drives = self.sidebar.tab != SidebarTab::Pc;
         let zones = if show_drives { 2.0 } else { 1.0 };
         // Sur une fenêtre étroite, la grille garde au moins une tuile de large.
         let side = (ui.available_width() - GALLERY_TILE - (zones * gap)).max(0.0);
@@ -61,10 +61,10 @@ impl ExpliaApp {
     pub(in crate::app) fn nav_column(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         // Le dossier de la barre d'adresse, en tête de la colonne.
-        if let Location::Dir(path) = &self.location {
+        if let Location::Dir(path) = &self.nav.location {
             ui.add(egui::Label::new(egui::RichText::new(favorite_name(path)).weak()).truncate());
         }
-        let parent = self.location.parent();
+        let parent = self.nav.location.parent();
         let folders: Vec<&Entry> = self.visible.iter().filter(|e| e.is_dir).collect();
         let shift = usize::from(parent.is_some());
         let row_height = table_row_height(ui);
@@ -136,9 +136,9 @@ impl ExpliaApp {
                 egui::scroll_area::ScrollSource::SCROLL_BAR
                     | egui::scroll_area::ScrollSource::MOUSE_WHEEL,
             );
-        if let Some(index) = self.scroll_to_index.take() {
+        if let Some(index) = self.nav.scroll_to_index.take() {
             ui.ctx().request_repaint();
-            let (offset, view_height) = self.last_scroll;
+            let (offset, view_height) = self.nav.last_scroll;
             area = area.vertical_scroll_offset(view::scroll_offset_for(
                 index / columns,
                 tile_height + spacing.y,
@@ -158,7 +158,9 @@ impl ExpliaApp {
                         let entry = &self.visible[index];
                         let selected = self.selection.contains(&entry.path);
                         let is_image = !entry.is_dir && preview::is_supported_image(&entry.path);
-                        let thumb = is_image.then(|| self.thumbs.get(&entry.path)).flatten();
+                        let thumb = is_image
+                            .then(|| self.preview.thumbs.get(&entry.path))
+                            .flatten();
                         if is_image && thumb.is_none() {
                             wanted.push(entry.path.clone());
                         }
@@ -172,7 +174,7 @@ impl ExpliaApp {
                 });
             }
         });
-        self.last_scroll = (output.state.clamped_offset().y, output.inner_rect.height());
+        self.nav.last_scroll = (output.state.clamped_offset().y, output.inner_rect.height());
         self.request_thumbs(&wanted);
         action
     }
