@@ -2348,7 +2348,7 @@ mod tests {
     #[test]
     fn the_split_view_shows_two_independent_panes() {
         let tree = TempTree::new("split");
-        tree.dir("a");
+        tree.file("a/x.txt", b"x");
         tree.dir("b");
         let (mut app, ctx) = app_in(&tree);
         app.apply(&ctx, Action::ToggleSplit);
@@ -2361,8 +2361,13 @@ mod tests {
         settle(&mut app, &ctx);
         assert_eq!(app.nav.location, Location::Dir(tree.0.join("a")));
         assert_eq!(other_location(&mut app), Location::Dir(tree.0.join("b")));
-        // Tab (ou un clic) donne la main à l'autre volet.
+        // Tab (ou un clic) donne la main à l'autre volet ; la sélection du volet quitté
+        // disparaît : une seule sélection dans la fenêtre.
+        let first = app.visible[0].clone();
+        app.apply(&ctx, Action::Select(first));
+        assert!(app.selection.single.is_some());
         app.apply(&ctx, Action::SwitchPane);
+        assert!(app.with_other(|other| other.selection.single.is_none()));
         assert_eq!(app.nav.location, Location::Dir(tree.0.join("b")));
         assert_eq!(other_location(&mut app), Location::Dir(tree.0.join("a")));
         // Colonnes, images et vidéos ferment l'affichage fractionné.

@@ -395,15 +395,50 @@ pub(in crate::app) fn drive_tooltip(drive: &Drive, info: Option<&DriveInfo>) -> 
     text
 }
 
+/// Marque d'un élément de la barre latérale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app) enum Mark {
+    None,
+    /// Dossier affiché : un trait discret à gauche, sans surbrillance (la surbrillance est
+    /// réservée à la sélection).
+    Current,
+    /// Élément choisi au clavier dans la barre latérale (qui a alors la main).
+    Cursor,
+}
+
+/// Ligne de la barre latérale (Home, favoris) ; voir `Mark`.
+pub(in crate::app) fn place_row(
+    ui: &mut egui::Ui,
+    text: impl Into<egui::WidgetText>,
+    mark: Mark,
+) -> egui::Response {
+    let response = ui.selectable_label(mark == Mark::Cursor, text);
+    if mark == Mark::Current {
+        current_marker(ui, response.rect);
+    }
+    response
+}
+
+/// Trait vertical à gauche d'un élément : « c'est le dossier affiché ».
+fn current_marker(ui: &egui::Ui, rect: egui::Rect) {
+    let bar = egui::Rect::from_min_size(
+        rect.left_top() + egui::vec2(-4.0, 2.0),
+        egui::vec2(3.0, (rect.height() - 4.0).max(2.0)),
+    );
+    ui.painter()
+        .rect_filled(bar, 1.5, ui.visuals().selection.bg_fill);
+}
+
 /// Ligne d'un lecteur dans la barre latérale : icône, lettre et nom du volume ; dessous, si
 /// l'option est cochée, la barre d'occupation avec le pourcentage à l'intérieur.
 pub(in crate::app) fn drive_entry(
     ui: &mut egui::Ui,
     drive: &Drive,
     info: Option<&DriveInfo>,
-    selected: bool,
+    mark: Mark,
     show_usage: bool,
 ) -> egui::Response {
+    let selected = mark == Mark::Cursor;
     let line = table_row_height(ui);
     let usage = info.filter(|info| show_usage && info.total > 0);
     let height = if usage.is_some() {
@@ -469,6 +504,9 @@ pub(in crate::app) fn drive_entry(
                 egui::Color32::WHITE,
             );
         }
+    }
+    if mark == Mark::Current {
+        current_marker(ui, rect);
     }
     response.on_hover_text(drive_tooltip(drive, info))
 }

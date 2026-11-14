@@ -235,9 +235,8 @@ impl ExpliaApp {
                 .and_then(Option::as_ref);
             let here =
                 matches!(&self.nav.location, Location::Dir(path) if path.starts_with(&drive.path));
-            // Pilotée au clavier : le lecteur choisi par les flèches est en surbrillance.
-            let highlighted = cursor.as_ref().map_or(here, |c| *c == drive.path);
-            let response = drive_entry(ui, drive, info, highlighted, self.show_drive_usage);
+            let mark = self.mark(cursor.as_ref(), here, &drive.path);
+            let response = drive_entry(ui, drive, info, mark, self.show_drive_usage);
             self.drop_zone(ui, &response, &drive.path);
             if response.clicked() {
                 action = Some(Action::SidebarGo(drive.path.clone()));
@@ -253,6 +252,18 @@ impl ExpliaApp {
         action
     }
 
+    /// Marque d'un élément de la barre latérale : surbrillance seulement pour l'élément choisi
+    /// au clavier quand la barre latérale a la main ; sinon un trait discret pour le dossier
+    /// affiché (`here`).
+    fn mark(&self, cursor: Option<&PathBuf>, here: bool, path: &Path) -> Mark {
+        match cursor {
+            Some(cursor) if cursor == path => Mark::Cursor,
+            Some(_) => Mark::None,
+            None if here => Mark::Current,
+            None => Mark::None,
+        }
+    }
+
     /// Dossier de l'utilisateur et ses sous-dossiers.
     pub(in crate::app) fn home_list(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
@@ -263,18 +274,15 @@ impl ExpliaApp {
         // Le titre est le dossier de l'utilisateur lui-même : un clic l'ouvre.
         let cursor = self.sidebar_cursor_path();
         let marked = |path: &PathBuf| {
-            cursor
-                .as_ref()
-                .map_or(self.nav.location == Location::Dir(path.clone()), |c| {
-                    c == path
-                })
+            let here = self.nav.location == Location::Dir(path.clone());
+            self.mark(cursor.as_ref(), here, path)
         };
-        let response = ui
-            .selectable_label(
-                marked(home),
-                egui::RichText::new(format!("🏠 {}", favorite_name(home))).heading(),
-            )
-            .on_hover_text(home.display().to_string());
+        let response = place_row(
+            ui,
+            egui::RichText::new(format!("🏠 {}", favorite_name(home))).heading(),
+            marked(home),
+        )
+        .on_hover_text(home.display().to_string());
         self.drop_zone(ui, &response, home);
         if response.clicked() {
             action = Some(Action::SidebarGo(home.clone()));
@@ -283,8 +291,7 @@ impl ExpliaApp {
             if entry.hidden && !self.show_hidden {
                 continue;
             }
-            let response = ui
-                .selectable_label(marked(&entry.path), format!("📁 {}", entry.name))
+            let response = place_row(ui, format!("📁 {}", entry.name), marked(&entry.path))
                 .on_hover_text(entry.path.display().to_string());
             self.drop_zone(ui, &response, &entry.path);
             if response.clicked() {
@@ -337,13 +344,9 @@ impl ExpliaApp {
         }
         let cursor = self.sidebar_cursor_path();
         for path in self.favorites.paths() {
-            let here = cursor
-                .as_ref()
-                .map_or(self.nav.location == Location::Dir(path.clone()), |c| {
-                    c == path
-                });
-            let response = ui
-                .selectable_label(here, format!("⭐ {}", favorite_name(path)))
+            let here = self.nav.location == Location::Dir(path.clone());
+            let mark = self.mark(cursor.as_ref(), here, path);
+            let response = place_row(ui, format!("⭐ {}", favorite_name(path)), mark)
                 .on_hover_text(path.display().to_string());
             self.drop_zone(ui, &response, path);
             if response.clicked() {

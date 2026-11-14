@@ -115,6 +115,11 @@ impl ExpliaApp {
         self.renaming = None;
         self.confirm_delete = false;
         self.nav.address_editing = false;
+        // Une seule sélection dans toute la fenêtre : celle du volet qui a la main. On ne doit
+        // jamais se demander sur quel élément agira « Supprimer ».
+        self.selection.clear_multi();
+        self.selection.single = None;
+        self.preview.state = PreviewState::None;
         self.exchange_panes();
         if let Some(split) = self.split.as_mut() {
             split.active = opposite(split.active);
