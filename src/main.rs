@@ -15,7 +15,9 @@ mod places;
 mod player;
 mod preview;
 mod scan;
+mod selection_manager;
 mod settings;
+mod storage_manager;
 mod trash;
 mod view;
 

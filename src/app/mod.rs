@@ -22,15 +22,13 @@ use crate::places::{self, Drive, DriveInfo, DriveKind};
 use crate::player::{self, Player, PlayerState};
 use crate::preview::{self, ArchivePreview, ImagePreview, PreviewContent, TextPreview};
 use crate::scan;
+use crate::selection_manager::{MIXED_TYPES_MESSAGE, Selection, SelectionError, Toggle};
 use crate::settings::Settings;
 use crate::trash;
 use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
 
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
 pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
-/// Message affiché quand on tente de mélanger dossiers et fichiers.
-const MIXED_TYPES_MESSAGE: &str =
-    "Sélection d'un seul type à la fois : dossiers ou fichiers, pas les deux.";
 /// Durée du clic maintenu qui démarre la multi-sélection, en secondes.
 const LONG_PRESS_SECONDS: f64 = 0.5;
 /// Largeur des boutons « Renommer / Annuler » et « Supprimer / Confirmer » du volet Actions :
@@ -481,16 +479,10 @@ pub struct ExpliaApp {
     /// Lecture audio / vidéo intégrée (libVLC).
     player: PlayerSlot,
     window_sized: bool,
-    selected: Option<Entry>,
-    /// Multi-sélection : un seul type à la fois (tous dossiers, ou tous fichiers).
-    multi: Vec<Entry>,
-    /// Dernier élément choisi : point de départ d'une sélection Maj+clic.
-    anchor: Option<PathBuf>,
+    /// Élément sélectionné, multi-sélection et point d'ancrage (voir `selection_manager`).
+    selection: Selection,
     /// Attente de confirmation de la suppression de la multi-sélection.
     confirm_delete: bool,
-    /// Multi-sélection démarrée par un clic maintenu : un simple clic ajoute ou retire
-    /// une ligne. Sinon (Ctrl/Maj), un simple clic remplace la sélection, comme l'Explorateur.
-    multi_toggle_mode: bool,
     /// Un clic maintenu vient d'être traité : le relâchement ne doit pas compter comme un clic.
     long_press_done: bool,
     /// Un glisser vers l'extérieur a déjà été lancé pour l'appui en cours.
@@ -583,11 +575,8 @@ impl ExpliaApp {
             // Une taille mémorisée est appliquée dès la création de la fenêtre (voir `main`).
             window_sized: settings.window_size.is_some(),
             saved_settings: settings,
-            selected: None,
-            multi: Vec::new(),
-            anchor: None,
+            selection: Selection::default(),
             confirm_delete: false,
-            multi_toggle_mode: false,
             long_press_done: false,
             drag_out_done: false,
             drag_out_ended_at: None,
@@ -861,11 +850,7 @@ impl ExpliaApp {
     /// Éléments glissés depuis une ligne : toute la multi-sélection si la ligne en fait partie,
     /// sinon la ligne seule.
     fn drag_targets(&self, entry: &Entry) -> Vec<PathBuf> {
-        if self.multi.iter().any(|m| m.path == entry.path) {
-            self.multi.iter().map(|m| m.path.clone()).collect()
-        } else {
-            vec![entry.path.clone()]
-        }
+        self.selection.paths_from(entry)
     }
 
     /// Appui maintenu sur une ligne et pointeur déplacé : lance un glisser vers l'extérieur.
@@ -911,7 +896,7 @@ impl ExpliaApp {
         self.result_entries.clear();
         self.duplicate_groups.clear();
         self.clear_multi();
-        self.selected = None;
+        self.selection.single = None;
         self.preview = PreviewState::None;
         self.error = None;
         self.notice = None;
@@ -1030,7 +1015,7 @@ impl ExpliaApp {
         {
             self.close_results();
             self.clear_multi();
-            self.selected = None;
+            self.selection.single = None;
         }
         self.recompute_visible();
     }
@@ -1053,11 +1038,12 @@ impl ExpliaApp {
     fn cancel_delete(&mut self) {
         self.confirm_delete = false;
         let provisional = self
-            .selected
+            .selection
+            .single
             .as_ref()
             .is_some_and(|selected| !self.visible.iter().any(|e| e.path == selected.path));
         if provisional {
-            self.selected = None;
+            self.selection.single = None;
             self.preview = PreviewState::None;
         }
     }
@@ -1200,9 +1186,9 @@ impl ExpliaApp {
         }
         self.address = target.display();
         self.location = target;
-        self.selected = None;
+        self.selection.single = None;
         self.clear_multi();
-        self.anchor = None;
+        self.selection.anchor = None;
         self.cursor = None;
         self.scroll_to_index = None;
         self.renaming = None;
@@ -1218,8 +1204,8 @@ impl ExpliaApp {
             && let Some(index) = self.visible.iter().position(|e| e.path == previous)
         {
             self.cursor = Some(previous.clone());
-            self.anchor = Some(previous);
-            self.selected = Some(self.visible[index].clone());
+            self.selection.anchor = Some(previous);
+            self.selection.single = Some(self.visible[index].clone());
             self.scroll_to_index = Some(index);
         }
         // Entrée dans un dossier au clavier : on sélectionne son premier élément.
@@ -1299,30 +1285,19 @@ impl ExpliaApp {
 
     /// Maj+clic : sélectionne la plage entre l'ancre (dernier élément choisi) et `entry`.
     fn select_range(&mut self, entry: Entry) {
-        let anchor = self
-            .anchor
-            .clone()
-            .or_else(|| self.selected.as_ref().map(|s| s.path.clone()));
-        let Some(anchor) = anchor else {
-            // Rien de choisi avant : Maj+clic démarre simplement la sélection.
-            self.toggle_multi(entry);
-            return;
-        };
         let list: Vec<Entry> = self.nav_list().into_iter().cloned().collect();
-        match view::select_range(&list, &anchor, &entry.path) {
-            Ok(range) => {
+        match self.selection.select_range(&list, &entry.path) {
+            Ok(()) => {
                 self.confirm_delete = false;
-                self.selected = None;
                 self.preview = PreviewState::None;
                 self.error = None;
-                self.anchor = Some(anchor);
                 self.cursor = Some(entry.path.clone());
-                self.multi = range;
             }
-            Err(view::RangeError::MixedTypes) => {
+            Err(SelectionError::MixedTypes) => {
                 self.error = Some(MIXED_TYPES_MESSAGE.to_string());
             }
-            Err(view::RangeError::NotFound) => self.toggle_multi(entry),
+            // Rien de choisi avant, ou ancre hors de la liste : Maj+clic démarre la sélection.
+            Err(SelectionError::NotFound) => self.toggle_multi(entry),
         }
     }
 
@@ -1353,57 +1328,32 @@ impl ExpliaApp {
     fn toggle_multi(&mut self, entry: Entry) {
         self.sidebar_focus = false;
         self.confirm_delete = false;
-        // Comme dans l'Explorateur : le premier Ctrl+clic garde l'élément déjà sélectionné.
-        if self.multi.is_empty()
-            && let Some(current) = self.selected.clone()
-        {
-            if current.path == entry.path {
-                // Ctrl+clic sur l'unique élément sélectionné : on le désélectionne.
-                self.selected = None;
+        let path = entry.path.clone();
+        match self.selection.toggle(entry) {
+            Ok(Toggle::Added) => {
                 self.preview = PreviewState::None;
-                return;
+                self.error = None;
+                self.cursor = Some(path);
             }
-            if current.is_dir != entry.is_dir {
+            Ok(Toggle::Removed | Toggle::Deselected) => self.preview = PreviewState::None,
+            Err(_) => {
+                if self.selection.single.is_none() {
+                    self.preview = PreviewState::None;
+                }
                 self.error = Some(MIXED_TYPES_MESSAGE.to_string());
-                return;
             }
-            self.multi.push(current);
         }
-        self.selected = None;
-        self.preview = PreviewState::None;
-        if let Some(position) = self.multi.iter().position(|e| e.path == entry.path) {
-            self.multi.remove(position);
-            if self.multi.is_empty() {
-                self.multi_toggle_mode = false;
-            }
-            return;
-        }
-        if let Some(first) = self.multi.first()
-            && first.is_dir != entry.is_dir
-        {
-            self.error = Some(MIXED_TYPES_MESSAGE.to_string());
-            return;
-        }
-        self.error = None;
-        self.anchor = Some(entry.path.clone());
-        self.cursor = Some(entry.path.clone());
-        self.multi.push(entry);
     }
 
     /// Quitte la multi-sélection.
     fn clear_multi(&mut self) {
-        self.multi.clear();
-        self.multi_toggle_mode = false;
+        self.selection.clear_multi();
         self.confirm_delete = false;
     }
 
     /// Éléments visés par « Supprimer » : la multi-sélection, sinon l'élément sélectionné.
     fn delete_targets(&self) -> Vec<Entry> {
-        if self.multi.is_empty() {
-            self.selected.iter().cloned().collect()
-        } else {
-            self.multi.clone()
-        }
+        self.selection.targets()
     }
 
     fn delete_selection(&mut self) {
@@ -1434,7 +1384,7 @@ impl ExpliaApp {
         }
         // Dans tous les cas, on relit le dossier : certains éléments ont pu être supprimés.
         self.clear_multi();
-        self.selected = None;
+        self.selection.single = None;
         self.preview = PreviewState::None;
         self.refresh_listing();
     }
@@ -1670,9 +1620,8 @@ impl ExpliaApp {
                 ctx.request_repaint();
             });
         }
-        self.anchor = Some(entry.path.clone());
         self.cursor = Some(entry.path.clone());
-        self.selected = Some(entry);
+        self.selection.select_one(entry);
     }
 
     /// Traite les résultats des threads de travail.
@@ -1756,8 +1705,9 @@ impl ExpliaApp {
                         // Dossiers vides : tous sont sélectionnés, il ne reste qu'à supprimer.
                         if results.kind == ResultKind::EmptyFolders {
                             self.recompute_visible();
-                            self.multi = self.visible.clone();
-                            self.anchor = self.multi.first().map(|e| e.path.clone());
+                            self.selection.multi = self.visible.clone();
+                            self.selection.anchor =
+                                self.selection.multi.first().map(|e| e.path.clone());
                         }
                         results_changed = true;
                     }
@@ -1868,15 +1818,19 @@ impl ExpliaApp {
             Action::LongPress(entry) => {
                 self.long_press_done = true;
                 // Un clic maintenu sur l'élément sélectionné démarre la multi-sélection avec lui.
-                if self.multi.is_empty()
-                    && self.selected.as_ref().is_some_and(|s| s.path == entry.path)
+                if self.selection.multi.is_empty()
+                    && self
+                        .selection
+                        .single
+                        .as_ref()
+                        .is_some_and(|s| s.path == entry.path)
                 {
-                    self.selected = None;
+                    self.selection.single = None;
                     self.preview = PreviewState::None;
                 }
                 self.toggle_multi(entry);
                 // Après un clic maintenu, chaque clic ajoute ou retire une ligne.
-                self.multi_toggle_mode = !self.multi.is_empty();
+                self.selection.toggle_mode = !self.selection.multi.is_empty();
             }
             Action::ToggleMulti(entry) => self.toggle_multi(entry),
             Action::SelectRange(entry) => self.select_range(entry),
@@ -1964,10 +1918,10 @@ impl ExpliaApp {
                     .collect();
                 if !copies.is_empty() {
                     self.clear_multi();
-                    self.selected = None;
+                    self.selection.single = None;
                     self.preview = PreviewState::None;
-                    self.anchor = copies.first().map(|e| e.path.clone());
-                    self.multi = copies;
+                    self.selection.anchor = copies.first().map(|e| e.path.clone());
+                    self.selection.multi = copies;
                 }
             }
             Action::CloseResults => {
@@ -1980,14 +1934,14 @@ impl ExpliaApp {
                     self.search.clear();
                 }
                 self.clear_multi();
-                self.selected = None;
+                self.selection.single = None;
                 self.preview = PreviewState::None;
                 self.recompute_visible();
             }
             Action::AskDeleteFolder(path) => {
                 if let Some(entry) = fs_nav::entry_from_path(&path) {
                     self.clear_multi();
-                    self.selected = Some(entry);
+                    self.selection.single = Some(entry);
                     self.confirm_delete = true;
                     self.delete_asked_at = Some(ctx.input(|i| i.time));
                 }
@@ -2506,7 +2460,7 @@ impl ExpliaApp {
     fn cursor_index(&self) -> Option<usize> {
         self.cursor
             .as_ref()
-            .or(self.selected.as_ref().map(|s| &s.path))
+            .or(self.selection.single.as_ref().map(|s| &s.path))
             .and_then(|path| self.nav_list().iter().position(|e| e.path == *path))
     }
 
@@ -2557,7 +2511,7 @@ impl ExpliaApp {
 
     /// Le volet de détail est affiché (option « Volet d'aperçu », ou multi-sélection en cours).
     fn detail_shown(&self) -> bool {
-        self.show_preview || !self.multi.is_empty()
+        self.show_preview || !self.selection.multi.is_empty()
     }
 
     /// Volet latéral (à gauche ou à droite selon la disposition) : le volet de détail, ou la
@@ -3030,10 +2984,7 @@ impl ExpliaApp {
                                             continue;
                                         }
                                         let highlighted = if is_last {
-                                            self.selected
-                                                .as_ref()
-                                                .is_some_and(|s| s.path == entry.path)
-                                                || self.multi.iter().any(|m| m.path == entry.path)
+                                            self.selection.contains(&entry.path)
                                         } else {
                                             next_dir.is_some_and(|next| *next == entry.path)
                                         };
@@ -3197,7 +3148,11 @@ impl ExpliaApp {
                         continue;
                     }
                     let entry = folders[row - shift];
-                    let selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path);
+                    let selected = self
+                        .selection
+                        .single
+                        .as_ref()
+                        .is_some_and(|s| s.path == entry.path);
                     let response = table_row(
                         ui,
                         selected,
@@ -3267,8 +3222,7 @@ impl ExpliaApp {
                             break;
                         };
                         let entry = &self.visible[index];
-                        let selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path)
-                            || self.multi.iter().any(|m| m.path == entry.path);
+                        let selected = self.selection.contains(&entry.path);
                         let is_image = !entry.is_dir && preview::is_supported_image(&entry.path);
                         let thumb = is_image.then(|| self.thumbs.get(&entry.path)).flatten();
                         if is_image && thumb.is_none() {
@@ -3482,8 +3436,7 @@ impl ExpliaApp {
                     }
                     continue;
                 }
-                let is_selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path)
-                    || self.multi.iter().any(|m| m.path == entry.path);
+                let is_selected = self.selection.contains(&entry.path);
                 let icon = if entry.is_dir {
                     "📁"
                 } else if preview::is_supported_image(&entry.path) {
@@ -3509,7 +3462,7 @@ impl ExpliaApp {
                 );
                 // Après un clic maintenu : chaque clic ajoute ou retire une ligne.
                 // Avec Ctrl/Maj : un clic simple remplace la sélection (comportement habituel).
-                let multi_mode = self.multi_toggle_mode && !self.multi.is_empty();
+                let multi_mode = self.selection.toggle_mode && !self.selection.multi.is_empty();
                 // Clic maintenu : démarre la multi-sélection (ou ajoute la ligne).
                 // La détection se fait sur la position du pointeur, avec une tolérance
                 // pour les mouvements de la main, sans dépendre de l'état du widget.
@@ -3593,11 +3546,7 @@ impl ExpliaApp {
             ui.separator();
         }
         // Copier : l'élément, ou toute la multi-sélection s'il en fait partie.
-        let targets: Vec<PathBuf> = if self.multi.iter().any(|m| m.path == entry.path) {
-            self.multi.iter().map(|m| m.path.clone()).collect()
-        } else {
-            vec![entry.path.clone()]
-        };
+        let targets: Vec<PathBuf> = self.selection.paths_from(entry);
         let copy_label = if targets.len() > 1 {
             format!("📋 Copier ({} éléments)  (Ctrl+C)", targets.len())
         } else {
@@ -3761,7 +3710,7 @@ impl ExpliaApp {
                             Action::Select(entry)
                         });
                     }
-                    return match &self.selected {
+                    return match &self.selection.single {
                         Some(entry) if enter && entry.is_dir => {
                             Some(Action::EnterFolder(entry.path.clone()))
                         }
@@ -3783,8 +3732,8 @@ impl ExpliaApp {
                 if left {
                     return self.location.parent().map(Action::Go);
                 }
-                match &self.selected {
-                    Some(entry) if right && entry.is_dir && self.multi.is_empty() => {
+                match &self.selection.single {
+                    Some(entry) if right && entry.is_dir && self.selection.multi.is_empty() => {
                         Some(Action::EnterFolder(entry.path.clone()))
                     }
                     _ => None,
@@ -3958,8 +3907,8 @@ impl ExpliaApp {
 
     /// Contenu du volet pendant la multi-sélection : résumé et actions (supprimer).
     fn actions_content(&self, ui: &mut egui::Ui) -> Option<Action> {
-        let count = self.multi.len();
-        let kind = if self.multi.first().is_some_and(|e| e.is_dir) {
+        let count = self.selection.multi.len();
+        let kind = if self.selection.multi.first().is_some_and(|e| e.is_dir) {
             "dossier(s)"
         } else {
             "fichier(s)"
@@ -3974,7 +3923,11 @@ impl ExpliaApp {
             .clicked()
         {
             copy_action = Some(Action::CopyFiles(
-                self.multi.iter().map(|e| e.path.clone()).collect(),
+                self.selection
+                    .multi
+                    .iter()
+                    .map(|e| e.path.clone())
+                    .collect(),
             ));
         }
         let action = self
@@ -3986,7 +3939,7 @@ impl ExpliaApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, count, |ui, range| {
-                for item in &self.multi[range] {
+                for item in &self.selection.multi[range] {
                     let icon = if item.is_dir { "📁" } else { "📄" };
                     // Taille à jour (celle d'un dossier peut arriver après la sélection).
                     let fresh = self
@@ -4179,10 +4132,10 @@ impl ExpliaApp {
     /// Contenu du volet : en-tête, aperçu ou actions.
     fn preview_content(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        if !self.multi.is_empty() {
+        if !self.selection.multi.is_empty() {
             return self.actions_content(ui);
         }
-        let Some(selected) = &self.selected else {
+        let Some(selected) = &self.selection.single else {
             // Aucun élément choisi : le volet propose d'agir sur le dossier affiché lui-même.
             if let Location::Dir(path) = &self.location
                 && self.results.is_none()
@@ -4939,7 +4892,7 @@ impl eframe::App for ExpliaApp {
         {
             if self.confirm_delete {
                 self.cancel_delete();
-            } else if !self.multi.is_empty() {
+            } else if !self.selection.multi.is_empty() {
                 self.clear_multi();
             }
         }
@@ -5041,9 +4994,9 @@ impl eframe::App for ExpliaApp {
             if space && let PlayerSlot::Ready(active) = &self.player {
                 active.player.toggle_pause();
             }
-            let single = match self.multi.len() {
-                0 => self.selected.as_ref(),
-                1 => self.multi.first(),
+            let single = match self.selection.multi.len() {
+                0 => self.selection.single.as_ref(),
+                1 => self.selection.multi.first(),
                 _ => None,
             };
             if enter && self.confirm_delete {
@@ -5189,8 +5142,8 @@ mod tests {
         wait_scan(&mut app, &ctx);
         assert_eq!(names(&app), ["c", "vide"]);
         // Tous sont sélectionnés (multi-sélection de dossiers), prêts à être supprimés.
-        assert_eq!(app.multi.len(), 2);
-        assert!(app.multi.iter().all(|e| e.is_dir));
+        assert_eq!(app.selection.multi.len(), 2);
+        assert!(app.selection.multi.iter().all(|e| e.is_dir));
         // Sans récursivité : seulement les sous-dossiers directs.
         app.recursive = false;
         app.on_recursive_changed();
@@ -5217,9 +5170,9 @@ mod tests {
         assert_eq!(names(&app), ["a.bin", "b.bin", "c.bin"]);
         assert_eq!(app.duplicate_groups.len(), 3);
         app.apply(&ctx, Action::SelectDuplicateCopies);
-        assert_eq!(app.multi.len(), 2);
+        assert_eq!(app.selection.multi.len(), 2);
         // Le premier fichier du groupe (ordre des chemins) est conservé.
-        assert!(app.multi.iter().all(|e| e.name != "a.bin"));
+        assert!(app.selection.multi.iter().all(|e| e.name != "a.bin"));
         // Seuil plus haut que les fichiers : aucun doublon.
         app.duplicate_min_mb = 2;
         app.apply(&ctx, Action::FindDuplicates);
@@ -5245,7 +5198,7 @@ mod tests {
         app.recompute_visible();
         assert_eq!(app.visible[0].name, "gros.bin");
         // Rien n'est sélectionné d'office (ce ne sont pas forcément des fichiers à supprimer).
-        assert!(app.multi.is_empty());
+        assert!(app.selection.multi.is_empty());
         // Sans récursivité : seulement les fichiers du dossier affiché.
         app.recursive = false;
         app.on_recursive_changed();
@@ -5297,14 +5250,14 @@ mod tests {
         app.apply(&ctx, Action::AskDeleteFolder(tree.0.clone()));
         assert!(app.confirm_delete);
         assert_eq!(
-            app.selected.as_ref().map(|e| e.path.clone()),
+            app.selection.single.as_ref().map(|e| e.path.clone()),
             Some(tree.0.clone())
         );
         assert_eq!(app.delete_targets().len(), 1);
         // Annuler retire la sélection provisoire du dossier affiché.
         app.apply(&ctx, Action::CancelDelete);
         assert!(!app.confirm_delete);
-        assert!(app.selected.is_none());
+        assert!(app.selection.single.is_none());
         // On ne renomme pas le dossier affiché depuis sa propre liste.
         let current = fs_nav::entry_from_path(&tree.0).unwrap();
         app.start_rename(&current);
@@ -5325,7 +5278,7 @@ mod tests {
         let first = app.visible[0].clone();
         app.apply(&ctx, Action::Select(first.clone()));
         assert_eq!(
-            app.selected.as_ref().map(|e| e.path.clone()),
+            app.selection.single.as_ref().map(|e| e.path.clone()),
             Some(first.path.clone())
         );
         // Le dossier parent du résultat devient la cible provisoire de la suppression.
@@ -5334,11 +5287,11 @@ mod tests {
         assert!(app.confirm_delete);
         assert_eq!(app.delete_targets()[0].path, parent);
         app.apply(&ctx, Action::CancelDelete);
-        assert!(!app.confirm_delete && app.selected.is_none());
+        assert!(!app.confirm_delete && app.selection.single.is_none());
         // Un résultat sélectionné normalement reste sélectionné après un Échap sans demande.
         app.apply(&ctx, Action::Select(first.clone()));
         app.cancel_delete();
-        assert!(app.selected.is_some());
+        assert!(app.selection.single.is_some());
         // « Ouvrir » : on arrive dans le dossier du fichier, résultats fermés, fichier choisi.
         app.apply(
             &ctx,
@@ -5350,7 +5303,7 @@ mod tests {
         assert!(app.results.is_none());
         assert_eq!(app.location, Location::Dir(parent));
         assert_eq!(
-            app.selected.as_ref().map(|e| e.name.clone()),
+            app.selection.single.as_ref().map(|e| e.name.clone()),
             Some(first.name)
         );
     }
@@ -5394,7 +5347,7 @@ mod tests {
         // Le dossier est relu et la copie sélectionnée.
         assert_eq!(names(&app), ["photo - Copie.jpg", "photo.jpg"]);
         assert_eq!(
-            app.selected.as_ref().map(|e| e.name.clone()),
+            app.selection.single.as_ref().map(|e| e.name.clone()),
             Some("photo - Copie.jpg".to_string())
         );
     }
@@ -5483,7 +5436,8 @@ mod tests {
             },
         );
         assert_eq!(app.location, Location::Dir(tree.0.clone()));
-        let mut selected: Vec<String> = app.multi.iter().map(|e| e.name.clone()).collect();
+        let mut selected: Vec<String> =
+            app.selection.multi.iter().map(|e| e.name.clone()).collect();
         selected.sort();
         assert_eq!(selected, ["grec", "models"]);
         // Maj+clic : la plage depuis l'élément en surbrillance.
@@ -5498,7 +5452,7 @@ mod tests {
                 range: true,
             },
         );
-        let mut range: Vec<String> = app.multi.iter().map(|e| e.name.clone()).collect();
+        let mut range: Vec<String> = app.selection.multi.iter().map(|e| e.name.clone()).collect();
         range.sort();
         assert_eq!(range, ["aa", "grec"]);
     }

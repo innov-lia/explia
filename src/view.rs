@@ -281,39 +281,6 @@ pub fn scroll_offset_for(row: usize, row_height: f32, offset: f32, view_height: 
     }
 }
 
-/// Pourquoi une sélection d'une plage a échoué.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RangeError {
-    /// L'ancre ou la cible n'est pas dans la liste affichée.
-    NotFound,
-    /// L'ancre et la cible ne sont pas du même type (dossier / fichier).
-    MixedTypes,
-}
-
-/// Sélection d'une plage (Maj+clic) : tous les éléments affichés entre l'ancre et la cible,
-/// bornes comprises, dans l'ordre de la liste. Un seul type à la fois : seuls les éléments
-/// du même type que l'ancre sont retenus.
-pub fn select_range(
-    visible: &[Entry],
-    anchor: &Path,
-    target: &Path,
-) -> Result<Vec<Entry>, RangeError> {
-    let position = |path: &Path| visible.iter().position(|e| e.path == path);
-    let (Some(a), Some(b)) = (position(anchor), position(target)) else {
-        return Err(RangeError::NotFound);
-    };
-    let anchor_is_dir = visible[a].is_dir;
-    if visible[b].is_dir != anchor_is_dir {
-        return Err(RangeError::MixedTypes);
-    }
-    let (first, last) = (a.min(b), a.max(b));
-    Ok(visible[first..=last]
-        .iter()
-        .filter(|e| e.is_dir == anchor_is_dir)
-        .cloned()
-        .collect())
-}
-
 /// Extension en minuscules, vide s'il n'y en a pas.
 pub fn extension_of(path: &Path) -> String {
     path.extension()
@@ -466,42 +433,6 @@ mod tests {
         assert_eq!(scroll_offset_for(1, 20.0, 60.0, 100.0), 20.0);
         // Déjà visible : rien ne bouge.
         assert_eq!(scroll_offset_for(5, 20.0, 40.0, 100.0), 40.0);
-    }
-
-    #[test]
-    fn range_selection_covers_both_ends_in_either_direction() {
-        let v = vec![file("a", 1), file("b", 1), file("c", 1), file("d", 1)];
-        let forward = select_range(&v, Path::new("b"), Path::new("d")).unwrap();
-        assert_eq!(names(&forward), ["b", "c", "d"]);
-        let backward = select_range(&v, Path::new("d"), Path::new("b")).unwrap();
-        assert_eq!(names(&backward), ["b", "c", "d"]);
-        let single = select_range(&v, Path::new("c"), Path::new("c")).unwrap();
-        assert_eq!(names(&single), ["c"]);
-    }
-
-    #[test]
-    fn range_selection_keeps_a_single_type() {
-        let v = vec![dir("d1"), dir("d2"), file("f1", 1), file("f2", 1)];
-        let dirs = select_range(&v, Path::new("d1"), Path::new("d2")).unwrap();
-        assert_eq!(names(&dirs), ["d1", "d2"]);
-        // Ancre et cible de types différents : refus.
-        assert_eq!(
-            select_range(&v, Path::new("d1"), Path::new("f2")),
-            Err(RangeError::MixedTypes)
-        );
-        // Plage de fichiers : les dossiers intercalés sont ignorés.
-        let mixed = vec![file("f1", 1), dir("d1"), file("f2", 1)];
-        let files = select_range(&mixed, Path::new("f1"), Path::new("f2")).unwrap();
-        assert_eq!(names(&files), ["f1", "f2"]);
-    }
-
-    #[test]
-    fn range_selection_needs_both_ends_in_the_list() {
-        let v = vec![file("a", 1)];
-        assert_eq!(
-            select_range(&v, Path::new("a"), Path::new("zzz")),
-            Err(RangeError::NotFound)
-        );
     }
 
     #[test]
