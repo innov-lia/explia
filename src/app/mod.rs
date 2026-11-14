@@ -11,7 +11,6 @@ use eframe::egui::{self, PopupCloseBehavior};
 
 use crate::clipboard;
 use crate::clipboard_manager::{ClipMode, ClipboardManager};
-use crate::copy::CopyReport;
 use crate::dates;
 use crate::dragdrop;
 use crate::favorites::Favorites;
@@ -25,7 +24,7 @@ use crate::preview::{self, ArchivePreview, ImagePreview, PreviewContent, TextPre
 use crate::scan;
 use crate::selection_manager::{MIXED_TYPES_MESSAGE, Selection, SelectionError, Toggle};
 use crate::settings::Settings;
-use crate::storage_manager::StorageManager;
+use crate::storage_manager::{ItemId, StorageManager, TransferReport};
 use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
 
 mod action_manager;
@@ -224,7 +223,7 @@ enum Event {
     /// Fin d'une copie (Coller, dépôt) ou d'un déplacement (Couper, Coller) vers `dest`.
     CopyDone {
         dest: PathBuf,
-        report: CopyReport,
+        report: TransferReport,
         mode: ClipMode,
     },
     /// Fin d'un parcours ; `truncated` : résultats limités.
@@ -542,7 +541,7 @@ impl ExpliaApp {
         self.home_dirs = self
             .home
             .as_deref()
-            .and_then(|home| self.storage.list(home).ok())
+            .and_then(|home| self.storage.list(&ItemId::path(home)).ok())
             .map(|entries| entries.into_iter().filter(|e| e.is_dir).collect())
             .unwrap_or_default();
     }
@@ -704,9 +703,11 @@ impl ExpliaApp {
         let ctx = self.ctx.clone();
         let storage = self.storage.clone();
         std::thread::spawn(move || {
+            let sources: Vec<ItemId> = sources.iter().map(ItemId::from).collect();
+            let target = ItemId::path(&dest);
             let report = match mode {
-                ClipMode::Copy => storage.copy_into(&sources, &dest),
-                ClipMode::Cut => storage.move_into(&sources, &dest),
+                ClipMode::Copy => storage.copy_into(&sources, &target),
+                ClipMode::Cut => storage.move_into(&sources, &target),
             };
             let _ = tx.send(Event::CopyDone { dest, report, mode });
             ctx.request_repaint();
@@ -714,9 +715,9 @@ impl ExpliaApp {
     }
 
     /// Fin d'une copie ou d'un déplacement : bilan dans la barre d'état, dossier relu.
-    fn on_copy_done(&mut self, dest: &Path, report: CopyReport, mode: ClipMode) {
+    fn on_copy_done(&mut self, dest: &Path, report: TransferReport, mode: ClipMode) {
         self.copying = false;
-        if mode == ClipMode::Cut && !report.copied.is_empty() && report.errors.is_empty() {
+        if mode == ClipMode::Cut && !report.arrived.is_empty() && report.errors.is_empty() {
             self.clipboard.moved();
         }
         // Après un déplacement, des éléments ont quitté le dossier affiché.
@@ -725,8 +726,8 @@ impl ExpliaApp {
         }
         if self.location == Location::Dir(dest.to_path_buf()) {
             // Les éléments copiés sont sélectionnés (un seul type à la fois).
-            if let Some(first) = report.copied.first()
-                && let Some(entry) = self.visible.iter().find(|e| e.path == *first).cloned()
+            if let Some(first) = report.arrived.first()
+                && let Some(entry) = self.visible.iter().find(|e| e.id == *first).cloned()
             {
                 let ctx = self.ctx.clone();
                 self.select(&ctx, entry);
@@ -734,7 +735,7 @@ impl ExpliaApp {
         }
         let done = format!(
             "{} élément(s) {}",
-            report.copied.len(),
+            report.arrived.len(),
             match mode {
                 ClipMode::Copy => "copié(s)",
                 ClipMode::Cut => "déplacé(s)",
@@ -1062,7 +1063,7 @@ impl ExpliaApp {
             Location::Dir(path) => Some(path.clone()),
             Location::ThisPc => None,
         };
-        match self.storage.list(&path) {
+        match self.storage.list(&ItemId::path(&path)) {
             Ok(entries) => {
                 self.entries = entries;
                 self.start_folder_sizes();
@@ -1212,7 +1213,7 @@ impl ExpliaApp {
         let Location::Dir(path) = &self.location else {
             return;
         };
-        match self.storage.list(path) {
+        match self.storage.list(&ItemId::path(path)) {
             Ok(entries) => {
                 self.entries = entries;
                 // Les listings mis en cache pour la vue en colonnes ne sont plus à jour.
@@ -1263,10 +1264,10 @@ impl ExpliaApp {
     fn delete_selection(&mut self) {
         // Un fichier en cours de lecture est verrouillé : on libère VLC avant de supprimer.
         self.stop_player();
-        let paths: Vec<PathBuf> = self.delete_targets().into_iter().map(|e| e.path).collect();
-        let count = paths.len();
+        let ids = self.selection.target_ids();
+        let count = ids.len();
         self.confirm_delete = false;
-        match self.storage.delete(&paths).map_err(|e| e.to_string()) {
+        match self.storage.delete(&ids).map_err(|e| e.to_string()) {
             Ok(()) => {
                 self.error = None;
                 self.notice = Some(format!("{count} élément(s) envoyé(s) à la corbeille."));
@@ -1305,8 +1306,9 @@ impl ExpliaApp {
         if self.results.is_some() {
             self.close_results();
         }
-        match self.storage.create_folder(&parent) {
-            Ok(path) => {
+        match self.storage.create_folder(&ItemId::path(&parent)) {
+            Ok(id) => {
+                let path = id.as_path().map(Path::to_path_buf).unwrap_or_default();
                 self.refresh_listing();
                 self.error = None;
                 self.notice = Some(format!("Dossier créé : « {} ».", favorite_name(&path)));
@@ -1341,12 +1343,18 @@ impl ExpliaApp {
     /// Applique le renommage ; en cas d'erreur, la saisie reste ouverte pour corriger.
     fn commit_rename(&mut self, ctx: &egui::Context, path: PathBuf, new_name: &str) {
         self.stop_player();
+        let id = self
+            .visible
+            .iter()
+            .find(|e| e.path == path)
+            .map_or_else(|| ItemId::path(&path), |e| e.id.clone());
         match self
             .storage
-            .rename(&path, new_name)
+            .rename(&id, new_name)
             .map_err(|e| e.to_string())
         {
-            Ok(new_path) => {
+            Ok(new_id) => {
+                let new_path = new_id.as_path().map(Path::to_path_buf).unwrap_or_default();
                 self.renaming = None;
                 self.error = None;
                 if self.favorites.contains(&path) {
@@ -1403,7 +1411,11 @@ impl ExpliaApp {
         self.stop_player();
         if !player::is_available() {
             self.error = Some(player::VLC_MISSING_MESSAGE.to_string());
-            self.report_launch_keep_error(self.storage.open(&path).map_err(|e| e.to_string()));
+            self.report_launch_keep_error(
+                self.storage
+                    .open(&ItemId::path(&path))
+                    .map_err(|e| e.to_string()),
+            );
             return;
         }
         self.error = None;
@@ -1436,7 +1448,11 @@ impl ExpliaApp {
                 self.error = Some(format!(
                     "{message} Ouverture avec l'application par défaut."
                 ));
-                self.report_launch_keep_error(self.storage.open(&path).map_err(|e| e.to_string()));
+                self.report_launch_keep_error(
+                    self.storage
+                        .open(&ItemId::path(&path))
+                        .map_err(|e| e.to_string()),
+                );
             }
             Err(_) => {}
         }

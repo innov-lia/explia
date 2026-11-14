@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::fs_nav::Entry;
-use crate::storage_manager::{self, SourceKind};
+use crate::storage_manager::{self, ItemId, SourceKind};
 
 /// Message affiché quand on tente de mélanger dossiers et fichiers.
 pub const MIXED_TYPES_MESSAGE: &str =
@@ -31,9 +31,11 @@ impl ItemKind {
     }
 }
 
-/// Référence à un élément visé par une commande : chemin, nature et source de stockage.
+/// Référence à un élément visé par une commande : identifiant dans sa source, chemin affiché,
+/// nature et source de stockage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemRef {
+    pub id: ItemId,
     pub path: PathBuf,
     pub kind: ItemKind,
     pub source: SourceKind,
@@ -42,9 +44,10 @@ pub struct ItemRef {
 impl ItemRef {
     pub fn from_entry(entry: &Entry) -> Self {
         Self {
+            id: entry.id.clone(),
             path: entry.path.clone(),
             kind: ItemKind::of(entry),
-            source: storage_manager::source_of(&entry.path),
+            source: storage_manager::source_of(&entry.id),
         }
     }
 }
@@ -175,6 +178,11 @@ impl Selection {
         }
     }
 
+    /// Identifiants (dans leur source) des éléments visés par une commande sur la sélection.
+    pub fn target_ids(&self) -> Vec<ItemId> {
+        self.targets().into_iter().map(|e| e.id).collect()
+    }
+
     /// Chemins de `targets_from`.
     pub fn paths_from(&self, entry: &Entry) -> Vec<PathBuf> {
         self.targets_from(entry)
@@ -214,6 +222,7 @@ mod tests {
 
     fn entry(name: &str, is_dir: bool) -> Entry {
         Entry {
+            id: ItemId::path(name),
             name: name.to_string(),
             path: PathBuf::from(name),
             is_dir,

@@ -17,7 +17,7 @@ impl ExpliaApp {
         // Listings des dossiers traversés (le dernier est le dossier courant : `self.visible`).
         for (_, path) in crumbs.iter().take(crumbs.len().saturating_sub(1)) {
             if !self.column_cache.contains_key(path)
-                && let Ok(list) = self.storage.list(path)
+                && let Ok(list) = self.storage.list(&ItemId::path(path))
             {
                 let processed = self.filtered_and_sorted(&list, false);
                 self.column_cache.insert(path.clone(), processed);

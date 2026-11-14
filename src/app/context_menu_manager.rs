@@ -193,7 +193,7 @@ impl ExpliaApp {
         let items = entry_items(&EntryMenuContext {
             item: &item,
             count: targets.len(),
-            caps: self.storage.capabilities(&entry.path),
+            caps: self.storage.capabilities(&entry.id),
             allow_rename,
             in_favorites: self.favorites.contains(&entry.path),
             in_applications: self.applications.contains(&entry.path),
@@ -209,7 +209,7 @@ impl ExpliaApp {
         removable: bool,
     ) -> Option<Action> {
         let entry = Entry::file_at(path);
-        let items = application_items(self.storage.capabilities(path), removable);
+        let items = application_items(self.storage.capabilities(&ItemId::path(path)), removable);
         show(ui, &entry, &items, std::slice::from_ref(&entry))
     }
 
@@ -227,6 +227,7 @@ mod tests {
 
     fn item(path: &str, kind: ItemKind) -> ItemRef {
         ItemRef {
+            id: crate::storage_manager::ItemId::path(path),
             path: PathBuf::from(path),
             kind,
             source: SourceKind::Local,

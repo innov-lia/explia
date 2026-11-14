@@ -71,7 +71,7 @@ impl ExpliaApp {
         let recycle_bin = self
             .delete_targets()
             .first()
-            .is_none_or(|e| self.storage.capabilities(&e.path).recycle_bin);
+            .is_none_or(|e| self.storage.capabilities(&e.id).recycle_bin);
         if self.confirm_delete {
             let question = if recycle_bin {
                 format!("Envoyer {what} à la corbeille ?")
@@ -179,7 +179,7 @@ impl ExpliaApp {
             }
         });
         // Nouveau dossier, Coller ici, Propriétés : selon ce que la source permet.
-        let caps = self.storage.capabilities(dir);
+        let caps = self.storage.capabilities(&ItemId::path(dir));
         let folder = Entry::folder_at(dir);
         let targets = std::slice::from_ref(&folder);
         ui.horizontal_wrapped(|ui| {
@@ -213,7 +213,7 @@ impl ExpliaApp {
         ui.add_space(6.0);
         let mut copy_action = None;
         if let Some(first) = self.selection.multi.first() {
-            let caps = self.storage.capabilities(&first.path);
+            let caps = self.storage.capabilities(&first.id);
             ui.horizontal_wrapped(|ui| {
                 for (allowed, command) in [(true, Command::Copy), (caps.move_items, Command::Cut)] {
                     if allowed

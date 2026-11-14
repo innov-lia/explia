@@ -1,13 +1,16 @@
 //! Sources de stockage : interface commune des connecteurs et de leurs capacités.
 //!
-//! Le gestionnaire (`StorageManager`) choisit le connecteur qui sert un chemin et lui confie
-//! l'opération ; il ne contient aucun code propre à une source. Chaque connecteur déclare ce
-//! qu'il sait faire (`Capabilities`) : l'interface n'offre que les commandes possibles.
+//! Le gestionnaire (`StorageManager`) choisit le connecteur qui sert un élément et lui confie
+//! l'opération ; il ne contient aucun code propre à une source. Les éléments sont désignés par
+//! des `ItemId`, jamais par des chemins : chaque connecteur interprète les siens. Chaque
+//! connecteur déclare ce qu'il sait faire (`Capabilities`) : l'interface n'offre que les
+//! commandes possibles.
 //!
 //! Connecteurs : `local` (disques de la machine et partages SMB, par lettre de lecteur ou
 //! chemin UNC). SharePoint et OneDrive via Microsoft Graph sont prévus mais reportés : ils
 //! demandent une connexion réseau et un compte, interdits pour l'instant (voir AGENTS.md).
 
+mod item_id;
 mod local;
 
 use std::fmt;
@@ -15,10 +18,10 @@ use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::Arc;
 
-use crate::copy::CopyReport;
 use crate::fs_nav::Entry;
 use crate::places::{self, DriveKind};
 
+pub use item_id::ItemId;
 pub use local::LocalConnector;
 
 /// Source de stockage d'un élément.
@@ -30,11 +33,11 @@ pub enum SourceKind {
     Network,
 }
 
-/// Source de `path`, d'après son préfixe (lettre de lecteur ou chemin UNC).
-pub fn source_of(path: &Path) -> SourceKind {
-    match drive_of(path) {
-        Drive::Unc => SourceKind::Network,
-        Drive::Letter(root) if places::drive_kind(&root) == DriveKind::Network => {
+/// Source d'un élément : pour un chemin, d'après son préfixe (lettre de lecteur ou UNC).
+pub fn source_of(id: &ItemId) -> SourceKind {
+    match id.as_path().map(drive_of) {
+        Some(Drive::Unc) => SourceKind::Network,
+        Some(Drive::Letter(root)) if places::drive_kind(&root) == DriveKind::Network => {
             SourceKind::Network
         }
         _ => SourceKind::Local,
@@ -61,7 +64,7 @@ fn drive_of(path: &Path) -> Drive {
     }
 }
 
-/// Ce qu'une source permet sur un chemin donné.
+/// Ce qu'une source permet sur un élément donné.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Capabilities {
     /// Lister le contenu d'un dossier.
@@ -87,7 +90,7 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// Aucune opération possible (chemin servi par aucun connecteur).
+    /// Aucune opération possible (élément servi par aucun connecteur).
     pub const NONE: Capabilities = Capabilities {
         list: false,
         open: false,
@@ -165,66 +168,80 @@ impl StorageError {
     }
 }
 
-/// Interface commune des connecteurs. Un connecteur n'implémente que ce que sa source
-/// permet réellement ; les autres opérations répondent `Unsupported`.
-pub trait Connector: Send + Sync {
-    /// Le connecteur sert ce chemin.
-    fn handles(&self, path: &Path) -> bool;
+/// Bilan d'une copie ou d'un déplacement.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TransferReport {
+    /// Éléments arrivés à destination (premier niveau).
+    pub arrived: Vec<ItemId>,
+    /// Problèmes rencontrés (élément ignoré, copie incomplète…).
+    pub errors: Vec<String>,
+}
 
-    /// Opérations possibles sur `path`.
-    fn capabilities(&self, path: &Path) -> Capabilities;
+impl TransferReport {
+    fn failed(error: impl Into<String>) -> Self {
+        Self {
+            arrived: Vec::new(),
+            errors: vec![error.into()],
+        }
+    }
+}
+
+/// Interface commune des connecteurs. Un connecteur n'implémente que ce que sa source
+/// permet réellement ; les autres opérations répondent `Unsupported`. Les opérations peuvent
+/// être lentes (réseau) : l'application les appelle hors du thread de l'interface quand elles
+/// portent sur des dossiers entiers (listage, copie, déplacement).
+pub trait Connector: Send + Sync {
+    /// Le connecteur sert cet élément.
+    fn handles(&self, id: &ItemId) -> bool;
+
+    /// Opérations possibles sur l'élément.
+    fn capabilities(&self, id: &ItemId) -> Capabilities;
 
     /// Contenu d'un dossier.
-    fn list(&self, dir: &Path) -> Result<Vec<Entry>, StorageError>;
+    fn list(&self, dir: &ItemId) -> Result<Vec<Entry>, StorageError>;
 
     /// Ouvre avec l'application associée (ou lance un exécutable).
-    fn open(&self, _path: &Path) -> Result<(), StorageError> {
+    fn open(&self, _id: &ItemId) -> Result<(), StorageError> {
         Err(StorageError::Unsupported("ouvrir"))
     }
 
     /// Lance en tant qu'administrateur.
-    fn open_as_admin(&self, _path: &Path) -> Result<(), StorageError> {
+    fn open_as_admin(&self, _id: &ItemId) -> Result<(), StorageError> {
         Err(StorageError::Unsupported("exécuter en administrateur"))
     }
 
-    /// Renomme dans le même dossier, sans écraser ; renvoie le nouveau chemin.
-    fn rename(&self, _path: &Path, _new_name: &str) -> Result<PathBuf, StorageError> {
+    /// Renomme dans le même dossier, sans écraser ; renvoie le nouvel identifiant.
+    fn rename(&self, _id: &ItemId, _new_name: &str) -> Result<ItemId, StorageError> {
         Err(StorageError::Unsupported("renommer"))
     }
 
     /// Copie `sources` dans `dest`, sans jamais écraser.
-    fn copy_into(&self, _sources: &[PathBuf], _dest: &Path) -> CopyReport {
-        CopyReport {
-            errors: vec![StorageError::Unsupported("coller").to_string()],
-            ..CopyReport::default()
-        }
+    fn copy_into(&self, _sources: &[ItemId], _dest: &ItemId) -> TransferReport {
+        TransferReport::failed(StorageError::Unsupported("coller").to_string())
     }
 
     /// Déplace `sources` dans `dest`, sans jamais écraser.
-    fn move_into(&self, _sources: &[PathBuf], _dest: &Path) -> CopyReport {
-        CopyReport {
-            errors: vec![StorageError::Unsupported("déplacer").to_string()],
-            ..CopyReport::default()
-        }
+    fn move_into(&self, _sources: &[ItemId], _dest: &ItemId) -> TransferReport {
+        TransferReport::failed(StorageError::Unsupported("déplacer").to_string())
     }
 
-    /// Crée un dossier vide sous un nom libre dans `parent` ; renvoie son chemin.
-    fn create_folder(&self, _parent: &Path) -> Result<PathBuf, StorageError> {
+    /// Crée un dossier vide sous un nom libre dans `parent` ; renvoie son identifiant.
+    fn create_folder(&self, _parent: &ItemId) -> Result<ItemId, StorageError> {
         Err(StorageError::Unsupported("créer un dossier"))
     }
 
     /// Affiche les propriétés de l'élément.
-    fn show_properties(&self, _path: &Path) -> Result<(), StorageError> {
+    fn show_properties(&self, _id: &ItemId) -> Result<(), StorageError> {
         Err(StorageError::Unsupported("propriétés"))
     }
 
     /// Supprime (corbeille si la source en a une).
-    fn delete(&self, _paths: &[PathBuf]) -> Result<(), StorageError> {
+    fn delete(&self, _ids: &[ItemId]) -> Result<(), StorageError> {
         Err(StorageError::Unsupported("supprimer"))
     }
 }
 
-/// Choisit le connecteur de chaque chemin et lui confie les opérations.
+/// Choisit le connecteur de chaque élément et lui confie les opérations.
 #[derive(Clone)]
 pub struct StorageManager {
     connectors: Vec<Arc<dyn Connector>>,
@@ -242,89 +259,80 @@ impl StorageManager {
         Self { connectors }
     }
 
-    fn connector_for(&self, path: &Path) -> Option<&Arc<dyn Connector>> {
-        self.connectors.iter().find(|c| c.handles(path))
+    fn connector_for(&self, id: &ItemId) -> Option<&Arc<dyn Connector>> {
+        self.connectors.iter().find(|c| c.handles(id))
     }
 
     fn with<T>(
         &self,
-        path: &Path,
+        id: &ItemId,
         operation: impl FnOnce(&dyn Connector) -> Result<T, StorageError>,
     ) -> Result<T, StorageError> {
-        match self.connector_for(path) {
+        match self.connector_for(id) {
             Some(connector) => operation(connector.as_ref()),
-            None => Err(StorageError::NotFound(format!(
-                "aucune source pour {}",
-                path.display()
-            ))),
+            None => Err(StorageError::NotFound(format!("aucune source pour {id}"))),
         }
     }
 
-    pub fn capabilities(&self, path: &Path) -> Capabilities {
-        self.connector_for(path)
-            .map_or(Capabilities::NONE, |c| c.capabilities(path))
+    pub fn capabilities(&self, id: &ItemId) -> Capabilities {
+        self.connector_for(id)
+            .map_or(Capabilities::NONE, |c| c.capabilities(id))
     }
 
-    pub fn list(&self, dir: &Path) -> Result<Vec<Entry>, StorageError> {
+    pub fn list(&self, dir: &ItemId) -> Result<Vec<Entry>, StorageError> {
         self.with(dir, |c| c.list(dir))
     }
 
-    pub fn open(&self, path: &Path) -> Result<(), StorageError> {
-        self.with(path, |c| c.open(path))
+    pub fn open(&self, id: &ItemId) -> Result<(), StorageError> {
+        self.with(id, |c| c.open(id))
     }
 
-    pub fn open_as_admin(&self, path: &Path) -> Result<(), StorageError> {
-        self.with(path, |c| c.open_as_admin(path))
+    pub fn open_as_admin(&self, id: &ItemId) -> Result<(), StorageError> {
+        self.with(id, |c| c.open_as_admin(id))
     }
 
-    pub fn rename(&self, path: &Path, new_name: &str) -> Result<PathBuf, StorageError> {
-        self.with(path, |c| c.rename(path, new_name))
+    pub fn rename(&self, id: &ItemId, new_name: &str) -> Result<ItemId, StorageError> {
+        self.with(id, |c| c.rename(id, new_name))
     }
 
     /// Copie vers `dest` : c'est le connecteur de la destination qui écrit.
-    pub fn copy_into(&self, sources: &[PathBuf], dest: &Path) -> CopyReport {
+    pub fn copy_into(&self, sources: &[ItemId], dest: &ItemId) -> TransferReport {
         match self.connector_for(dest) {
             Some(connector) => connector.copy_into(sources, dest),
-            None => CopyReport {
-                errors: vec![format!("Aucune source pour {}", dest.display())],
-                ..CopyReport::default()
-            },
+            None => TransferReport::failed(format!("Aucune source pour {dest}")),
         }
     }
 
     /// Déplace vers `dest` : sources et destination doivent relever du même connecteur.
-    pub fn move_into(&self, sources: &[PathBuf], dest: &Path) -> CopyReport {
+    pub fn move_into(&self, sources: &[ItemId], dest: &ItemId) -> TransferReport {
         match self.connector_for(dest) {
             Some(connector) if sources.iter().all(|s| connector.handles(s)) => {
                 connector.move_into(sources, dest)
             }
-            _ => CopyReport {
-                errors: vec![
-                    StorageError::Unsupported("déplacer entre ces deux sources").to_string(),
-                ],
-                ..CopyReport::default()
-            },
+            _ => TransferReport::failed(
+                StorageError::Unsupported("déplacer entre ces deux sources").to_string(),
+            ),
         }
     }
 
-    pub fn create_folder(&self, parent: &Path) -> Result<PathBuf, StorageError> {
+    pub fn create_folder(&self, parent: &ItemId) -> Result<ItemId, StorageError> {
         self.with(parent, |c| c.create_folder(parent))
     }
 
-    pub fn show_properties(&self, path: &Path) -> Result<(), StorageError> {
-        self.with(path, |c| c.show_properties(path))
+    pub fn show_properties(&self, id: &ItemId) -> Result<(), StorageError> {
+        self.with(id, |c| c.show_properties(id))
     }
 
-    /// Supprime des éléments, regroupés par connecteur.
-    pub fn delete(&self, paths: &[PathBuf]) -> Result<(), StorageError> {
-        let Some(first) = paths.first() else {
+    /// Supprime des éléments d'une même source.
+    pub fn delete(&self, ids: &[ItemId]) -> Result<(), StorageError> {
+        let Some(first) = ids.first() else {
             return Err(StorageError::Other(
                 "Aucun élément à supprimer.".to_string(),
             ));
         };
         self.with(first, |c| {
-            if paths.iter().all(|p| c.handles(p)) {
-                c.delete(paths)
+            if ids.iter().all(|id| c.handles(id)) {
+                c.delete(ids)
             } else {
                 Err(StorageError::Unsupported(
                     "supprimer des éléments de plusieurs sources",
@@ -338,22 +346,22 @@ impl StorageManager {
 mod tests {
     use super::*;
 
-    /// Connecteur de test qui ne sait que lister `R:\`.
+    /// Connecteur de test qui ne sait que lister `R:\\`.
     struct ReadOnly;
 
     impl Connector for ReadOnly {
-        fn handles(&self, path: &Path) -> bool {
-            path.starts_with(r"R:\")
+        fn handles(&self, id: &ItemId) -> bool {
+            id.as_path().is_some_and(|p| p.starts_with(r"R:\"))
         }
 
-        fn capabilities(&self, _path: &Path) -> Capabilities {
+        fn capabilities(&self, _id: &ItemId) -> Capabilities {
             Capabilities {
                 list: true,
                 ..Capabilities::NONE
             }
         }
 
-        fn list(&self, _dir: &Path) -> Result<Vec<Entry>, StorageError> {
+        fn list(&self, _dir: &ItemId) -> Result<Vec<Entry>, StorageError> {
             Ok(Vec::new())
         }
     }
@@ -365,40 +373,40 @@ mod tests {
     #[test]
     fn operations_a_source_lacks_are_reported_as_unsupported() {
         let storage = read_only();
-        let path = Path::new(r"R:\doc.txt");
-        assert!(storage.capabilities(path).list);
-        assert!(!storage.capabilities(path).rename);
-        assert!(!storage.capabilities(path).move_items);
+        let doc = ItemId::path(r"R:\doc.txt");
+        assert!(storage.capabilities(&doc).list);
+        assert!(!storage.capabilities(&doc).rename);
+        assert!(!storage.capabilities(&doc).move_items);
         assert_eq!(
-            storage.create_folder(Path::new(r"R:\")),
+            storage.create_folder(&ItemId::path(r"R:\")),
             Err(StorageError::Unsupported("créer un dossier"))
         );
-        let moved = storage.move_into(&[PathBuf::from(r"R:")], Path::new(r"R:"));
-        assert!(moved.copied.is_empty() && moved.errors.len() == 1);
+        let moved = storage.move_into(&[ItemId::path(r"R:\a")], &ItemId::path(r"R:\b"));
+        assert!(moved.arrived.is_empty() && moved.errors.len() == 1);
         assert_eq!(
-            storage.rename(path, "x.txt"),
+            storage.rename(&doc, "x.txt"),
             Err(StorageError::Unsupported("renommer"))
         );
-        let report = storage.copy_into(&[PathBuf::from(r"C:\a")], Path::new(r"R:\"));
-        assert!(report.copied.is_empty());
+        let report = storage.copy_into(&[ItemId::path(r"C:\a")], &ItemId::path(r"R:\"));
+        assert!(report.arrived.is_empty());
         assert_eq!(report.errors.len(), 1);
     }
 
     #[test]
-    fn a_path_without_connector_has_no_capability() {
+    fn an_item_without_connector_has_no_capability() {
         let storage = read_only();
-        let path = Path::new(r"Q:\x");
-        assert_eq!(storage.capabilities(path), Capabilities::NONE);
-        assert!(matches!(storage.list(path), Err(StorageError::NotFound(_))));
+        let id = ItemId::path(r"Q:\x");
+        assert_eq!(storage.capabilities(&id), Capabilities::NONE);
+        assert!(matches!(storage.list(&id), Err(StorageError::NotFound(_))));
     }
 
     #[test]
     fn deleting_across_sources_is_refused() {
         let storage =
             StorageManager::with_connectors(vec![Arc::new(ReadOnly), Arc::new(LocalConnector)]);
-        let paths = [PathBuf::from(r"R:\a"), PathBuf::from(r"C:\b")];
+        let ids = [ItemId::path(r"R:\a"), ItemId::path(r"C:\b")];
         assert!(matches!(
-            storage.delete(&paths),
+            storage.delete(&ids),
             Err(StorageError::Unsupported(_))
         ));
     }
@@ -421,11 +429,11 @@ mod tests {
     #[test]
     fn unc_paths_are_network_shares() {
         assert_eq!(
-            source_of(Path::new(r"\\serveur\partage\dossier")),
+            source_of(&ItemId::path(r"\\serveur\partage\dossier")),
             SourceKind::Network
         );
         assert_eq!(
-            source_of(Path::new(r"\\?\UNC\serveur\partage")),
+            source_of(&ItemId::path(r"\\?\UNC\serveur\partage")),
             SourceKind::Network
         );
     }

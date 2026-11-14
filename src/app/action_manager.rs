@@ -321,13 +321,19 @@ impl ExpliaApp {
             }
             Action::RemoveApplication(path) => self.applications.remove(&path),
             Action::Open(path) => {
-                let result = self.storage.open(&path).map_err(|e| e.to_string());
+                let result = self
+                    .storage
+                    .open(&ItemId::path(&path))
+                    .map_err(|e| e.to_string());
                 self.report_launch(result);
             }
             Action::Play(path) => self.start_player(path),
             Action::StopPlayer => self.stop_player(),
             Action::OpenAsAdmin(path) => {
-                let result = self.storage.open_as_admin(&path).map_err(|e| e.to_string());
+                let result = self
+                    .storage
+                    .open_as_admin(&ItemId::path(&path))
+                    .map_err(|e| e.to_string());
                 self.report_launch(result);
             }
             Action::EditAddress => {
@@ -413,7 +419,7 @@ impl ExpliaApp {
             }
             Action::CreateFolder { parent } => self.create_folder(ctx, parent),
             Action::ShowProperties(path) => {
-                if let Err(err) = self.storage.show_properties(&path) {
+                if let Err(err) = self.storage.show_properties(&ItemId::path(&path)) {
                     self.error = Some(err.to_string());
                 }
             }
