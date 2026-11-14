@@ -2377,6 +2377,30 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_pane_keeps_the_other_one() {
+        let tree = TempTree::new("split-close");
+        tree.dir("a");
+        tree.dir("b");
+        let (mut app, ctx) = app_in(&tree);
+        let open = |app: &mut ExpliaApp| {
+            app.apply(&ctx, Action::ToggleSplit);
+            app.navigate(Location::Dir(tree.0.join("a")));
+            app.with_other(|other| other.navigate(Location::Dir(tree.0.join("b"))));
+            settle(app, &ctx);
+        };
+        // La croix du volet actif : l'autre volet reste, seul.
+        open(&mut app);
+        app.apply(&ctx, Action::ClosePane { active: true });
+        assert!(app.split.is_none());
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("b")));
+        // La croix de l'autre volet : le volet actif reste.
+        open(&mut app);
+        app.apply(&ctx, Action::ClosePane { active: false });
+        assert!(app.split.is_none());
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("a")));
+    }
+
+    #[test]
     fn f5_copies_and_f6_moves_to_the_other_pane() {
         let tree = TempTree::new("split-transfer");
         tree.file("gauche/photo.jpg", b"img");

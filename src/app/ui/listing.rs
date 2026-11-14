@@ -38,27 +38,32 @@ impl ExpliaApp {
                 } else {
                     ui.visuals().widgets.noninteractive.bg_stroke
                 };
+                // Identifiants propres à chaque côté : les deux volets ne partagent ni
+                // défilement ni fil d'Ariane.
                 let response = ui
-                    .vertical(|ui| {
-                        ui.set_width(half);
-                        ui.set_height(height);
-                        egui::Frame::group(ui.style())
-                            .stroke(stroke)
-                            .inner_margin(4.0)
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.set_height(ui.available_height());
-                                let pane_action = if is_active {
-                                    self.pane_contents(ui)
-                                } else {
-                                    self.with_other(|app| app.pane_contents(ui))
-                                };
-                                if pane_action.is_some() {
-                                    action = pane_action;
-                                }
-                            });
+                    .push_id(("pane", split::side_index(side)), |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(half);
+                            ui.set_height(height);
+                            egui::Frame::group(ui.style())
+                                .stroke(stroke)
+                                .inner_margin(4.0)
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.set_height(ui.available_height());
+                                    let pane_action = if is_active {
+                                        self.pane_contents(ui, true)
+                                    } else {
+                                        self.with_other(|app| app.pane_contents(ui, false))
+                                    };
+                                    if pane_action.is_some() {
+                                        action = pane_action;
+                                    }
+                                });
+                        })
+                        .response
                     })
-                    .response;
+                    .inner;
                 rects[split::side_index(side)] = response.rect;
                 if side == Side::Left {
                     ui.separator();
@@ -93,9 +98,10 @@ impl ExpliaApp {
         action
     }
 
-    /// Contenu d'un volet : barre d'adresse, bandeau des résultats, liste.
-    fn pane_contents(&mut self, ui: &mut egui::Ui) -> Option<Action> {
-        let mut action = self.location_bar(ui);
+    /// Contenu d'un volet : son chemin (et le bouton qui le ferme), le bandeau des résultats,
+    /// la liste. `active` : c'est le volet qui a la main.
+    fn pane_contents(&mut self, ui: &mut egui::Ui, active: bool) -> Option<Action> {
+        let mut action = self.pane_bar(ui, active);
         action = self.results_banner(ui).or(action);
         ui.add_space(4.0);
         if matches!(self.nav.location, Location::Dir(_)) {
@@ -104,6 +110,39 @@ impl ExpliaApp {
             ui.label("Choisissez un dossier ou un lecteur dans la barre latérale.");
             action
         }
+    }
+
+    /// Haut d'un volet : le chemin seul (fil d'Ariane, ou saisie) sur toute la largeur, et une
+    /// croix qui ferme ce volet (l'autre reste affiché, en plein).
+    fn pane_bar(&mut self, ui: &mut egui::Ui, active: bool) -> Option<Action> {
+        let mut action = None;
+        ui.horizontal(|ui| {
+            enlarge_toolbar(ui);
+            let close = egui::Button::new("✕");
+            let close_width = ui.spacing().interact_size.y + ui.spacing().button_padding.x * 2.0;
+            let width =
+                (ui.available_width() - close_width - ui.spacing().item_spacing.x).max(60.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    if self.nav.address_editing {
+                        self.address_edit(ui);
+                    } else {
+                        action = self.breadcrumb_bar(ui);
+                    }
+                },
+            );
+            if ui
+                .add(close)
+                .on_hover_text("Fermer ce volet : l'autre reste affiché")
+                .clicked()
+            {
+                action = Some(Action::ClosePane { active });
+            }
+        });
+        ui.add_space(2.0);
+        action
     }
 
     /// Pendant un glisser : une étiquette suit le pointeur et dit ce que fera le dépôt ;

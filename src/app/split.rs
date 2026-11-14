@@ -140,6 +140,15 @@ impl ExpliaApp {
         self.open_split(start);
     }
 
+    /// Ferme un volet (`active` : celui qui a la main) ; l'autre reste affiché, seul.
+    pub(super) fn close_pane(&mut self, active: bool) {
+        if active {
+            // Le volet restant prend la main avant que l'affichage fractionné disparaisse.
+            self.activate_other();
+        }
+        self.split = None;
+    }
+
     /// Crée l'autre volet et lui fait lire `start`.
     pub(super) fn open_split(&mut self, start: Option<PathBuf>) {
         self.pane_serial += 1;

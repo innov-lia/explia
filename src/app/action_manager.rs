@@ -242,6 +242,11 @@ pub(super) enum Action {
     ToggleSplit,
     /// Donne la main à l'autre volet.
     SwitchPane,
+    /// Ferme un volet de l'affichage fractionné (`active` : celui qui a la main) ; l'autre
+    /// reste affiché, seul.
+    ClosePane {
+        active: bool,
+    },
     /// Copie ou déplace la sélection vers le dossier de l'autre volet.
     TransferToOther {
         mode: ClipMode,
@@ -558,6 +563,7 @@ impl ExpliaApp {
             }
             Action::ToggleSplit => self.toggle_split(),
             Action::SwitchPane => self.activate_other(),
+            Action::ClosePane { active } => self.close_pane(active),
             Action::TransferToOther { mode } => {
                 let sources: Vec<PathBuf> =
                     self.delete_targets().into_iter().map(|e| e.path).collect();
