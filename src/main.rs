@@ -2,7 +2,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod clipboard;
+mod copy;
 mod dates;
+mod dragdrop;
 mod favorites;
 mod fileops;
 mod fs_nav;
@@ -11,6 +14,7 @@ mod media;
 mod places;
 mod player;
 mod preview;
+mod scan;
 mod settings;
 mod trash;
 mod view;
@@ -28,7 +32,7 @@ fn main() -> eframe::Result {
 
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("ExPLIA")
-        .with_min_inner_size([640.0, 400.0])
+        .with_min_inner_size([900.0, 450.0])
         // Une taille mémorisée sur un autre écran ne doit pas dépasser l'écran actuel.
         .with_clamp_size_to_monitor_size(true);
     viewport = match settings.window_size {

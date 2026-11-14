@@ -1,4 +1,5 @@
-//! Liste des favoris de l'utilisateur (sauvegardée avec les réglages, voir `settings`).
+//! Liste de chemins sans doublon : favoris et applications de l'utilisateur (sauvegardées
+//! avec les réglages, voir `settings`).
 
 use std::path::{Path, PathBuf};
 

@@ -90,7 +90,14 @@ fichier. **Exceptions autorisées par l'utilisateur** :
   envoyer des fichiers ou des dossiers sélectionnés à la **corbeille** de
   Windows (jamais de suppression définitive de sa propre initiative) ;
   * sur demande explicite de l'utilisateur, elle peut renommer un fichier ou
-  un dossier, dans son dossier d'origine, sans jamais écraser un élément existant.
+  un dossier, dans son dossier d'origine, sans jamais écraser un élément existant ;
+  * sur demande explicite de l'utilisateur (Coller, ou dépôt de fichiers glissés dans
+  la fenêtre), elle peut **copier** des fichiers ou dossiers dans le dossier affiché,
+  sans jamais écraser un élément existant (nom libre « nom - Copie » si besoin), sans
+  suivre les liens ni copier un dossier dans lui-même ; jamais de déplacement ;
+  * elle peut placer des fichiers dans le presse-papiers de Windows (Copier) et les
+  faire glisser vers une autre application (Bureau, Explorateur) en mode **copie** :
+  c'est l'application de destination qui écrit.
 Aucun autre fichier ne doit être écrit.
 * Ne jamais lancer de commande destructive ou modifier des fichiers en
 dehors du dépôt.
@@ -127,10 +134,11 @@ tests réellement exécutés et les limites restantes.
 La priorité est d'obtenir d'abord un explorateur utilisable : **lecteurs
 → navigation par dossiers → barre latérale → aperçu des images**.
 
-Ne pas développer pour l'instant : onglets, réseau, connexions à des
-serveurs, cloud, opérations sur fichiers autres que renommer et envoyer à
-la corbeille (donc ni copie, ni déplacement, ni création), recherche
-avancée, plugins, synchronisation ou personnalisation complexe.
+Ne pas développer pour l'instant : réseau, connexions à des serveurs, cloud,
+opérations sur fichiers autres que renommer, copier (Coller, glisser-déposer) et
+envoyer à la corbeille (donc ni déplacement, ni création), recherche avancée,
+plugins, synchronisation ou personnalisation complexe. Les onglets de navigation
+(décision de l'utilisateur) sont autorisés.
 
 Le README doit toujours refléter les fonctionnalités réellement
 développées (fonctionnalités, raccourcis clavier, limites connues,

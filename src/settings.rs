@@ -1,14 +1,14 @@
 //! Réglages de l'utilisateur.
 //!
 //! Seul fichier écrit par ExPLIA : `%APPDATA%\ExPLIA\settings.txt`, au format
-//! `clé=valeur` (une ligne par réglage ; `favorite=` est répété pour chaque favori).
+//! `clé=valeur` (une ligne par réglage ; `favorite=` et `application=` sont répétés pour chaque favori et chaque application).
 //! Les fichiers de l'utilisateur ne sont jamais modifiés.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::view::{Category, Columns, SortKey, SortOrder, ViewMode};
+use crate::view::{Columns, Side, SortKey, SortOrder, ViewMode};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -17,15 +17,27 @@ pub struct Settings {
     pub sort_key: SortKey,
     pub sort_order: SortOrder,
     pub show_preview: bool,
-    pub preview_expanded: bool,
+    /// Volet de détail au centre, navigation dans le volet latéral (triangle d'échange).
+    pub detail_central: bool,
     pub skip_folder_sizes: bool,
+    /// Option « Récursive » : recherche, dossiers vides et doublons parcourent les sous-dossiers.
+    pub recursive: bool,
+    /// Taille minimale (en Mo) des fichiers examinés par la recherche de doublons.
+    pub duplicate_min_mb: u32,
+    /// Taille minimale (en Mo) des fichiers listés par « Fichiers > N Mo ».
+    pub large_min_mb: u32,
+    /// Barre d'occupation (et pourcentage) des lecteurs dans la barre latérale.
+    pub show_drive_usage: bool,
     pub view_mode: ViewMode,
     /// Afficher les dossiers et fichiers cachés.
     pub show_hidden: bool,
     pub columns: Columns,
-    pub categories: Vec<Category>,
-    pub custom_extensions: String,
     pub favorites: Vec<PathBuf>,
+    /// Disposition : côté des onglets de la barre latérale et du volet de détail.
+    pub tabs_side: Side,
+    pub preview_side: Side,
+    /// Applications ajoutées par l'utilisateur (onglet « Applications »).
+    pub applications: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -35,14 +47,19 @@ impl Default for Settings {
             sort_key: SortKey::Name,
             sort_order: SortOrder::Ascending,
             show_preview: true,
-            preview_expanded: false,
+            detail_central: false,
             skip_folder_sizes: false,
+            recursive: true,
+            duplicate_min_mb: 50,
+            large_min_mb: 50,
+            show_drive_usage: true,
             view_mode: ViewMode::List,
             show_hidden: false,
             columns: Columns::default(),
-            categories: Vec::new(),
-            custom_extensions: String::new(),
             favorites: Vec::new(),
+            tabs_side: Side::Left,
+            preview_side: Side::Right,
+            applications: Vec::new(),
         }
     }
 }
@@ -85,8 +102,24 @@ impl Settings {
                     }
                 }
                 "show_preview" => settings.show_preview = value != "false",
-                "preview_expanded" => settings.preview_expanded = value == "true",
+                "detail_central" => settings.detail_central = value == "true",
                 "skip_folder_sizes" => settings.skip_folder_sizes = value == "true",
+                "recursive" => settings.recursive = value != "false",
+                "duplicate_min_mb" => {
+                    if let Ok(mb) = value.parse::<u32>()
+                        && (1..=1_000_000).contains(&mb)
+                    {
+                        settings.duplicate_min_mb = mb;
+                    }
+                }
+                "large_min_mb" => {
+                    if let Ok(mb) = value.parse::<u32>()
+                        && (1..=1_000_000).contains(&mb)
+                    {
+                        settings.large_min_mb = mb;
+                    }
+                }
+                "show_drive_usage" => settings.show_drive_usage = value != "false",
                 "view_mode" => {
                     if let Some(mode) = ViewMode::from_id(value) {
                         settings.view_mode = mode;
@@ -94,14 +127,20 @@ impl Settings {
                 }
                 "show_hidden" => settings.show_hidden = value == "true",
                 "columns" => settings.columns = Columns::from_ids(value),
-                "categories" => {
-                    settings.categories = value
-                        .split(',')
-                        .filter_map(|id| Category::from_id(id.trim()))
-                        .collect();
-                }
-                "custom_extensions" => settings.custom_extensions = value.to_string(),
                 "favorite" if !value.is_empty() => settings.favorites.push(PathBuf::from(value)),
+                "tabs_side" => {
+                    if let Some(side) = Side::from_id(value) {
+                        settings.tabs_side = side;
+                    }
+                }
+                "preview_side" => {
+                    if let Some(side) = Side::from_id(value) {
+                        settings.preview_side = side;
+                    }
+                }
+                "application" if !value.is_empty() => {
+                    settings.applications.push(PathBuf::from(value));
+                }
                 _ => {}
             }
         }
@@ -121,18 +160,22 @@ impl Settings {
         text += &format!("sort_key={}\n", self.sort_key.id());
         text += &format!("sort_order={}\n", self.sort_order.id());
         text += &format!("show_preview={}\n", self.show_preview);
-        text += &format!("preview_expanded={}\n", self.preview_expanded);
+        text += &format!("detail_central={}\n", self.detail_central);
         text += &format!("skip_folder_sizes={}\n", self.skip_folder_sizes);
+        text += &format!("show_drive_usage={}\n", self.show_drive_usage);
+        text += &format!("recursive={}\n", self.recursive);
+        text += &format!("duplicate_min_mb={}\n", self.duplicate_min_mb);
+        text += &format!("large_min_mb={}\n", self.large_min_mb);
         text += &format!("view_mode={}\n", self.view_mode.id());
         text += &format!("show_hidden={}\n", self.show_hidden);
+        text += &format!("tabs_side={}\n", self.tabs_side.id());
+        text += &format!("preview_side={}\n", self.preview_side.id());
         text += &format!("columns={}\n", self.columns.ids().join(","));
-        let categories: Vec<&str> = self.categories.iter().map(|c| c.id()).collect();
-        text += &format!("categories={}\n", categories.join(","));
-        // Une extension personnalisée ne contient jamais de saut de ligne.
-        let custom = self.custom_extensions.replace(['\r', '\n'], " ");
-        text += &format!("custom_extensions={custom}\n");
         for favorite in &self.favorites {
             text += &format!("favorite={}\n", favorite.display());
+        }
+        for application in &self.applications {
+            text += &format!("application={}\n", application.display());
         }
         text
     }
@@ -175,9 +218,13 @@ mod tests {
             sort_key: SortKey::Size,
             sort_order: SortOrder::Descending,
             show_preview: false,
-            preview_expanded: true,
+            detail_central: true,
             skip_folder_sizes: true,
-            view_mode: ViewMode::Gallery,
+            show_drive_usage: false,
+            recursive: false,
+            duplicate_min_mb: 120,
+            large_min_mb: 300,
+            view_mode: ViewMode::Videos,
             show_hidden: true,
             columns: Columns {
                 size: false,
@@ -185,9 +232,10 @@ mod tests {
                 duration: true,
                 ..Columns::default()
             },
-            categories: vec![Category::Image, Category::Code],
-            custom_extensions: "mkv, .pdf".to_string(),
             favorites: vec![PathBuf::from("C:\\Projets"), PathBuf::from("D:\\Photos")],
+            tabs_side: Side::Right,
+            preview_side: Side::Left,
+            applications: vec![PathBuf::from("C:\\Outils\\app.exe")],
         }
     }
 
@@ -232,12 +280,6 @@ mod tests {
             Settings::parse("columns=\n").columns.ids(),
             Vec::<&str>::new()
         );
-    }
-
-    #[test]
-    fn unknown_categories_are_ignored() {
-        let parsed = Settings::parse("categories=image,video,code\n");
-        assert_eq!(parsed.categories, [Category::Image, Category::Code]);
     }
 
     #[test]

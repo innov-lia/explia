@@ -9,23 +9,25 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::containers::menu::{MenuButton, MenuConfig};
 use eframe::egui::{self, PopupCloseBehavior};
 
+use crate::clipboard;
+use crate::copy::{self, CopyReport};
 use crate::dates;
+use crate::dragdrop;
 use crate::favorites::Favorites;
 use crate::fileops;
 use crate::fs_nav::{self, Entry, Location};
 use crate::launch;
 use crate::media::{self, MediaInfo, MediaKind};
-use crate::places::{self, Drive, DriveKind};
+use crate::places::{self, Drive, DriveInfo, DriveKind};
 use crate::player::{self, Player, PlayerState};
 use crate::preview::{self, ArchivePreview, ImagePreview, PreviewContent, TextPreview};
+use crate::scan;
 use crate::settings::Settings;
 use crate::trash;
-use crate::view::{self, Category, Columns, ExtensionFilter, SortKey, SortOrder, ViewMode};
+use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
 
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
 pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
-/// Largeur du volet d'aperçu agrandi, en part de la largeur disponible.
-const PREVIEW_EXPANDED_RATIO: f32 = 0.65;
 /// Message affiché quand on tente de mélanger dossiers et fichiers.
 const MIXED_TYPES_MESSAGE: &str =
     "Sélection d'un seul type à la fois : dossiers ou fichiers, pas les deux.";
@@ -39,6 +41,12 @@ const EDIT_BUTTON_WIDTH: f32 = 120.0;
 const CONFIRM_ARMING_SECONDS: f64 = 0.6;
 /// Déplacement maximal du pointeur, en points, pendant un clic maintenu.
 const LONG_PRESS_TOLERANCE: f32 = 12.0;
+/// Déplacement (en points) au-delà duquel un appui sur une ligne devient un glisser vers
+/// l'extérieur (plus que la tolérance du clic maintenu).
+const DRAG_OUT_DISTANCE: f32 = 16.0;
+/// Après un glisser lancé depuis ExPLIA, durée (s) pendant laquelle un dépôt dans sa propre
+/// fenêtre est ignoré : relâcher le bouton dans ExPLIA ne crée pas de copie par mégarde.
+const OWN_DROP_GUARD_SECONDS: f64 = 1.0;
 /// Nombre maximal de threads qui calculent les tailles de dossiers ou lisent des métadonnées.
 const MAX_SIZE_WORKERS: usize = 4;
 /// Côté d'une tuile de la grille de miniatures, en points (hors espacement).
@@ -49,9 +57,85 @@ const GALLERY_LABEL_HEIGHT: f32 = 22.0;
 const GALLERY_THUMB_PIXELS: u32 = 256;
 /// Nombre maximal de miniatures décodées en même temps.
 const MAX_THUMBS_IN_FLIGHT: usize = 6;
-/// Largeurs minimale et maximale d'une colonne de la navigation « style Mac ».
-const COLUMN_VIEW_MIN_WIDTH: f32 = 150.0;
-const COLUMN_VIEW_MAX_WIDTH: f32 = 340.0;
+/// Nom de référence qui fixe la largeur de toutes les colonnes de la navigation « style Mac » :
+/// les noms plus longs sont coupés par « … ».
+const COLUMN_VIEW_REFERENCE_NAME: &str = "MP3Studio YouTube Downloa";
+/// Largeur des onglets (« intercalaires ») du classeur de la barre latérale.
+const SIDEBAR_TAB_WIDTH: f32 = 26.0;
+/// Largeur d'ouverture de la barre latérale, en points.
+const SIDEBAR_DEFAULT_WIDTH: f32 = 250.0;
+/// Hauteur de la barre d'occupation d'un lecteur.
+const DRIVE_BAR_HEIGHT: f32 = 16.0;
+/// Largeurs des deux colonnes à gauche de la grille d'images : lecteurs et navigation.
+/// Largeur de la barre de recherche, en haut de la zone centrale.
+const SEARCH_WIDTH: f32 = 300.0;
+/// Place réservée à la case « Récursive », à gauche de la barre de recherche.
+const RECURSIVE_WIDTH: f32 = 110.0;
+/// Libellé du filtre « Sélection », à droite de la barre de recherche (mesuré pour sa place).
+const SELECTION_MENU_LABEL: &str = "⏷ Sélection";
+/// Libellés des boutons de la barre du volet de détail (mesurés pour sa largeur minimale).
+const OPTION_COLUMNS_LABEL: &str = "▥ Colonnes";
+const OPTION_IMAGES_LABEL: &str = "🖼 Images";
+const OPTION_VIDEOS_LABEL: &str = "🎬 Vidéos";
+const GALLERY_DRIVES_WIDTH: f32 = 170.0;
+const GALLERY_NAV_WIDTH: f32 = 210.0;
+/// Agrandissement du texte et des boutons des barres du haut, en points.
+const TOOLBAR_TEXT_BOOST: f32 = 2.0;
+
+/// Nature des résultats affichés à la place du contenu du dossier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultKind {
+    /// Recherche récursive par nom.
+    Search,
+    /// Dossiers sans aucun fichier.
+    EmptyFolders,
+    /// Fichiers de même contenu.
+    Duplicates,
+    /// Fichiers plus gros que le seuil, du plus gros au plus petit.
+    LargeFiles,
+}
+
+/// Résultats d'un parcours (recherche récursive, dossiers vides, doublons), affichés dans la
+/// liste à la place du contenu du dossier jusqu'à leur fermeture ou un changement de dossier.
+struct Results {
+    kind: ResultKind,
+    /// Parcours en cours (les résultats arrivent au fur et à mesure).
+    running: bool,
+    /// Recherche limitée à `scan::SEARCH_LIMIT` résultats.
+    truncated: bool,
+    /// Avancement du parcours (doublons).
+    progress: Option<String>,
+}
+
+/// Onglets (« intercalaires ») de la barre latérale : le classeur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarTab {
+    Pc,
+    Home,
+    Favorites,
+    Apps,
+    Network,
+}
+
+impl SidebarTab {
+    const ALL: [SidebarTab; 5] = [
+        SidebarTab::Pc,
+        SidebarTab::Home,
+        SidebarTab::Favorites,
+        SidebarTab::Apps,
+        SidebarTab::Network,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            SidebarTab::Pc => "Ce PC",
+            SidebarTab::Home => "Home",
+            SidebarTab::Favorites => "Favoris",
+            SidebarTab::Apps => "Applications",
+            SidebarTab::Network => "Réseau",
+        }
+    }
+}
 
 /// Colonnes optionnelles du tableau.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +158,16 @@ impl Column {
         }
     }
 
+    /// Critère de tri d'un clic sur l'en-tête (`None` : dimensions et durée, pas triables).
+    fn sort_key(self) -> Option<SortKey> {
+        match self {
+            Column::Created => Some(SortKey::Created),
+            Column::Modified => Some(SortKey::Modified),
+            Column::Size => Some(SortKey::Size),
+            Column::Dimensions | Column::Duration => None,
+        }
+    }
+
     fn width(self) -> f32 {
         match self {
             Column::Dimensions => 105.0,
@@ -87,7 +181,8 @@ impl Column {
 /// Résultat renvoyé à l'interface par un thread de travail.
 enum Event {
     Preview(PathBuf, Result<PreviewContent, String>),
-    DriveSize(PathBuf, Option<u64>),
+    /// Capacité et occupation d'un lecteur (`None` si le lecteur n'est pas prêt).
+    DriveInfo(PathBuf, Option<DriveInfo>),
     /// Taille d'un dossier ; `generation` identifie le listing concerné.
     FolderSize {
         generation: u64,
@@ -104,6 +199,31 @@ enum Event {
     Thumb(PathBuf, Option<ImagePreview>),
     /// Lecteur audio / vidéo prêt (ou échec), après le chargement de VLC.
     PlayerReady(PathBuf, Result<Player, String>),
+    /// Lot de résultats d'un parcours ; `generation` identifie le parcours concerné.
+    ScanBatch {
+        generation: u64,
+        entries: Vec<Entry>,
+    },
+    /// Groupes de doublons trouvés (un groupe = des fichiers de même contenu).
+    ScanGroups {
+        generation: u64,
+        groups: Vec<Vec<Entry>>,
+    },
+    /// Avancement d'un parcours.
+    ScanProgress {
+        generation: u64,
+        text: String,
+    },
+    /// Fin d'une copie (Coller, dépôt) dans le dossier `dest`.
+    CopyDone {
+        dest: PathBuf,
+        report: CopyReport,
+    },
+    /// Fin d'un parcours ; `truncated` : résultats limités.
+    ScanDone {
+        generation: u64,
+        truncated: bool,
+    },
 }
 
 /// Lecture intégrée en cours dans le volet d'aperçu.
@@ -147,9 +267,17 @@ enum PreviewState {
 /// Action demandée par l'interface pendant une frame, appliquée ensuite.
 enum Action {
     Go(Location),
+    /// Clic sur un dossier de la barre latérale : l'ouvre, et les flèches ↑ / ↓ parcourent
+    /// ensuite la liste de l'onglet.
+    SidebarGo(PathBuf),
+    /// Change d'onglet dans le classeur de la barre latérale.
+    SidebarTab(SidebarTab),
     Select(Entry),
     AddFavorite(PathBuf),
     RemoveFavorite(PathBuf),
+    /// Ajoute un exécutable à l'onglet « Applications ».
+    AddApplication(PathBuf),
+    RemoveApplication(PathBuf),
     /// Ouvre un fichier avec son application associée (ou lance un exécutable).
     Open(PathBuf),
     /// Lance un exécutable en tant qu'administrateur (fenêtre UAC).
@@ -178,8 +306,60 @@ enum Action {
     StopPlayer,
     /// Change la façon d'afficher le dossier (liste, colonnes, grille d'images).
     SetViewMode(ViewMode),
+    /// Lance la recherche des dossiers vides (selon l'option « Récursive »).
+    FindEmptyFolders,
+    /// Lance la recherche des doublons (selon l'option « Récursive » et le seuil en Mo).
+    FindDuplicates,
+    /// Lance la liste des fichiers plus gros que le seuil en Mo (selon l'option « Récursive »).
+    FindLargeFiles,
+    /// Sélectionne les copies : tout sauf le premier fichier de chaque groupe de doublons.
+    SelectDuplicateCopies,
+    /// Ferme les résultats et revient au contenu du dossier.
+    CloseResults,
+    /// Passe la vidéo en plein écran, ou en sort.
+    ToggleVideoFullscreen,
+    /// Copie le chemin complet dans le presse-papiers (texte).
+    CopyPath(PathBuf),
+    /// Copie des fichiers ou dossiers dans le presse-papiers de Windows (à coller ailleurs).
+    CopyFiles(Vec<PathBuf>),
+    /// Colle dans `dest` les fichiers et dossiers du presse-papiers (copie, sans écrasement).
+    Paste {
+        dest: PathBuf,
+    },
+    /// Copie des éléments déposés dans la fenêtre vers `dest` (sans écrasement).
+    CopyInto {
+        sources: Vec<PathBuf>,
+        dest: PathBuf,
+    },
+    /// Glisse des éléments vers une autre application (Bureau, Explorateur), en copie.
+    DragOut(Vec<PathBuf>),
+    /// Ouvre un dossier dans un nouvel onglet.
+    NewTab(PathBuf),
+    /// Affiche l'onglet donné.
+    SwitchTab(usize),
+    /// Ferme l'onglet donné.
+    CloseTab(usize),
+    /// Ouvre PowerShell dans un dossier, éventuellement en administrateur (UAC).
+    OpenPowerShell {
+        dir: PathBuf,
+        admin: bool,
+    },
+    /// Demande la suppression d'un dossier qui n'est pas une ligne de la liste (le dossier
+    /// affiché lui-même, ou un dossier parent d'un résultat).
+    AskDeleteFolder(PathBuf),
+    /// Clic sur un en-tête de colonne : trie dessus, ou inverse l'ordre s'il est déjà actif.
+    SortBy(SortKey),
     /// Affiche ou masque les dossiers et fichiers cachés.
     ToggleHidden,
+    /// Ctrl+clic (ou Maj+clic) dans une colonne qui n'est pas la dernière (vue en colonnes) :
+    /// cette colonne devient le dossier affiché, l'élément qui y était en surbrillance est
+    /// sélectionné, puis `entry` est ajouté (ou la plage jusqu'à `entry` si `range`).
+    ColumnMultiSelect {
+        dir: PathBuf,
+        anchor: Option<PathBuf>,
+        entry: Entry,
+        range: bool,
+    },
     /// Ouvre un dossier et y sélectionne un fichier (vue en colonnes).
     GoSelect {
         dir: PathBuf,
@@ -220,20 +400,59 @@ pub struct ExpliaApp {
     focus_address: bool,
     error: Option<String>,
     drives: Vec<Drive>,
-    /// Taille totale des lecteurs : absente tant que le calcul est en cours,
+    /// Capacité et occupation des lecteurs : absente tant que le calcul est en cours,
     /// `None` si le lecteur n'est pas prêt.
-    drive_sizes: HashMap<PathBuf, Option<u64>>,
+    drive_infos: HashMap<PathBuf, Option<DriveInfo>>,
+    /// Option : barre d'occupation et pourcentage des lecteurs.
+    show_drive_usage: bool,
+    /// Disposition : côté des onglets de la barre latérale et du volet de détail.
+    tabs_side: Side,
+    preview_side: Side,
+    /// Onglet affiché dans la barre latérale.
+    sidebar_tab: SidebarTab,
+    /// Le clavier pilote la liste des lecteurs : ↑ / ↓ changent de lecteur, → revient au dossier.
+    sidebar_focus: bool,
+    /// Lecteur choisi au clavier (index dans `drives`).
+    sidebar_cursor: Option<usize>,
+    /// Dossier de l'utilisateur courant (onglet « Home »).
+    home: Option<PathBuf>,
+    /// Sous-dossiers du dossier de l'utilisateur.
+    home_dirs: Vec<Entry>,
     favorites: Favorites,
+    /// Applications de l'onglet « Applications » (ajoutées par l'utilisateur).
+    applications: Favorites,
+    /// ExPLIA lui-même, toujours en tête de l'onglet « Applications ».
+    own_exe: Option<PathBuf>,
     /// Contenu brut du dossier courant.
     entries: Vec<Entry>,
     /// Contenu affiché : filtré par extension puis trié.
     visible: Vec<Entry>,
     sort_key: SortKey,
     sort_order: SortOrder,
-    filter: ExtensionFilter,
+    /// Option « Récursive » : recherche, dossiers vides et doublons parcourent les sous-dossiers.
+    recursive: bool,
+    /// Taille minimale (Mo) des fichiers examinés pour les doublons.
+    duplicate_min_mb: u32,
+    /// Taille minimale (Mo) des fichiers listés par « Fichiers > N Mo ».
+    large_min_mb: u32,
+    /// Résultats affichés à la place du contenu du dossier.
+    results: Option<Results>,
+    /// Éléments trouvés par le parcours en cours ou terminé.
+    result_entries: Vec<Entry>,
+    /// Numéro de groupe (à partir de 1) de chaque fichier en doublon.
+    duplicate_groups: HashMap<PathBuf, usize>,
+    /// Identifie le parcours courant ; l'incrémenter l'annule.
+    scan_generation: Arc<AtomicU64>,
+    /// Recherche (barre au-dessus de la liste) : motifs de noms, voir `view::matches_query`.
+    search: String,
+    /// Donne le focus à la barre de recherche à la prochaine image (Ctrl+F).
+    focus_search: bool,
     show_preview: bool,
     /// Volet d'aperçu agrandi (flèche « < » / « > »).
-    preview_expanded: bool,
+    /// Volet de détail au centre et navigation dans le volet latéral (triangle d'échange).
+    detail_central: bool,
+    /// Vidéo en plein écran (double-clic sur la vidéo du volet de détail).
+    video_fullscreen: bool,
     /// Option : ne pas calculer la taille des dossiers.
     skip_folder_sizes: bool,
     /// Identifie le listing courant ; l'incrémenter annule les calculs en cours.
@@ -250,10 +469,6 @@ pub struct ExpliaApp {
     media_generation: Arc<AtomicU64>,
     /// Listings des dossiers parents, pour la vue en colonnes.
     column_cache: HashMap<PathBuf, Vec<Entry>>,
-    /// Largeur de chaque colonne parente de la vue en colonnes.
-    column_widths: HashMap<PathBuf, f32>,
-    /// Largeur de la dernière colonne (dossier courant) : dossier, nombre d'éléments, largeur.
-    current_column_width: Option<(PathBuf, usize, f32)>,
     /// Après un changement de dossier : fichier à sélectionner (vue en colonnes).
     select_path_after_nav: Option<PathBuf>,
     /// Miniatures de la grille d'images.
@@ -278,6 +493,18 @@ pub struct ExpliaApp {
     multi_toggle_mode: bool,
     /// Un clic maintenu vient d'être traité : le relâchement ne doit pas compter comme un clic.
     long_press_done: bool,
+    /// Un glisser vers l'extérieur a déjà été lancé pour l'appui en cours.
+    drag_out_done: bool,
+    /// Instant (s) de la fin du dernier glisser lancé depuis ExPLIA (garde contre l'auto-dépôt).
+    drag_out_ended_at: Option<f64>,
+    /// Ctrl+V était enfoncé à l'image précédente (détection de l'appui).
+    paste_keys_were_down: bool,
+    /// Une copie est en cours en arrière-plan.
+    copying: bool,
+    /// Onglets : dossier de chaque onglet ; vide tant qu'un seul dossier est ouvert.
+    tabs: Vec<PathBuf>,
+    /// Onglet affiché.
+    active_tab: usize,
     /// Message d'information (non erroné) affiché dans la barre d'état.
     notice: Option<String>,
     /// Renommage en cours (une seule ligne à la fois).
@@ -292,8 +519,6 @@ pub struct ExpliaApp {
     last_scroll: (f32, f32),
     /// Après l'entrée dans un dossier au clavier (flèche droite) : sélectionne son premier élément.
     select_first_after_nav: bool,
-    /// Lecteur en surbrillance dans la vue « Ce PC » (flèches).
-    drive_cursor: Option<usize>,
     preview: PreviewState,
     event_tx: Sender<Event>,
     event_rx: Receiver<Event>,
@@ -312,19 +537,35 @@ impl ExpliaApp {
             address: location.display(),
             location,
             error: None,
-            drives: places::detect_drives(),
-            drive_sizes: HashMap::new(),
+            drives: Vec::new(),
+            drive_infos: HashMap::new(),
+            show_drive_usage: settings.show_drive_usage,
+            tabs_side: settings.tabs_side,
+            preview_side: settings.preview_side,
+            sidebar_tab: SidebarTab::Pc,
+            sidebar_focus: false,
+            sidebar_cursor: None,
+            home: places::user_home().filter(|home| home.is_dir()),
+            home_dirs: Vec::new(),
             favorites: Favorites::from_paths(settings.favorites.clone()),
+            applications: Favorites::from_paths(settings.applications.clone()),
+            own_exe: std::env::current_exe().ok(),
             entries: Vec::new(),
             visible: Vec::new(),
             sort_key: settings.sort_key,
             sort_order: settings.sort_order,
-            filter: ExtensionFilter::new(
-                settings.categories.clone(),
-                settings.custom_extensions.clone(),
-            ),
+            search: String::new(),
+            recursive: settings.recursive,
+            duplicate_min_mb: settings.duplicate_min_mb,
+            large_min_mb: settings.large_min_mb,
+            results: None,
+            result_entries: Vec::new(),
+            duplicate_groups: HashMap::new(),
+            scan_generation: Arc::new(AtomicU64::new(0)),
+            focus_search: false,
             show_preview: settings.show_preview,
-            preview_expanded: settings.preview_expanded,
+            detail_central: settings.detail_central,
+            video_fullscreen: false,
             skip_folder_sizes: settings.skip_folder_sizes,
             view_mode: settings.view_mode,
             show_hidden: settings.show_hidden,
@@ -332,8 +573,6 @@ impl ExpliaApp {
             media: HashMap::new(),
             media_generation: Arc::new(AtomicU64::new(0)),
             column_cache: HashMap::new(),
-            column_widths: HashMap::new(),
-            current_column_width: None,
             select_path_after_nav: None,
             thumbs: HashMap::new(),
             thumbs_requested: HashSet::new(),
@@ -350,6 +589,12 @@ impl ExpliaApp {
             confirm_delete: false,
             multi_toggle_mode: false,
             long_press_done: false,
+            drag_out_done: false,
+            drag_out_ended_at: None,
+            paste_keys_were_down: false,
+            copying: false,
+            tabs: Vec::new(),
+            active_tab: 0,
             notice: None,
             renaming: None,
             delete_asked_at: None,
@@ -357,35 +602,66 @@ impl ExpliaApp {
             scroll_to_index: None,
             last_scroll: (0.0, 0.0),
             select_first_after_nav: false,
-            drive_cursor: None,
             preview: PreviewState::None,
             event_tx,
             event_rx,
         };
-        // Au lancement : le dossier de l'utilisateur courant (à défaut, la vue « Ce PC »).
-        let start = places::user_home()
-            .filter(|home| home.is_dir())
-            .map_or(Location::ThisPc, Location::Dir);
-        app.navigate(start.clone());
-        if app.location != start {
-            app.navigate(Location::ThisPc);
+        app.refresh_drives();
+        app.refresh_home_dirs();
+        // Au lancement : le dossier de l'utilisateur courant (à défaut, le premier lecteur).
+        // La vue du centre n'affiche jamais la liste des lecteurs : elle est dans la barre latérale.
+        let start = match &app.home {
+            Some(home) => Some(home.clone()),
+            None => app.drives.first().map(|drive| drive.path.clone()),
+        };
+        app.sidebar_tab = if app.home.is_some() {
+            SidebarTab::Home
+        } else {
+            SidebarTab::Pc
+        };
+        if let Some(start) = start {
+            app.navigate(Location::Dir(start));
         }
         app
     }
 
-    /// Calcule la taille des lecteurs dans un thread (un lecteur réseau peut être lent).
-    fn start_drive_sizes(&mut self) {
-        self.drive_sizes.clear();
+    /// Relit les lecteurs et calcule leur capacité dans un thread (un lecteur réseau peut
+    /// être lent). Les valeurs déjà connues restent affichées jusqu'à leur mise à jour.
+    fn refresh_drives(&mut self) {
+        self.drives = places::detect_drives();
         let roots: Vec<PathBuf> = self.drives.iter().map(|d| d.path.clone()).collect();
+        self.drive_infos.retain(|path, _| roots.contains(path));
         let tx = self.event_tx.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             for root in roots {
-                let size = places::drive_total_size(&root);
-                let _ = tx.send(Event::DriveSize(root, size));
+                let info = places::drive_info(&root);
+                let _ = tx.send(Event::DriveInfo(root, info));
                 ctx.request_repaint();
             }
         });
+    }
+
+    /// Relit les sous-dossiers du dossier de l'utilisateur (onglet « Home »).
+    fn refresh_home_dirs(&mut self) {
+        self.home_dirs = self
+            .home
+            .as_deref()
+            .and_then(|home| fs_nav::list_dir(home).ok())
+            .map(|entries| entries.into_iter().filter(|e| e.is_dir).collect())
+            .unwrap_or_default();
+    }
+
+    /// Affiche un onglet du classeur ; son contenu est relu (lecteurs, dossiers).
+    fn set_sidebar_tab(&mut self, tab: SidebarTab) {
+        self.sidebar_tab = tab;
+        self.sidebar_focus = false;
+        self.sidebar_cursor = None;
+        match tab {
+            SidebarTab::Pc | SidebarTab::Network => self.refresh_drives(),
+            SidebarTab::Home => self.refresh_home_dirs(),
+            SidebarTab::Favorites | SidebarTab::Apps => {}
+        }
     }
 
     /// Lance le calcul de la taille des sous-dossiers du dossier affiché.
@@ -459,19 +735,20 @@ impl ExpliaApp {
         self.window_sized = true;
     }
 
-    /// Oublie les listings et les largeurs de la vue en colonnes (tri, filtre, cachés ou
-    /// contenu modifiés).
+    /// Oublie les listings de la vue en colonnes (tri, recherche, cachés ou contenu modifiés).
     fn invalidate_columns(&mut self) {
         self.column_cache.clear();
-        self.column_widths.clear();
-        self.current_column_width = None;
     }
 
     /// Applique le filtre d'extension, le masquage des éléments cachés et le tri à une liste.
-    fn filtered_and_sorted(&self, entries: &[Entry]) -> Vec<Entry> {
+    /// `with_search` : applique aussi la recherche (dossier affiché, pas les colonnes parentes).
+    fn filtered_and_sorted(&self, entries: &[Entry], with_search: bool) -> Vec<Entry> {
         let mut list: Vec<Entry> = entries
             .iter()
-            .filter(|entry| (self.show_hidden || !entry.hidden) && self.filter.matches(entry))
+            .filter(|entry| {
+                (self.show_hidden || !entry.hidden)
+                    && (!with_search || view::matches_query(&entry.name, &self.search))
+            })
             .cloned()
             .collect();
         view::sort_entries(&mut list, self.sort_key, self.sort_order);
@@ -479,7 +756,310 @@ impl ExpliaApp {
     }
 
     fn recompute_visible(&mut self) {
-        self.visible = self.filtered_and_sorted(&self.entries);
+        if let Some(results) = &self.results {
+            let mut list: Vec<Entry> = self
+                .result_entries
+                .iter()
+                // La recherche de la barre filtre aussi les autres résultats (hors recherche récursive).
+                .filter(|e| {
+                    results.kind == ResultKind::Search || view::matches_query(&e.name, &self.search)
+                })
+                .cloned()
+                .collect();
+            // Les doublons restent groupés et les gros fichiers classés du plus gros au plus petit ;
+            // le reste suit le tri choisi.
+            if !matches!(
+                results.kind,
+                ResultKind::Duplicates | ResultKind::LargeFiles
+            ) {
+                view::sort_entries(&mut list, self.sort_key, self.sort_order);
+            }
+            self.visible = list;
+            return;
+        }
+        self.visible = self.filtered_and_sorted(&self.entries, true);
+    }
+
+    /// Copie des éléments dans `dest`, en arrière-plan (jamais d'écrasement, voir `copy`).
+    fn start_copy(&mut self, sources: Vec<PathBuf>, dest: PathBuf) {
+        if sources.is_empty() {
+            return;
+        }
+        if self.copying {
+            self.error = Some("Une copie est déjà en cours.".to_string());
+            return;
+        }
+        self.copying = true;
+        self.error = None;
+        self.notice = Some(format!(
+            "Copie de {} élément(s) vers « {} »…",
+            sources.len(),
+            dest.display()
+        ));
+        let tx = self.event_tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let report = copy::copy_into(&sources, &dest);
+            let _ = tx.send(Event::CopyDone { dest, report });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Fin d'une copie : bilan dans la barre d'état et dossier relu s'il est affiché.
+    fn on_copy_done(&mut self, dest: &Path, report: CopyReport) {
+        self.copying = false;
+        if self.location == Location::Dir(dest.to_path_buf()) {
+            self.refresh_listing();
+            // Les éléments copiés sont sélectionnés (un seul type à la fois).
+            if let Some(first) = report.copied.first()
+                && let Some(entry) = self.visible.iter().find(|e| e.path == *first).cloned()
+            {
+                let ctx = self.ctx.clone();
+                self.select(&ctx, entry);
+            }
+        }
+        let copied = report.copied.len();
+        if report.errors.is_empty() {
+            self.error = None;
+            self.notice = Some(format!(
+                "{copied} élément(s) copié(s) dans « {} ».",
+                dest.display()
+            ));
+        } else {
+            let first = &report.errors[0];
+            let more = report.errors.len() - 1;
+            self.error = Some(if more > 0 {
+                format!("{copied} élément(s) copié(s) ; {first} (et {more} autre(s) problème(s))")
+            } else {
+                format!("{copied} élément(s) copié(s) ; {first}")
+            });
+        }
+    }
+
+    /// Ferme un onglet ; s'il était affiché, on passe à son voisin.
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let was_active = index == self.active_tab;
+        self.tabs.remove(index);
+        if index < self.active_tab {
+            self.active_tab -= 1;
+        }
+        self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        let next = self.tabs.get(self.active_tab).cloned();
+        if self.tabs.len() <= 1 {
+            // Un seul dossier ouvert : plus de barre d'onglets.
+            self.tabs.clear();
+            self.active_tab = 0;
+        }
+        if was_active && let Some(path) = next {
+            self.navigate(Location::Dir(path));
+        }
+    }
+
+    /// Éléments glissés depuis une ligne : toute la multi-sélection si la ligne en fait partie,
+    /// sinon la ligne seule.
+    fn drag_targets(&self, entry: &Entry) -> Vec<PathBuf> {
+        if self.multi.iter().any(|m| m.path == entry.path) {
+            self.multi.iter().map(|m| m.path.clone()).collect()
+        } else {
+            vec![entry.path.clone()]
+        }
+    }
+
+    /// Appui maintenu sur une ligne et pointeur déplacé : lance un glisser vers l'extérieur.
+    fn drag_out_check(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        entry: &Entry,
+    ) -> Option<Action> {
+        if self.drag_out_done || !response.is_pointer_button_down_on() {
+            return None;
+        }
+        let moved = ui.input(
+            |i| match (i.pointer.press_origin(), i.pointer.latest_pos()) {
+                (Some(origin), Some(position)) => origin.distance(position) > DRAG_OUT_DISTANCE,
+                _ => false,
+            },
+        );
+        moved.then(|| Action::DragOut(self.drag_targets(entry)))
+    }
+
+    /// Annule le parcours en cours et ferme les résultats.
+    fn close_results(&mut self) {
+        self.scan_generation.fetch_add(1, Ordering::SeqCst);
+        self.results = None;
+        self.result_entries.clear();
+        self.duplicate_groups.clear();
+    }
+
+    /// Lance un parcours en arrière-plan sur le dossier affiché ; les résultats remplacent le
+    /// contenu du dossier dans la liste. Un parcours précédent est annulé.
+    fn start_scan(&mut self, kind: ResultKind) {
+        let Location::Dir(root) = self.location.clone() else {
+            return;
+        };
+        let generation = self.scan_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.results = Some(Results {
+            kind,
+            running: true,
+            truncated: false,
+            progress: None,
+        });
+        self.result_entries.clear();
+        self.duplicate_groups.clear();
+        self.clear_multi();
+        self.selected = None;
+        self.preview = PreviewState::None;
+        self.error = None;
+        self.notice = None;
+        self.recompute_visible();
+        let query = self.search.clone();
+        let recursive = self.recursive;
+        let show_hidden = self.show_hidden;
+        let min_bytes = u64::from(self.duplicate_min_mb) * 1024 * 1024;
+        let large_min_bytes = u64::from(self.large_min_mb) * 1024 * 1024;
+        let current = Arc::clone(&self.scan_generation);
+        let tx = self.event_tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let cancelled = || current.load(Ordering::Relaxed) != generation;
+            let send = |event: Event| {
+                let _ = tx.send(event);
+                ctx.request_repaint();
+            };
+            let mut truncated = false;
+            match kind {
+                ResultKind::Search => {
+                    truncated = scan::search(
+                        &root,
+                        &query,
+                        show_hidden,
+                        scan::SEARCH_LIMIT,
+                        &cancelled,
+                        &mut |entries| {
+                            send(Event::ScanBatch {
+                                generation,
+                                entries,
+                            })
+                        },
+                    );
+                }
+                ResultKind::EmptyFolders => {
+                    let folders = scan::find_empty_folders(&root, recursive, &cancelled);
+                    let entries: Vec<Entry> = folders
+                        .iter()
+                        .filter_map(|path| fs_nav::entry_from_path(path))
+                        .collect();
+                    send(Event::ScanBatch {
+                        generation,
+                        entries,
+                    });
+                }
+                ResultKind::Duplicates => {
+                    let found = scan::find_duplicates(
+                        &root,
+                        recursive,
+                        min_bytes,
+                        &cancelled,
+                        &mut |count| {
+                            send(Event::ScanProgress {
+                                generation,
+                                text: format!("{count} fichier(s) examiné(s)…"),
+                            });
+                        },
+                    );
+                    let groups: Vec<Vec<Entry>> = found
+                        .iter()
+                        .map(|group| {
+                            group
+                                .files
+                                .iter()
+                                .filter_map(|path| fs_nav::entry_from_path(path))
+                                .collect()
+                        })
+                        .collect();
+                    send(Event::ScanGroups { generation, groups });
+                }
+                ResultKind::LargeFiles => {
+                    let found = scan::find_large_files(
+                        &root,
+                        recursive,
+                        large_min_bytes,
+                        &cancelled,
+                        &mut |count| {
+                            send(Event::ScanProgress {
+                                generation,
+                                text: format!("{count} fichier(s) trouvé(s)…"),
+                            });
+                        },
+                    );
+                    let entries: Vec<Entry> = found
+                        .iter()
+                        .filter_map(|(path, _)| fs_nav::entry_from_path(path))
+                        .collect();
+                    send(Event::ScanBatch {
+                        generation,
+                        entries,
+                    });
+                }
+            }
+            send(Event::ScanDone {
+                generation,
+                truncated,
+            });
+        });
+    }
+
+    /// Le texte de la barre de recherche a changé : recherche récursive en arrière-plan, ou
+    /// filtre immédiat du dossier affiché.
+    fn on_search_changed(&mut self) {
+        let searching = self.recursive
+            && !self.search.trim().is_empty()
+            && matches!(self.location, Location::Dir(_));
+        if searching {
+            self.start_scan(ResultKind::Search);
+            return;
+        }
+        if self
+            .results
+            .as_ref()
+            .is_some_and(|r| r.kind == ResultKind::Search)
+        {
+            self.close_results();
+            self.clear_multi();
+            self.selected = None;
+        }
+        self.recompute_visible();
+    }
+
+    /// L'option « Récursive » a changé : les résultats affichés sont recalculés.
+    fn on_recursive_changed(&mut self) {
+        if let Some(kind) = self.results.as_ref().map(|r| r.kind) {
+            if kind == ResultKind::Search {
+                self.on_search_changed();
+            } else {
+                self.start_scan(kind);
+            }
+        } else if self.recursive && !self.search.trim().is_empty() {
+            self.on_search_changed();
+        }
+    }
+
+    /// Annule la demande de suppression. Si elle visait un dossier qui n'est pas une ligne de la
+    /// liste (dossier affiché, dossier parent d'un résultat), la sélection provisoire est retirée.
+    fn cancel_delete(&mut self) {
+        self.confirm_delete = false;
+        let provisional = self
+            .selected
+            .as_ref()
+            .is_some_and(|selected| !self.visible.iter().any(|e| e.path == selected.path));
+        if provisional {
+            self.selected = None;
+            self.preview = PreviewState::None;
+        }
     }
 
     /// Famille multimédia d'un fichier si une colonne affichée a besoin de la lire.
@@ -571,6 +1151,18 @@ impl ExpliaApp {
 
     /// Change d'emplacement. En cas d'erreur, on reste sur l'emplacement actuel.
     fn navigate(&mut self, target: Location) {
+        // La vue du centre ne revient jamais sur les lecteurs : « Ce PC » ouvre l'onglet
+        // des lecteurs dans la barre latérale, et le dossier affiché ne change pas.
+        let path = match &target {
+            Location::ThisPc => {
+                self.set_sidebar_tab(SidebarTab::Pc);
+                // Les flèches ↑ / ↓ changent alors de lecteur.
+                self.sidebar_focus = true;
+                self.address = self.location.display();
+                return;
+            }
+            Location::Dir(path) => path.clone(),
+        };
         // Une lecture en cours ne suit pas dans un autre dossier.
         self.stop_player();
         let select_first = std::mem::take(&mut self.select_first_after_nav);
@@ -580,34 +1172,32 @@ impl ExpliaApp {
             Location::Dir(path) => Some(path.clone()),
             Location::ThisPc => None,
         };
-        match &target {
-            Location::ThisPc => {
-                self.drives = places::detect_drives();
-                self.entries.clear();
-                // Annule un éventuel calcul de tailles de dossiers ou de métadonnées.
-                self.folder_generation.fetch_add(1, Ordering::SeqCst);
-                self.media_generation.fetch_add(1, Ordering::SeqCst);
-                self.media.clear();
-                self.start_drive_sizes();
+        match fs_nav::list_dir(&path) {
+            Ok(entries) => {
+                self.entries = entries;
+                self.start_folder_sizes();
+                self.start_media(false);
             }
-            Location::Dir(path) => match fs_nav::list_dir(path) {
-                Ok(entries) => {
-                    self.entries = entries;
-                    self.start_folder_sizes();
-                    self.start_media(false);
-                }
-                Err(err) => {
-                    self.error = Some(format!(
-                        "Impossible d'ouvrir « {} » : {err}",
-                        path.display()
-                    ));
-                    self.address = self.location.display();
-                    return;
-                }
-            },
+            Err(err) => {
+                self.error = Some(format!(
+                    "Impossible d'ouvrir « {} » : {err}",
+                    path.display()
+                ));
+                self.address = self.location.display();
+                return;
+            }
         }
         self.error = None;
         self.notice = None;
+        self.sidebar_focus = false;
+        self.sidebar_cursor = None;
+        // La recherche et les résultats valent pour le dossier affiché : un nouveau dossier
+        // repart sans filtre.
+        self.close_results();
+        self.search.clear();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.clone_from(&path);
+        }
         self.address = target.display();
         self.location = target;
         self.selected = None;
@@ -615,7 +1205,6 @@ impl ExpliaApp {
         self.anchor = None;
         self.cursor = None;
         self.scroll_to_index = None;
-        self.drive_cursor = None;
         self.renaming = None;
         self.preview = PreviewState::None;
         // Les miniatures de la grille appartiennent au dossier quitté.
@@ -623,21 +1212,15 @@ impl ExpliaApp {
         self.thumbs_requested.clear();
         self.recompute_visible();
         // Remontée d'un niveau : le dossier quitté redevient la ligne courante.
-        if let Some(previous) = came_from {
-            match &self.location {
-                Location::Dir(now) if previous.parent() == Some(now.as_path()) => {
-                    if let Some(index) = self.visible.iter().position(|e| e.path == previous) {
-                        self.cursor = Some(previous.clone());
-                        self.anchor = Some(previous);
-                        self.selected = Some(self.visible[index].clone());
-                        self.scroll_to_index = Some(index);
-                    }
-                }
-                Location::ThisPc if previous.parent().is_none() => {
-                    self.drive_cursor = self.drives.iter().position(|d| d.path == previous);
-                }
-                _ => {}
-            }
+        if let Some(previous) = came_from
+            && let Location::Dir(now) = &self.location
+            && previous.parent() == Some(now.as_path())
+            && let Some(index) = self.visible.iter().position(|e| e.path == previous)
+        {
+            self.cursor = Some(previous.clone());
+            self.anchor = Some(previous);
+            self.selected = Some(self.visible[index].clone());
+            self.scroll_to_index = Some(index);
         }
         // Entrée dans un dossier au clavier : on sélectionne son premier élément.
         if select_first && let Some(first) = self.visible.first().cloned() {
@@ -656,6 +1239,64 @@ impl ExpliaApp {
         }
     }
 
+    /// Dossiers de la liste de l'onglet actif, dans l'ordre affiché (navigation aux flèches).
+    fn sidebar_items(&self) -> Vec<PathBuf> {
+        match self.sidebar_tab {
+            SidebarTab::Pc => self.drives.iter().map(|d| d.path.clone()).collect(),
+            SidebarTab::Network => self
+                .drives
+                .iter()
+                .filter(|d| d.kind == DriveKind::Network)
+                .map(|d| d.path.clone())
+                .collect(),
+            SidebarTab::Home => self
+                .home
+                .iter()
+                .cloned()
+                .chain(
+                    self.home_dirs
+                        .iter()
+                        .filter(|e| self.show_hidden || !e.hidden)
+                        .map(|e| e.path.clone()),
+                )
+                .collect(),
+            SidebarTab::Favorites => self.favorites.paths().to_vec(),
+            SidebarTab::Apps => Vec::new(),
+        }
+    }
+
+    /// Dossier choisi aux flèches dans la barre latérale, quand elle a la main.
+    fn sidebar_cursor_path(&self) -> Option<PathBuf> {
+        if !self.sidebar_focus {
+            return None;
+        }
+        self.sidebar_cursor
+            .and_then(|index| self.sidebar_items().get(index).cloned())
+    }
+
+    /// Passe à l'élément précédent (`delta` < 0) ou suivant (`delta` > 0) de la liste de la barre
+    /// latérale (lecteurs, dossiers de Home, favoris) et l'ouvre ; le clavier garde la main.
+    fn step_sidebar(&mut self, delta: i32) {
+        let items = self.sidebar_items();
+        let current = self.sidebar_cursor.or(match &self.location {
+            Location::Dir(path) => items.iter().position(|p| p == path).or_else(|| {
+                // Lecteurs : le dossier affiché peut être n'importe où sur le lecteur.
+                matches!(self.sidebar_tab, SidebarTab::Pc | SidebarTab::Network)
+                    .then(|| items.iter().position(|root| path.starts_with(root)))
+                    .flatten()
+            }),
+            Location::ThisPc => None,
+        });
+        let Some(next) = view::step_index(current, items.len(), delta) else {
+            return;
+        };
+        self.navigate(Location::Dir(items[next].clone()));
+        self.sidebar_focus = true;
+        // Même si le dossier n'est pas accessible (erreur), le curseur avance : on peut passer
+        // au suivant.
+        self.sidebar_cursor = Some(next);
+    }
+
     /// Maj+clic : sélectionne la plage entre l'ancre (dernier élément choisi) et `entry`.
     fn select_range(&mut self, entry: Entry) {
         let anchor = self
@@ -667,7 +1308,8 @@ impl ExpliaApp {
             self.toggle_multi(entry);
             return;
         };
-        match view::select_range(&self.visible, &anchor, &entry.path) {
+        let list: Vec<Entry> = self.nav_list().into_iter().cloned().collect();
+        match view::select_range(&list, &anchor, &entry.path) {
             Ok(range) => {
                 self.confirm_delete = false;
                 self.selected = None;
@@ -686,6 +1328,8 @@ impl ExpliaApp {
 
     /// Relit le dossier affiché (après une suppression, par exemple).
     fn refresh_listing(&mut self) {
+        // Parmi les résultats, on retire ce qui n'existe plus (supprimé, renommé).
+        self.result_entries.retain(|e| e.path.exists());
         let Location::Dir(path) = &self.location else {
             return;
         };
@@ -707,6 +1351,7 @@ impl ExpliaApp {
     /// Ajoute ou retire une ligne de la multi-sélection. Un seul type à la fois :
     /// on ne mélange pas dossiers et fichiers.
     fn toggle_multi(&mut self, entry: Entry) {
+        self.sidebar_focus = false;
         self.confirm_delete = false;
         // Comme dans l'Explorateur : le premier Ctrl+clic garde l'élément déjà sélectionné.
         if self.multi.is_empty()
@@ -771,6 +1416,16 @@ impl ExpliaApp {
             Ok(()) => {
                 self.error = None;
                 self.notice = Some(format!("{count} élément(s) envoyé(s) à la corbeille."));
+                // Le dossier affiché a lui-même été supprimé : on remonte au dossier parent.
+                if let Location::Dir(current) = self.location.clone()
+                    && !current.exists()
+                    && let Some(parent) = current.parent()
+                {
+                    let notice = self.notice.take();
+                    self.navigate(Location::Dir(parent.to_path_buf()));
+                    self.notice = notice;
+                    return;
+                }
             }
             Err(message) => {
                 self.error = Some(message);
@@ -786,7 +1441,10 @@ impl ExpliaApp {
 
     /// Démarre le renommage de `entry` directement dans la liste.
     fn start_rename(&mut self, entry: &Entry) {
-        if !matches!(self.location, Location::Dir(_)) {
+        // Seul un élément de la liste affichée se renomme (pas le dossier courant lui-même).
+        if !matches!(self.location, Location::Dir(_))
+            || !self.visible.iter().any(|e| e.path == entry.path)
+        {
             return;
         }
         self.error = None;
@@ -809,6 +1467,10 @@ impl ExpliaApp {
                 if self.favorites.contains(&path) {
                     self.favorites.remove(&path);
                     self.favorites.add(new_path.clone());
+                }
+                if self.applications.contains(&path) {
+                    self.applications.remove(&path);
+                    self.applications.add(new_path.clone());
                 }
                 self.refresh_listing();
                 if let Some(entry) = self.entries.iter().find(|e| e.path == new_path).cloned() {
@@ -835,6 +1497,66 @@ impl ExpliaApp {
             return;
         }
         self.navigate(target);
+    }
+
+    /// Entre en plein écran (fenêtre en plein écran, vidéo seule) ou en sort.
+    fn set_video_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
+        if self.video_fullscreen != on {
+            self.video_fullscreen = on;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+        }
+    }
+
+    /// Plein écran : la vidéo occupe toute la fenêtre, les commandes en bas. Double-clic ou
+    /// Échap en sort. Renvoie `false` s'il n'y a plus de vidéo à montrer (plein écran quitté).
+    fn fullscreen_video(&mut self, ui: &mut egui::Ui) -> bool {
+        let ctx = ui.ctx().clone();
+        let PlayerSlot::Ready(active) = &self.player else {
+            self.set_video_fullscreen(&ctx, false);
+            return false;
+        };
+        let Some(texture) = &active.texture else {
+            self.set_video_fullscreen(&ctx, false);
+            return false;
+        };
+        let mut action = None;
+        let mut exit = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        egui::Panel::bottom("fullscreen-controls").show(ui, |ui| {
+            ui.add_space(4.0);
+            action = Self::player_bar(ui, active);
+            ui.add_space(4.0);
+        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+            .show(ui, |ui| {
+                let area = ui.available_rect_before_wrap();
+                let size = texture.size_vec2();
+                let scale = (area.width() / size.x).min(area.height() / size.y);
+                let rect = egui::Rect::from_center_size(area.center(), size * scale);
+                let response = ui.allocate_rect(area, egui::Sense::click());
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                if response
+                    .on_hover_text("Double-clic ou Échap : quitter le plein écran")
+                    .double_clicked()
+                {
+                    exit = true;
+                }
+            });
+        if exit {
+            self.set_video_fullscreen(&ctx, false);
+        }
+        if let Some(action) = action {
+            if matches!(action, Action::StopPlayer) {
+                self.set_video_fullscreen(&ctx, false);
+            }
+            self.apply(&ctx, action);
+        }
+        true
     }
 
     /// Arrête la lecture intégrée (libère le fichier et la mémoire).
@@ -921,6 +1643,7 @@ impl ExpliaApp {
     }
 
     fn select(&mut self, ctx: &egui::Context, entry: Entry) {
+        self.sidebar_focus = false;
         // Choisir un autre élément arrête la lecture en cours.
         if !matches!(&self.player, PlayerSlot::None) {
             let same = match &self.player {
@@ -955,11 +1678,12 @@ impl ExpliaApp {
     /// Traite les résultats des threads de travail.
     fn poll_events(&mut self, ctx: &egui::Context) {
         let mut sizes_changed = false;
+        let mut results_changed = false;
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 Event::Preview(path, result) => self.on_preview(ctx, path, result),
-                Event::DriveSize(path, size) => {
-                    self.drive_sizes.insert(path, size);
+                Event::DriveInfo(path, info) => {
+                    self.drive_infos.insert(path, info);
                 }
                 Event::FolderSize {
                     generation,
@@ -985,6 +1709,59 @@ impl ExpliaApp {
                     }
                 }
                 Event::PlayerReady(path, result) => self.on_player_ready(path, result),
+                Event::ScanBatch {
+                    generation,
+                    entries,
+                } => {
+                    if generation == self.scan_generation.load(Ordering::SeqCst)
+                        && self.results.is_some()
+                    {
+                        self.result_entries.extend(entries);
+                        results_changed = true;
+                    }
+                }
+                Event::ScanGroups { generation, groups } => {
+                    if generation == self.scan_generation.load(Ordering::SeqCst)
+                        && self.results.is_some()
+                    {
+                        self.duplicate_groups.clear();
+                        self.result_entries.clear();
+                        for (index, group) in groups.into_iter().enumerate() {
+                            for entry in group {
+                                self.duplicate_groups.insert(entry.path.clone(), index + 1);
+                                self.result_entries.push(entry);
+                            }
+                        }
+                        results_changed = true;
+                    }
+                }
+                Event::CopyDone { dest, report } => self.on_copy_done(&dest, report),
+                Event::ScanProgress { generation, text } => {
+                    if generation == self.scan_generation.load(Ordering::SeqCst)
+                        && let Some(results) = &mut self.results
+                    {
+                        results.progress = Some(text);
+                    }
+                }
+                Event::ScanDone {
+                    generation,
+                    truncated,
+                } => {
+                    if generation == self.scan_generation.load(Ordering::SeqCst)
+                        && let Some(results) = &mut self.results
+                    {
+                        results.running = false;
+                        results.truncated = truncated;
+                        results.progress = None;
+                        // Dossiers vides : tous sont sélectionnés, il ne reste qu'à supprimer.
+                        if results.kind == ResultKind::EmptyFolders {
+                            self.recompute_visible();
+                            self.multi = self.visible.clone();
+                            self.anchor = self.multi.first().map(|e| e.path.clone());
+                        }
+                        results_changed = true;
+                    }
+                }
                 Event::Thumb(path, thumb) => {
                     self.thumbs_in_flight = self.thumbs_in_flight.saturating_sub(1);
                     // Une miniature en échec reste dans `thumbs_requested` : on ne la redemande pas.
@@ -1002,7 +1779,7 @@ impl ExpliaApp {
                 }
             }
         }
-        if sizes_changed {
+        if sizes_changed || results_changed {
             self.recompute_visible();
         }
     }
@@ -1042,11 +1819,44 @@ impl ExpliaApp {
     fn apply(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::Go(location) => self.navigate(location),
+            Action::SidebarGo(path) => {
+                let index = self.sidebar_items().iter().position(|p| *p == path);
+                self.navigate(Location::Dir(path));
+                if index.is_some() {
+                    self.sidebar_focus = true;
+                    self.sidebar_cursor = index;
+                }
+            }
+            Action::SidebarTab(tab) => self.set_sidebar_tab(tab),
+            Action::SortBy(key) => {
+                if self.sort_key == key {
+                    self.sort_order = match self.sort_order {
+                        SortOrder::Ascending => SortOrder::Descending,
+                        SortOrder::Descending => SortOrder::Ascending,
+                    };
+                } else {
+                    self.sort_key = key;
+                    // Nom : de A à Z ; taille et dates : les plus grands / récents d'abord.
+                    self.sort_order = match key {
+                        SortKey::Name | SortKey::Type => SortOrder::Ascending,
+                        SortKey::Size | SortKey::Modified | SortKey::Created => {
+                            SortOrder::Descending
+                        }
+                    };
+                }
+                self.recompute_visible();
+                // Les colonnes de la vue « style Mac » dépendent du tri.
+                self.invalidate_columns();
+            }
             Action::Select(entry) => self.select(ctx, entry),
             Action::AddFavorite(path) => {
                 self.favorites.add(path);
             }
             Action::RemoveFavorite(path) => self.favorites.remove(&path),
+            Action::AddApplication(path) => {
+                self.applications.add(path);
+            }
+            Action::RemoveApplication(path) => self.applications.remove(&path),
             Action::Open(path) => self.report_launch(launch::open(&path)),
             Action::Play(path) => self.start_player(path),
             Action::StopPlayer => self.stop_player(),
@@ -1075,7 +1885,113 @@ impl ExpliaApp {
                 self.confirm_delete = !self.delete_targets().is_empty();
                 self.delete_asked_at = Some(ctx.input(|i| i.time));
             }
-            Action::CancelDelete => self.confirm_delete = false,
+            Action::CancelDelete => self.cancel_delete(),
+            Action::CopyPath(path) => {
+                let text = path.display().to_string();
+                ctx.copy_text(text.clone());
+                self.error = None;
+                self.notice = Some(format!("Chemin copié : {text}"));
+            }
+            Action::CopyFiles(paths) => match clipboard::copy_files(&paths) {
+                Ok(()) => {
+                    self.error = None;
+                    self.notice = Some(format!(
+                        "{} élément(s) copié(s) : collez-les dans l'Explorateur ou sur le Bureau (Ctrl+V).",
+                        paths.len()
+                    ));
+                }
+                Err(message) => self.error = Some(message),
+            },
+            Action::Paste { dest } => match clipboard::clipboard_files() {
+                Ok(files) if files.is_empty() => {
+                    self.notice = Some("Rien à coller : copiez d'abord des fichiers.".to_string());
+                }
+                Ok(files) => self.start_copy(files, dest),
+                Err(message) => self.error = Some(message),
+            },
+            Action::CopyInto { sources, dest } => self.start_copy(sources, dest),
+            Action::DragOut(paths) => {
+                self.drag_out_done = true;
+                let result = dragdrop::drag_files_out(&paths);
+                self.drag_out_ended_at = Some(ctx.input(|i| i.time));
+                match result {
+                    Ok(true) => {
+                        self.error = None;
+                        self.notice =
+                            Some(format!("{} élément(s) déposé(s) (copie).", paths.len()));
+                    }
+                    Ok(false) => {}
+                    Err(message) => self.error = Some(message),
+                }
+            }
+            Action::NewTab(path) => {
+                if self.tabs.is_empty()
+                    && let Location::Dir(current) = &self.location
+                {
+                    self.tabs.push(current.clone());
+                    self.active_tab = 0;
+                }
+                self.tabs.push(path.clone());
+                self.active_tab = self.tabs.len() - 1;
+                self.navigate(Location::Dir(path));
+            }
+            Action::SwitchTab(index) => {
+                if let Some(path) = self.tabs.get(index).cloned() {
+                    self.active_tab = index;
+                    self.navigate(Location::Dir(path));
+                }
+            }
+            Action::CloseTab(index) => self.close_tab(index),
+            Action::OpenPowerShell { dir, admin } => {
+                self.report_launch(launch::open_powershell(&dir, admin));
+            }
+            Action::ToggleVideoFullscreen => self.set_video_fullscreen(ctx, !self.video_fullscreen),
+            Action::FindEmptyFolders => self.start_scan(ResultKind::EmptyFolders),
+            Action::FindDuplicates => self.start_scan(ResultKind::Duplicates),
+            Action::FindLargeFiles => self.start_scan(ResultKind::LargeFiles),
+            Action::SelectDuplicateCopies => {
+                // On garde le premier fichier de chaque groupe ; les autres sont sélectionnés.
+                let mut seen = HashSet::new();
+                let copies: Vec<Entry> = self
+                    .visible
+                    .iter()
+                    .filter(|e| {
+                        self.duplicate_groups
+                            .get(&e.path)
+                            .is_some_and(|group| !seen.insert(*group))
+                    })
+                    .cloned()
+                    .collect();
+                if !copies.is_empty() {
+                    self.clear_multi();
+                    self.selected = None;
+                    self.preview = PreviewState::None;
+                    self.anchor = copies.first().map(|e| e.path.clone());
+                    self.multi = copies;
+                }
+            }
+            Action::CloseResults => {
+                let was_search = self
+                    .results
+                    .as_ref()
+                    .is_some_and(|r| r.kind == ResultKind::Search);
+                self.close_results();
+                if was_search {
+                    self.search.clear();
+                }
+                self.clear_multi();
+                self.selected = None;
+                self.preview = PreviewState::None;
+                self.recompute_visible();
+            }
+            Action::AskDeleteFolder(path) => {
+                if let Some(entry) = fs_nav::entry_from_path(&path) {
+                    self.clear_multi();
+                    self.selected = Some(entry);
+                    self.confirm_delete = true;
+                    self.delete_asked_at = Some(ctx.input(|i| i.time));
+                }
+            }
             Action::ConfirmDelete => self.delete_selection(),
             Action::EnterFolder(path) => {
                 self.select_first_after_nav = true;
@@ -1094,6 +2010,28 @@ impl ExpliaApp {
                 self.select_path_after_nav = Some(file);
                 self.navigate(Location::Dir(dir));
             }
+            Action::ColumnMultiSelect {
+                dir,
+                anchor,
+                entry,
+                range,
+            } => {
+                self.select_path_after_nav = anchor;
+                self.navigate(Location::Dir(dir.clone()));
+                if self.location == Location::Dir(dir) {
+                    let target = self
+                        .visible
+                        .iter()
+                        .find(|e| e.path == entry.path)
+                        .cloned()
+                        .unwrap_or(entry);
+                    if range {
+                        self.select_range(target);
+                    } else {
+                        self.toggle_multi(target);
+                    }
+                }
+            }
             Action::StartRename(entry) => self.start_rename(&entry),
             Action::CommitRename { path, new_name } => self.commit_rename(ctx, path, &new_name),
             Action::CancelRename => self.renaming = None,
@@ -1111,14 +2049,19 @@ impl ExpliaApp {
             sort_key: self.sort_key,
             sort_order: self.sort_order,
             show_preview: self.show_preview,
-            preview_expanded: self.preview_expanded,
+            detail_central: self.detail_central,
             skip_folder_sizes: self.skip_folder_sizes,
+            show_drive_usage: self.show_drive_usage,
+            recursive: self.recursive,
+            duplicate_min_mb: self.duplicate_min_mb,
+            large_min_mb: self.large_min_mb,
             view_mode: self.view_mode,
             show_hidden: self.show_hidden,
             columns: self.columns,
-            categories: self.filter.categories().to_vec(),
-            custom_extensions: self.filter.custom().to_string(),
             favorites: self.favorites.paths().to_vec(),
+            applications: self.applications.paths().to_vec(),
+            tabs_side: self.tabs_side,
+            preview_side: self.preview_side,
         }
     }
 
@@ -1156,28 +2099,205 @@ impl ExpliaApp {
         });
     }
 
-    /// Première ligne : dossier parent, Ce PC, fil d'Ariane (ou saisie du chemin).
-    fn address_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+    /// Bandeau des résultats d'un parcours : titre, avancement, actions et fermeture.
+    fn results_banner(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let results = self.results.as_ref()?;
+        let mut action = None;
+        let count = self.visible.len();
+        let title = match results.kind {
+            ResultKind::Search => {
+                format!("Recherche « {} » : {count} résultat(s)", self.search.trim())
+            }
+            ResultKind::EmptyFolders => format!("Dossiers vides : {count}"),
+            ResultKind::Duplicates => {
+                let groups = self.duplicate_groups.values().copied().max().unwrap_or(0);
+                format!(
+                    "Doublons > {} Mo : {groups} groupe(s), {count} fichier(s)",
+                    self.duplicate_min_mb
+                )
+            }
+            ResultKind::LargeFiles => {
+                let total: u64 = self.visible.iter().filter_map(|e| e.size).sum();
+                format!(
+                    "Fichiers > {} Mo : {count} fichier(s), {} au total",
+                    self.large_min_mb,
+                    fs_nav::format_size(total)
+                )
+            }
+        };
+        let scope = if self.recursive {
+            "sous-dossiers inclus"
+        } else {
+            "dossier courant seulement"
+        };
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(title);
+                ui.weak(format!("({scope})"));
+                if results.running {
+                    ui.spinner();
+                    ui.weak(results.progress.as_deref().unwrap_or("Analyse en cours…"));
+                }
+                if results.truncated {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("limité à {} résultats", scan::SEARCH_LIMIT),
+                    );
+                }
+                if results.kind == ResultKind::Duplicates
+                    && !results.running
+                    && count > 0
+                    && ui
+                        .button("Sélectionner les copies")
+                        .on_hover_text("Sélectionne tout sauf le premier fichier de chaque groupe")
+                        .clicked()
+                {
+                    action = Some(Action::SelectDuplicateCopies);
+                }
+                if ui.button("✕ Fermer").clicked() {
+                    action = Some(Action::CloseResults);
+                }
+            });
+        });
+        action
+    }
+
+    /// Haut de la zone centrale : fil d'Ariane (ou saisie du chemin) et barre de recherche.
+    fn location_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         ui.horizontal(|ui| {
-            let parent = self.location.parent();
+            enlarge_toolbar(ui);
+            let spacing = ui.spacing().item_spacing.x;
+            let search_width = SEARCH_WIDTH.min(ui.available_width() * 0.4);
+            // La case « Récursive » prend sa place à gauche de la barre de recherche.
+            let recursive_width = RECURSIVE_WIDTH;
+            let selection_width = {
+                let font = egui::TextStyle::Button.resolve(ui.style());
+                let galley = ui.painter().layout_no_wrap(
+                    SELECTION_MENU_LABEL.to_string(),
+                    font,
+                    egui::Color32::WHITE,
+                );
+                galley.size().x + ui.spacing().button_padding.x * 2.0
+            };
+            let address_width = (ui.available_width()
+                - search_width
+                - recursive_width
+                - selection_width
+                - 3.0 * spacing)
+                .max(80.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(address_width, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    if self.address_editing {
+                        self.address_edit(ui);
+                    } else {
+                        let crumb_action = self.breadcrumb_bar(ui);
+                        action = crumb_action.or(action.take());
+                    }
+                },
+            );
             if ui
-                .add_enabled(parent.is_some(), egui::Button::new("⬆ Dossier parent"))
-                .clicked()
+                .checkbox(&mut self.recursive, "Récursive")
+                .on_hover_text(
+                    "Recherche, dossiers vides et doublons parcourent aussi les sous-dossiers",
+                )
+                .changed()
             {
-                action = parent.map(Action::Go);
+                self.on_recursive_changed();
             }
-            if ui.button("🖥 Ce PC").clicked() {
-                action = Some(Action::Go(Location::ThisPc));
-            }
-            if self.address_editing {
-                self.address_edit(ui);
-            } else {
-                let crumb_action = self.breadcrumb_bar(ui);
-                action = crumb_action.or(action.take());
+            self.search_box(ui, search_width);
+            if let Some(chosen) = self.selection_menu(ui) {
+                action = Some(chosen);
             }
         });
         action
+    }
+
+    /// Filtre « Sélection », à droite de la barre de recherche : dossiers vides, doublons (du plus
+    /// gros au plus petit) et fichiers plus gros qu'un seuil, selon l'option « Récursive ».
+    fn selection_menu(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        let on_dir = matches!(self.location, Location::Dir(_));
+        let scope = if self.recursive {
+            "sous-dossiers compris"
+        } else {
+            "dossier courant seulement"
+        };
+        menu(ui, SELECTION_MENU_LABEL, |ui| {
+            ui.weak(format!("Portée : {scope} (case Récursive)"));
+            if ui
+                .add_enabled(on_dir, egui::Button::new("📂 Dossiers vides"))
+                .on_hover_text("Liste et sélectionne les dossiers sans aucun fichier")
+                .clicked()
+            {
+                action = Some(Action::FindEmptyFolders);
+                ui.close();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(on_dir, egui::Button::new("📑 Doublons"))
+                    .on_hover_text(
+                        "Fichiers de même contenu (même empreinte), plus gros que la taille \
+                         indiquée, classés du plus gros au plus petit",
+                    )
+                    .clicked()
+                {
+                    action = Some(Action::FindDuplicates);
+                    ui.close();
+                }
+                ui.label(">");
+                ui.add(
+                    egui::DragValue::new(&mut self.duplicate_min_mb)
+                        .range(1..=1_000_000)
+                        .suffix(" Mo"),
+                )
+                .on_hover_text("Taille minimale des fichiers examinés (modifiable)");
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(on_dir, egui::Button::new("📦 Fichiers"))
+                    .on_hover_text(
+                        "Fichiers plus gros que la taille indiquée, du plus gros au plus petit",
+                    )
+                    .clicked()
+                {
+                    action = Some(Action::FindLargeFiles);
+                    ui.close();
+                }
+                ui.label(">");
+                ui.add(
+                    egui::DragValue::new(&mut self.large_min_mb)
+                        .range(1..=1_000_000)
+                        .suffix(" Mo"),
+                )
+                .on_hover_text("Taille minimale des fichiers listés (modifiable)");
+            });
+        });
+        action
+    }
+
+    /// Barre de recherche par nom (voir `view::matches_query`) : filtre le dossier affiché, ou, si
+    /// « Récursive » est cochée, cherche aussi dans les sous-dossiers. Ctrl+F lui donne le focus ;
+    /// Échap l'efface.
+    fn search_box(&mut self, ui: &mut egui::Ui, width: f32) {
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .desired_width(width)
+                .hint_text("🔍 Rechercher : nom, *.exe, a*.txt…"),
+        );
+        if std::mem::take(&mut self.focus_search) {
+            edit.request_focus();
+        }
+        if edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.search.clear();
+            edit.surrender_focus();
+            self.on_search_changed();
+        } else if edit.changed() {
+            self.on_search_changed();
+        }
     }
 
     /// Mode saisie : Entrée valide, Échap ou clic ailleurs annule.
@@ -1204,13 +2324,14 @@ impl ExpliaApp {
         }
     }
 
-    /// Fil d'Ariane : un bouton par niveau du chemin ; un clic sur l'espace libre
-    /// (ou sur le crayon) passe en mode saisie.
+    /// Fil d'Ariane : un bouton par niveau du chemin, qui s'illumine au survol ; un clic sur
+    /// l'espace libre passe en mode saisie.
     fn breadcrumb_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         let crumbs = match &self.location {
             Location::ThisPc => Vec::new(),
-            Location::Dir(path) => fs_nav::breadcrumbs(path),
+            // Dans le dossier de l'utilisateur : « Home > Videos » plutôt que C: > Users > nom > Videos.
+            Location::Dir(path) => fs_nav::breadcrumbs_with_home(path, self.home.as_deref()),
         };
         let height = ui.spacing().interact_size.y;
         let frame = egui::Frame::new()
@@ -1221,26 +2342,26 @@ impl ExpliaApp {
             ui.set_width(ui.available_width());
             ui.set_height(height);
             ui.horizontal(|ui| {
-                if ui
-                    .small_button("✏")
-                    .on_hover_text("Modifier le chemin")
-                    .clicked()
-                {
-                    action = Some(Action::EditAddress);
-                }
+                // Survol : le mot prend la couleur des liens et un fond apparaît, comme un bouton.
+                let link = ui.visuals().hyperlink_color;
+                let hovered = &mut ui.visuals_mut().widgets.hovered;
+                hovered.weak_bg_fill = link.gamma_multiply(0.22);
+                hovered.bg_fill = hovered.weak_bg_fill;
+                hovered.bg_stroke = egui::Stroke::new(1.0, link);
+                hovered.fg_stroke.color = link;
                 egui::ScrollArea::horizontal()
                     .id_salt("breadcrumb")
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .stick_to_right(true)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            let this_pc = ui.add(egui::Button::new("Ce PC").frame(false));
+                            let this_pc = crumb_button(ui, "Ce PC");
                             if this_pc.clicked() {
                                 action = Some(Action::Go(Location::ThisPc));
                             }
                             for (label, path) in &crumbs {
                                 ui.weak(">");
-                                let button = ui.add(egui::Button::new(label).frame(false));
+                                let button = crumb_button(ui, label);
                                 if button.clicked() {
                                     action = Some(Action::Go(Location::Dir(path.clone())));
                                 }
@@ -1261,31 +2382,17 @@ impl ExpliaApp {
     }
 
     /// Seconde ligne : Trier | Afficher | Extension | Option.
-    fn options_bar(&mut self, ui: &mut egui::Ui) {
-        let mut changed = false;
+    fn options_bar(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
         let mut sizes_option_changed = false;
         let mut columns_changed = false;
         let mut new_view_mode = None;
         let mut toggle_hidden = false;
         let mut hidden_shown = self.show_hidden;
         ui.horizontal(|ui| {
-            menu(ui, "Trier", |ui| {
-                for (key, label) in [
-                    (SortKey::Name, "Nom"),
-                    (SortKey::Size, "Taille"),
-                    (SortKey::Type, "Type"),
-                    (SortKey::Modified, "Date de modification"),
-                ] {
-                    changed |= ui.radio_value(&mut self.sort_key, key, label).changed();
-                }
-                ui.separator();
-                for (order, label) in [
-                    (SortOrder::Ascending, "Croissant"),
-                    (SortOrder::Descending, "Décroissant"),
-                ] {
-                    changed |= ui.radio_value(&mut self.sort_order, order, label).changed();
-                }
-            });
+            if ui.button("🖥 Ce PC").clicked() {
+                action = Some(Action::Go(Location::ThisPc));
+            }
             ui.separator();
             menu(ui, "Afficher", |ui| {
                 ui.weak("Colonnes");
@@ -1307,6 +2414,7 @@ impl ExpliaApp {
                     (ViewMode::List, "Liste"),
                     (ViewMode::Columns, "Colonnes (style Mac)"),
                     (ViewMode::Gallery, "Grille d'images"),
+                    (ViewMode::Videos, "Grille de vidéos"),
                 ] {
                     if ui.radio(self.view_mode == mode, label).clicked() {
                         new_view_mode = Some(mode);
@@ -1318,35 +2426,17 @@ impl ExpliaApp {
                 {
                     toggle_hidden = true;
                 }
-            });
-            ui.separator();
-            let title = if self.filter.is_all() {
-                "Extension".to_string()
-            } else {
-                format!("Extension ({})", self.filter.count())
-            };
-            menu(ui, &title, |ui| {
-                let mut all = self.filter.is_all();
-                if ui.checkbox(&mut all, "Tout").clicked() {
-                    self.filter.clear();
-                    changed = true;
-                }
-                ui.horizontal(|ui| {
-                    ui.label("Custom");
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(self.filter.custom_mut())
-                            .desired_width(110.0)
-                            .hint_text("ex. mkv, pdf"),
-                    );
-                    changed |= edit.changed();
-                });
                 ui.separator();
-                for category in Category::ALL {
-                    let mut on = self.filter.has_category(category);
-                    if ui.checkbox(&mut on, category.label()).changed() {
-                        self.filter.set_category(category, on);
-                        changed = true;
-                    }
+                ui.weak("Disposition (côté de la fenêtre)");
+                for (label, side) in [
+                    ("Onglets", &mut self.tabs_side),
+                    ("Volet de détail", &mut self.preview_side),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        ui.radio_value(side, Side::Left, "Gauche");
+                        ui.radio_value(side, Side::Right, "Droite");
+                    });
                 }
             });
             ui.separator();
@@ -1357,7 +2447,37 @@ impl ExpliaApp {
                         "Pas de calcul de taille de dossier",
                     )
                     .changed();
+                ui.checkbox(
+                    &mut self.show_drive_usage,
+                    "Occupation des disques (barre et %)",
+                );
             });
+            // Onglets : après le menu Option, dès que plusieurs dossiers sont ouverts.
+            if self.tabs.len() > 1 {
+                ui.separator();
+                for (index, path) in self.tabs.iter().enumerate() {
+                    let mut name = favorite_name(path);
+                    if name.chars().count() > 22 {
+                        name = name.chars().take(21).collect::<String>() + "…";
+                    }
+                    let active = index == self.active_tab;
+                    if ui
+                        .add(egui::Button::new(format!("🗂 {name}")).selected(active))
+                        .on_hover_text(path.display().to_string())
+                        .clicked()
+                        && !active
+                    {
+                        action = Some(Action::SwitchTab(index));
+                    }
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Fermer l'onglet (Ctrl+W)")
+                        .clicked()
+                    {
+                        action = Some(Action::CloseTab(index));
+                    }
+                }
+            }
         });
         if sizes_option_changed {
             if self.skip_folder_sizes {
@@ -1379,11 +2499,7 @@ impl ExpliaApp {
             let ctx = ui.ctx().clone();
             self.apply(&ctx, Action::ToggleHidden);
         }
-        if changed {
-            self.recompute_visible();
-            // Les colonnes de la vue « style Mac » dépendent du tri et du filtre.
-            self.invalidate_columns();
-        }
+        action
     }
 
     /// Position, dans la liste affichée, de la ligne courante (curseur ou sélection).
@@ -1391,23 +2507,390 @@ impl ExpliaApp {
         self.cursor
             .as_ref()
             .or(self.selected.as_ref().map(|s| &s.path))
-            .and_then(|path| self.visible.iter().position(|e| e.path == *path))
+            .and_then(|path| self.nav_list().iter().position(|e| e.path == *path))
     }
 
+    /// Le dossier affiché est dans le dossier de l'utilisateur (« Home »).
+    fn in_home(&self) -> bool {
+        match (&self.location, &self.home) {
+            (Location::Dir(path), Some(home)) => path.starts_with(home),
+            _ => false,
+        }
+    }
+
+    /// Les colonnes « lecteurs » et « navigation » à gauche de la grille ne s'affichent que hors
+    /// de Home : dans Home, le chemin et la barre latérale (onglet Home) suffisent.
+    fn grid_side_columns(&self) -> bool {
+        !self.in_home()
+    }
+
+    /// Le fichier figure dans la grille : les images en mode « Images », les vidéos en mode
+    /// « Vidéos ». Hors grille, tout est affiché (les dossiers sont dans la colonne de navigation).
+    fn in_grid(&self, entry: &Entry) -> bool {
+        // Sans colonne de navigation (dossier de Home), les dossiers sont des tuiles de la grille.
+        let folder = entry.is_dir && !self.grid_side_columns();
+        match self.view_mode {
+            ViewMode::Gallery => {
+                folder || (!entry.is_dir && preview::is_supported_image(&entry.path))
+            }
+            ViewMode::Videos => folder || (!entry.is_dir && preview::is_video(&entry.path)),
+            ViewMode::List | ViewMode::Columns => true,
+        }
+    }
+
+    /// Éléments parcourus au clavier et par plage : ceux de la grille, ou tout le dossier.
+    fn nav_list(&self) -> Vec<&Entry> {
+        self.visible.iter().filter(|e| self.in_grid(e)).collect()
+    }
+
+    /// Panneau de la barre latérale, toujours à gauche.
+    fn sidebar_panel(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        egui::Panel::left("sidebar-left")
+            .default_size(SIDEBAR_DEFAULT_WIDTH)
+            .resizable(true)
+            .show(ui, |ui| {
+                action = self.sidebar(ui);
+            });
+        action
+    }
+
+    /// Le volet de détail est affiché (option « Volet d'aperçu », ou multi-sélection en cours).
+    fn detail_shown(&self) -> bool {
+        self.show_preview || !self.multi.is_empty()
+    }
+
+    /// Volet latéral (à gauche ou à droite selon la disposition) : le volet de détail, ou la
+    /// navigation quand le détail est au centre. Un petit triangle, en bas contre la zone
+    /// centrale, échange les deux.
+    fn side_panel(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        if !self.detail_shown() {
+            return None;
+        }
+        let mut action = None;
+        let central = self.detail_central;
+        let (min_width, width) = if central {
+            (260.0, 420.0)
+        } else {
+            // Jamais plus étroit que la barre « Colonnes Images Vidéos » sur une ligne.
+            let min = Self::detail_min_width(ui);
+            (min, 300.0_f32.max(min))
+        };
+        let panel = match (self.preview_side, central) {
+            (Side::Left, false) => egui::Panel::left("detail-left"),
+            (Side::Right, false) => egui::Panel::right("detail-right"),
+            (Side::Left, true) => egui::Panel::left("navigation-left"),
+            (Side::Right, true) => egui::Panel::right("navigation-right"),
+        };
+        let response = panel
+            .default_size(width)
+            .min_size(min_width)
+            .resizable(true)
+            .show(ui, |ui| {
+                action = if central {
+                    self.navigation_area(ui)
+                } else {
+                    self.preview_panel(ui)
+                };
+            })
+            .response;
+        if self.swap_handle(ui.ctx(), response.rect) {
+            self.detail_central = !self.detail_central;
+        }
+        action
+    }
+
+    /// Triangle d'échange, en bas du volet latéral, contre la zone centrale : il pointe vers le
+    /// centre et y amène le contenu du volet. Renvoie `true` s'il est cliqué.
+    fn swap_handle(&self, ctx: &egui::Context, panel: egui::Rect) -> bool {
+        let on_right = self.preview_side == Side::Right;
+        let (arrow, x) = if on_right {
+            ("◀", panel.left() + 4.0)
+        } else {
+            ("▶", panel.right() - 26.0)
+        };
+        let hint = if self.detail_central {
+            "Remettre la navigation au centre"
+        } else {
+            "Mettre le volet de détail au centre"
+        };
+        let mut clicked = false;
+        egui::Area::new(egui::Id::unique("swap-panels"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(x, panel.bottom() - 26.0))
+            .show(ctx, |ui| {
+                clicked = ui.small_button(arrow).on_hover_text(hint).clicked();
+            });
+        clicked
+    }
+
+    /// Navigation dans les dossiers : barre d'adresse et recherche, résultats, contenu.
+    fn navigation_area(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = self.location_bar(ui);
+        action = self.results_banner(ui).or(action);
+        ui.add_space(4.0);
+        self.central(ui).or(action)
+    }
+
+    /// Barre latérale en « classeur » : la liste des dossiers de l'onglet actif à gauche,
+    /// les onglets (intercalaires : Ce PC, Home, Favoris, Réseau) sur le bord droit.
     fn sidebar(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        ui.add_space(4.0);
+        let height = ui.available_height();
+        let list_width =
+            (ui.available_width() - SIDEBAR_TAB_WIDTH - ui.spacing().item_spacing.x).max(60.0);
+        ui.horizontal_top(|ui| {
+            if self.tabs_side == Side::Left
+                && let Some(tab) = self.sidebar_tabs(ui)
+            {
+                action = Some(Action::SidebarTab(tab));
+            }
+            ui.vertical(|ui| {
+                ui.set_width(list_width);
+                ui.set_height(height);
+                egui::ScrollArea::vertical()
+                    .id_salt("sidebar-list")
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        ui.add_space(4.0);
+                        action = self.sidebar_list(ui).or(action.take());
+                    });
+            });
+            if self.tabs_side == Side::Right
+                && let Some(tab) = self.sidebar_tabs(ui)
+            {
+                action = Some(Action::SidebarTab(tab));
+            }
+        });
+        action
+    }
+
+    /// Intercalaires du classeur : texte vertical, sur le bord gauche ou droit de la liste.
+    fn sidebar_tabs(&self, ui: &mut egui::Ui) -> Option<SidebarTab> {
+        let mut clicked = None;
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.add_space(4.0);
+            for tab in SidebarTab::ALL {
+                let selected = self.sidebar_tab == tab;
+                let font = egui::TextStyle::Body.resolve(ui.style());
+                let color = if selected {
+                    ui.visuals().selection.stroke.color
+                } else {
+                    ui.visuals().text_color()
+                };
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(tab.title().to_string(), font, color);
+                let text = galley.size();
+                let size = egui::vec2(SIDEBAR_TAB_WIDTH, text.x + 20.0);
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                let visuals = ui.visuals();
+                let fill = if selected {
+                    visuals.selection.bg_fill
+                } else if response.hovered() {
+                    visuals.widgets.hovered.weak_bg_fill
+                } else {
+                    visuals.widgets.inactive.weak_bg_fill
+                };
+                // Coins arrondis du côté extérieur ; texte tourné d'un quart de tour (de haut en
+                // bas à droite, de bas en haut à gauche), centré dans l'onglet.
+                let on_left = self.tabs_side == Side::Left;
+                let (corners, origin, angle) = if on_left {
+                    (
+                        egui::CornerRadius {
+                            nw: 8,
+                            sw: 8,
+                            ne: 0,
+                            se: 0,
+                        },
+                        egui::pos2(
+                            rect.center().x - text.y / 2.0,
+                            rect.center().y + text.x / 2.0,
+                        ),
+                        -std::f32::consts::FRAC_PI_2,
+                    )
+                } else {
+                    (
+                        egui::CornerRadius {
+                            nw: 0,
+                            sw: 0,
+                            ne: 8,
+                            se: 8,
+                        },
+                        egui::pos2(
+                            rect.center().x + text.y / 2.0,
+                            rect.center().y - text.x / 2.0,
+                        ),
+                        std::f32::consts::FRAC_PI_2,
+                    )
+                };
+                ui.painter().rect_filled(rect, corners, fill);
+                ui.painter()
+                    .add(egui::epaint::TextShape::new(origin, galley, color).with_angle(angle));
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    clicked = Some(tab);
+                }
+            }
+        });
+        clicked
+    }
+
+    /// Contenu de l'onglet actif.
+    fn sidebar_list(&self, ui: &mut egui::Ui) -> Option<Action> {
+        // Un nom trop long est tronqué, jamais coupé sur deux lignes.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        match self.sidebar_tab {
+            SidebarTab::Pc => self.drives_list(ui, false),
+            SidebarTab::Network => self.drives_list(ui, true),
+            SidebarTab::Home => self.home_list(ui),
+            SidebarTab::Favorites => self.favorites_list(ui),
+            SidebarTab::Apps => self.applications_list(ui),
+        }
+    }
+
+    /// Lecteurs, avec leur occupation si l'option est cochée. `network_only` : onglet « Réseau »
+    /// (lecteurs réseau connectés seulement).
+    fn drives_list(&self, ui: &mut egui::Ui, network_only: bool) -> Option<Action> {
+        let mut action = None;
+        ui.heading(if network_only { "Réseau" } else { "Ce PC" });
+        let cursor = self.sidebar_cursor_path();
+        let mut any = false;
+        for drive in &self.drives {
+            if network_only && drive.kind != DriveKind::Network {
+                continue;
+            }
+            any = true;
+            let info = self.drive_infos.get(&drive.path).and_then(Option::as_ref);
+            let here =
+                matches!(&self.location, Location::Dir(path) if path.starts_with(&drive.path));
+            // Pilotée au clavier : le lecteur choisi par les flèches est en surbrillance.
+            let highlighted = cursor.as_ref().map_or(here, |c| *c == drive.path);
+            if drive_entry(ui, drive, info, highlighted, self.show_drive_usage).clicked() {
+                action = Some(Action::SidebarGo(drive.path.clone()));
+            }
+        }
+        if !any {
+            ui.weak(if network_only {
+                "Aucun lecteur réseau connecté."
+            } else {
+                "Aucun lecteur détecté."
+            });
+        }
+        action
+    }
+
+    /// Dossier de l'utilisateur et ses sous-dossiers.
+    fn home_list(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        let Some(home) = &self.home else {
+            ui.weak("Dossier de l'utilisateur introuvable.");
+            return None;
+        };
+        // Le titre est le dossier de l'utilisateur lui-même : un clic l'ouvre.
+        let cursor = self.sidebar_cursor_path();
+        let marked = |path: &PathBuf| {
+            cursor
+                .as_ref()
+                .map_or(self.location == Location::Dir(path.clone()), |c| c == path)
+        };
+        if ui
+            .selectable_label(
+                marked(home),
+                egui::RichText::new(format!("🏠 {}", favorite_name(home))).heading(),
+            )
+            .on_hover_text(home.display().to_string())
+            .clicked()
+        {
+            action = Some(Action::SidebarGo(home.clone()));
+        }
+        for entry in &self.home_dirs {
+            if entry.hidden && !self.show_hidden {
+                continue;
+            }
+            if ui
+                .selectable_label(marked(&entry.path), format!("📁 {}", entry.name))
+                .on_hover_text(entry.path.display().to_string())
+                .clicked()
+            {
+                action = Some(Action::SidebarGo(entry.path.clone()));
+            }
+        }
+        action
+    }
+
+    /// Onglet « Applications » : ExPLIA, puis les exécutables ajoutés par l'utilisateur
+    /// (clic droit sur un `.exe` > « Ajouter aux applications »). Un clic lance l'application.
+    fn applications_list(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        ui.heading("Applications");
+        if self.applications.paths().is_empty() {
+            ui.weak("Clic droit sur un exécutable (.exe, .bat…) pour l'ajouter.");
+        }
+        let own = self.own_exe.iter().map(|path| (path, false));
+        let added = self.applications.paths().iter().map(|path| (path, true));
+        for (path, removable) in own.chain(added) {
+            let name = if removable {
+                path.file_stem().map_or_else(
+                    || path.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                )
+            } else {
+                "ExPLIA".to_string()
+            };
+            let response = ui
+                .selectable_label(false, format!("🚀 {name}"))
+                .on_hover_text(path.display().to_string())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if response.clicked() {
+                action = Some(Action::Open(path.clone()));
+            }
+            response.context_menu(|ui| {
+                if ui.button("Lancer").clicked() {
+                    action = Some(Action::Open(path.clone()));
+                    ui.close();
+                }
+                if ui.button("Lancer en tant qu'administrateur").clicked() {
+                    action = Some(Action::OpenAsAdmin(path.clone()));
+                    ui.close();
+                }
+                if let Some(dir) = path.parent()
+                    && ui.button("Afficher dans son dossier").clicked()
+                {
+                    action = Some(Action::GoSelect {
+                        dir: dir.to_path_buf(),
+                        file: path.clone(),
+                    });
+                    ui.close();
+                }
+                if removable && ui.button("Retirer des applications").clicked() {
+                    action = Some(Action::RemoveApplication(path.clone()));
+                    ui.close();
+                }
+            });
+        }
+        action
+    }
+
+    fn favorites_list(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
         ui.heading("Favoris");
         if self.favorites.paths().is_empty() {
             ui.weak("Clic droit sur un dossier pour l'ajouter.");
         }
+        let cursor = self.sidebar_cursor_path();
         for path in self.favorites.paths() {
-            let here = self.location == Location::Dir(path.clone());
+            let here = cursor
+                .as_ref()
+                .map_or(self.location == Location::Dir(path.clone()), |c| c == path);
             let response = ui
                 .selectable_label(here, format!("⭐ {}", favorite_name(path)))
                 .on_hover_text(path.display().to_string());
             if response.clicked() {
-                action = Some(Action::Go(Location::Dir(path.clone())));
+                action = Some(Action::SidebarGo(path.clone()));
             }
             response.context_menu(|ui| {
                 if ui.button("Retirer des favoris").clicked() {
@@ -1416,38 +2899,23 @@ impl ExpliaApp {
                 }
             });
         }
-        ui.separator();
-        // Le titre de la section est « Ce PC » : un clic ouvre la vue des lecteurs.
-        if ui
-            .selectable_label(
-                self.location == Location::ThisPc,
-                egui::RichText::new("🖥 Ce PC").heading(),
-            )
-            .clicked()
-        {
-            action = Some(Action::Go(Location::ThisPc));
-        }
-        for drive in &self.drives {
-            let here = self.location == Location::Dir(drive.path.clone());
-            if ui
-                .selectable_label(
-                    here,
-                    format!("{} {}", drive_icon(drive.kind), drive.label()),
-                )
-                .clicked()
-            {
-                action = Some(Action::Go(Location::Dir(drive.path.clone())));
-            }
-        }
         action
     }
 
     fn central(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        // Les résultats d'un parcours (recherche récursive, dossiers vides, doublons) s'affichent
+        // toujours en liste, quel que soit le mode d'affichage.
+        if self.results.is_some() && matches!(self.location, Location::Dir(_)) {
+            return self.listing_view(ui);
+        }
         match (&self.location, self.view_mode) {
-            (Location::ThisPc, _) => self.drives_view(ui),
+            (Location::ThisPc, _) => {
+                ui.label("Choisissez un dossier ou un lecteur dans la barre latérale.");
+                None
+            }
             (Location::Dir(_), ViewMode::List) => self.listing_view(ui),
             (Location::Dir(_), ViewMode::Columns) => self.columns_view(ui),
-            (Location::Dir(_), ViewMode::Gallery) => self.gallery_view(ui),
+            (Location::Dir(_), ViewMode::Gallery | ViewMode::Videos) => self.gallery_layout(ui),
         }
     }
 
@@ -1458,40 +2926,29 @@ impl ExpliaApp {
         let Location::Dir(current) = self.location.clone() else {
             return None;
         };
-        let crumbs = fs_nav::breadcrumbs(&current);
-        // Listings des dossiers traversés (le dernier est le dossier courant : `self.visible`),
-        // avec la largeur qui convient à leurs noms.
+        // Dans Home, les colonnes commencent sous le dossier de l'utilisateur (la barre latérale
+        // montre déjà son contenu) : pas de colonnes C:, Users, nom.
+        let crumbs = fs_nav::column_levels(&current, self.home.as_deref());
+        // Listings des dossiers traversés (le dernier est le dossier courant : `self.visible`).
         for (_, path) in crumbs.iter().take(crumbs.len().saturating_sub(1)) {
             if !self.column_cache.contains_key(path)
                 && let Ok(list) = fs_nav::list_dir(path)
             {
-                let processed = self.filtered_and_sorted(&list);
-                self.column_widths
-                    .insert(path.clone(), column_width_for(ui, &processed));
+                let processed = self.filtered_and_sorted(&list, false);
                 self.column_cache.insert(path.clone(), processed);
             }
         }
-        let current_width = match &self.current_column_width {
-            Some((path, len, width)) if *path == current && *len == self.visible.len() => *width,
-            _ => {
-                let width = column_width_for(ui, &self.visible);
-                self.current_column_width = Some((current.clone(), self.visible.len(), width));
-                width
-            }
-        };
-        // Largeur de chaque colonne : adaptée à son contenu ; si la place le permet, la dernière
-        // colonne occupe le reste de la largeur disponible.
-        let mut widths: Vec<f32> = crumbs
-            .iter()
-            .enumerate()
-            .map(|(level, (_, path))| {
+        // Toutes les colonnes ont la même largeur fixe ; la dernière porte aussi les informations
+        // de la liste (taille, dates…) et, si la place le permet, occupe le reste de la largeur.
+        let name_width = fixed_column_width(ui);
+        let info_columns = self.active_columns();
+        let info_width: f32 = info_columns.iter().map(|column| column.width()).sum();
+        let mut widths: Vec<f32> = (0..crumbs.len())
+            .map(|level| {
                 if level + 1 == crumbs.len() {
-                    current_width
+                    name_width + info_width
                 } else {
-                    self.column_widths
-                        .get(path)
-                        .copied()
-                        .unwrap_or(COLUMN_VIEW_MIN_WIDTH)
+                    name_width
                 }
             })
             .collect();
@@ -1511,13 +2968,15 @@ impl ExpliaApp {
         }
         let last_scroll = self.last_scroll;
         let mut new_scroll = last_scroll;
+        // Renommage en cours : sorti de `self` le temps de la frame (dernière colonne seulement).
+        let mut rename = self.renaming.take();
         egui::ScrollArea::horizontal()
             .id_salt("columns-view")
             .auto_shrink([false; 2])
             .stick_to_right(true)
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    for (level, (name, dir)) in crumbs.iter().enumerate() {
+                    for (level, (_, dir)) in crumbs.iter().enumerate() {
                         let is_last = level + 1 == crumbs.len();
                         let next_dir = crumbs.get(level + 1).map(|(_, path)| path);
                         let entries: &[Entry] = if is_last {
@@ -1528,7 +2987,23 @@ impl ExpliaApp {
                         ui.vertical(|ui| {
                             ui.set_width(widths[level]);
                             ui.set_height(height);
-                            ui.add(egui::Label::new(egui::RichText::new(name).weak()).truncate());
+                            if is_last {
+                                if let Some(key) = table_header(
+                                    ui,
+                                    &info_columns,
+                                    (self.sort_key, self.sort_order),
+                                ) {
+                                    action = Some(Action::SortBy(key));
+                                }
+                            } else {
+                                // Même hauteur que l'en-tête de la dernière colonne : les lignes
+                                // des colonnes restent alignées.
+                                ui.allocate_exact_size(
+                                    egui::vec2(1.0, row_height),
+                                    egui::Sense::hover(),
+                                );
+                                ui.separator();
+                            }
                             let mut area = egui::ScrollArea::vertical()
                                 .id_salt(("column", level))
                                 .auto_shrink([false; 2]);
@@ -1543,6 +3018,17 @@ impl ExpliaApp {
                             let output =
                                 area.show_rows(ui, row_height, entries.len(), |ui, range| {
                                     for entry in &entries[range] {
+                                        if is_last
+                                            && let Some(state) = rename.as_mut()
+                                            && state.path == entry.path
+                                        {
+                                            if let Some(rename_action) =
+                                                rename_row(ui, state, info_width)
+                                            {
+                                                action = Some(rename_action);
+                                            }
+                                            continue;
+                                        }
                                         let highlighted = if is_last {
                                             self.selected
                                                 .as_ref()
@@ -1552,15 +3038,47 @@ impl ExpliaApp {
                                             next_dir.is_some_and(|next| *next == entry.path)
                                         };
                                         let icon = if entry.is_dir { "📁" } else { "📄" };
+                                        let cells: Vec<String> = if is_last {
+                                            info_columns
+                                                .iter()
+                                                .map(|column| self.entry_cell(entry, *column))
+                                                .collect()
+                                        } else {
+                                            Vec::new()
+                                        };
+                                        let row_columns: &[Column] =
+                                            if is_last { &info_columns } else { &[] };
                                         let response = table_row(
                                             ui,
                                             highlighted,
                                             entry.hidden,
                                             &format!("{icon} {}", entry.name),
-                                            &[],
-                                            &[],
+                                            row_columns,
+                                            &cells,
                                         );
-                                        if response.double_clicked() && !entry.is_dir {
+                                        let (ctrl, shift) =
+                                            ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                                        if let Some(drag) =
+                                            self.drag_out_check(ui, &response, entry)
+                                        {
+                                            action = Some(drag);
+                                        } else if is_last && response.clicked() && ctrl {
+                                            // Ctrl+clic : ajoute ou retire l'élément de la sélection
+                                            // multiple (dossier ou fichier de la dernière colonne).
+                                            action = Some(Action::ToggleMulti(entry.clone()));
+                                        } else if is_last && response.clicked() && shift {
+                                            action = Some(Action::SelectRange(entry.clone()));
+                                        } else if !is_last && response.clicked() && (ctrl || shift)
+                                        {
+                                            // Colonne précédente : la sélection multiple part de
+                                            // l'élément en surbrillance dans cette colonne.
+                                            action = Some(Action::ColumnMultiSelect {
+                                                dir: dir.clone(),
+                                                anchor: next_dir.cloned(),
+                                                entry: entry.clone(),
+                                                range: shift && !ctrl,
+                                            });
+                                        } else if response.double_clicked() && !entry.is_dir {
                                             action = Some(open_action(&entry.path));
                                         } else if response.clicked() {
                                             action = Some(if entry.is_dir {
@@ -1574,6 +3092,15 @@ impl ExpliaApp {
                                                 }
                                             });
                                         }
+                                        // Mêmes fonctions que la liste : renommer (dernière
+                                        // colonne), favoris, ouvrir / lire / exécuter.
+                                        response.context_menu(|ui| {
+                                            if let Some(menu_action) =
+                                                self.entry_menu(ui, entry, is_last)
+                                            {
+                                                action = Some(menu_action);
+                                            }
+                                        });
                                     }
                                 });
                             if is_last {
@@ -1588,14 +3115,123 @@ impl ExpliaApp {
                 });
             });
         self.last_scroll = new_scroll;
+        self.renaming = rename;
+        action
+    }
+
+    /// Mode « grille » : hors de Home, des zones côte à côte — les lecteurs (sauf si l'onglet « Ce PC »
+    /// de la barre latérale les montre déjà), une colonne de navigation (`..` et sous-dossiers),
+    /// puis la grille. Dans Home, la grille seule (avec les
+    /// dossiers en tuiles pour pouvoir y entrer).
+    fn gallery_layout(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        if !self.grid_side_columns() {
+            return self.gallery_view(ui);
+        }
+        let mut action = None;
+        let height = ui.available_height();
+        let gap = ui.spacing().item_spacing.x * 2.0 + 1.0;
+        // Les lecteurs ne sont pas répétés quand l'onglet « Ce PC » de la barre latérale les montre.
+        let show_drives = self.sidebar_tab != SidebarTab::Pc;
+        let zones = if show_drives { 2.0 } else { 1.0 };
+        // Sur une fenêtre étroite, la grille garde au moins une tuile de large.
+        let side = (ui.available_width() - GALLERY_TILE - (zones * gap)).max(0.0);
+        let drives_width = if show_drives {
+            GALLERY_DRIVES_WIDTH.min(side * 0.45)
+        } else {
+            0.0
+        };
+        let nav_width = GALLERY_NAV_WIDTH.min(side - drives_width).max(0.0);
+        let grid_width = (ui.available_width() - drives_width - nav_width - zones * gap).max(60.0);
+        ui.horizontal_top(|ui| {
+            if show_drives {
+                ui.vertical(|ui| {
+                    ui.set_width(drives_width);
+                    ui.set_height(height);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    egui::ScrollArea::vertical()
+                        .id_salt("gallery-drives")
+                        .auto_shrink([false; 2])
+                        .show(ui, |ui| {
+                            action = self.drives_list(ui, false).or(action.take());
+                        });
+                });
+                ui.separator();
+            }
+            ui.vertical(|ui| {
+                ui.set_width(nav_width);
+                ui.set_height(height);
+                action = self.nav_column(ui).or(action.take());
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_width(grid_width);
+                ui.set_height(height);
+                action = self.gallery_view(ui).or(action.take());
+            });
+        });
+        action
+    }
+
+    /// Colonne de navigation de la grille d'images : `..` puis les sous-dossiers du dossier.
+    fn nav_column(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        // Le dossier de la barre d'adresse, en tête de la colonne.
+        if let Location::Dir(path) = &self.location {
+            ui.add(egui::Label::new(egui::RichText::new(favorite_name(path)).weak()).truncate());
+        }
+        let parent = self.location.parent();
+        let folders: Vec<&Entry> = self.visible.iter().filter(|e| e.is_dir).collect();
+        let shift = usize::from(parent.is_some());
+        let row_height = table_row_height(ui);
+        egui::ScrollArea::vertical()
+            .id_salt("gallery-nav")
+            .auto_shrink([false; 2])
+            .show_rows(ui, row_height, folders.len() + shift, |ui, range| {
+                for row in range {
+                    if row < shift {
+                        if let Some(parent) = &parent
+                            && parent_row(ui).clicked()
+                        {
+                            action = Some(Action::Go(parent.clone()));
+                        }
+                        continue;
+                    }
+                    let entry = folders[row - shift];
+                    let selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path);
+                    let response = table_row(
+                        ui,
+                        selected,
+                        entry.hidden,
+                        &format!("📁 {}", entry.name),
+                        &[],
+                        &[],
+                    );
+                    if response.clicked() {
+                        action = Some(Action::Go(Location::Dir(entry.path.clone())));
+                    }
+                    response.context_menu(|ui| {
+                        if let Some(menu_action) = self.entry_menu(ui, entry, false) {
+                            action = Some(menu_action);
+                        }
+                    });
+                }
+            });
         action
     }
 
     /// Grille de miniatures : visionnage rapide des images du dossier. Les dossiers et les autres
     /// fichiers apparaissent comme des tuiles avec une icône.
     fn gallery_view(&mut self, ui: &mut egui::Ui) -> Option<Action> {
-        if self.visible.is_empty() {
-            ui.label("Aucun élément à afficher dans ce dossier.");
+        // Éléments de la grille (indices dans `visible`) : les images ou les vidéos du dossier.
+        let items: Vec<usize> = (0..self.visible.len())
+            .filter(|&index| self.in_grid(&self.visible[index]))
+            .collect();
+        if items.is_empty() {
+            ui.label(if self.view_mode == ViewMode::Videos {
+                "Aucune vidéo dans ce dossier."
+            } else {
+                "Aucune image dans ce dossier."
+            });
             return None;
         }
         let spacing = ui.spacing().item_spacing;
@@ -1604,7 +3240,7 @@ impl ExpliaApp {
             as usize)
             .max(1);
         self.gallery_columns = columns;
-        let rows = self.visible.len().div_ceil(columns);
+        let rows = items.len().div_ceil(columns);
         let mut area = egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .scroll_source(
@@ -1627,9 +3263,10 @@ impl ExpliaApp {
             for row in range {
                 ui.horizontal(|ui| {
                     for column in 0..columns {
-                        let Some(entry) = self.visible.get(row * columns + column) else {
+                        let Some(&index) = items.get(row * columns + column) else {
                             break;
                         };
+                        let entry = &self.visible[index];
                         let selected = self.selected.as_ref().is_some_and(|s| s.path == entry.path)
                             || self.multi.iter().any(|m| m.path == entry.path);
                         let is_image = !entry.is_dir && preview::is_supported_image(&entry.path);
@@ -1638,7 +3275,16 @@ impl ExpliaApp {
                             wanted.push(entry.path.clone());
                         }
                         let response = gallery_tile(ui, entry, selected, thumb);
-                        if response.double_clicked() {
+                        let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                        if let Some(drag) = self.drag_out_check(ui, &response, entry) {
+                            action = Some(drag);
+                        } else if response.clicked() && ctrl {
+                            // Ctrl+clic : ajoute ou retire la tuile de la sélection multiple.
+                            action = Some(Action::ToggleMulti(entry.clone()));
+                        } else if response.clicked() && shift {
+                            // Maj+clic : sélectionne la plage depuis la dernière tuile choisie.
+                            action = Some(Action::SelectRange(entry.clone()));
+                        } else if response.double_clicked() {
                             action = Some(if entry.is_dir {
                                 Action::Go(Location::Dir(entry.path.clone()))
                             } else {
@@ -1656,43 +3302,38 @@ impl ExpliaApp {
         action
     }
 
-    fn drives_view(&self, ui: &mut egui::Ui) -> Option<Action> {
-        let mut action = None;
-        ui.heading("Périphériques et lecteurs");
-        ui.add_space(6.0);
-        if self.drives.is_empty() {
-            ui.label("Aucun lecteur détecté.");
+    /// Libellé d'une ligne de la liste. Parmi des résultats : numéro de groupe (doublons) et
+    /// dossier d'origine, relatif au dossier affiché.
+    fn row_label(&self, icon: &str, entry: &Entry) -> String {
+        if self.results.is_none() {
+            return format!("{icon} {}", entry.name);
         }
-        table_header(ui, &[Column::Size]);
-        egui::ScrollArea::vertical()
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                for (index, drive) in self.drives.iter().enumerate() {
-                    let name = format!(
-                        "{}  {}   —   {}",
-                        drive_icon(drive.kind),
-                        drive.label(),
-                        drive.kind_name()
-                    );
-                    let size = match self.drive_sizes.get(&drive.path) {
-                        None => "…".to_string(),
-                        Some(None) => "—".to_string(),
-                        Some(Some(bytes)) => fs_nav::format_size(*bytes),
-                    };
-                    let highlighted = self.drive_cursor == Some(index);
-                    if size_row(ui, highlighted, &name, &size).clicked() {
-                        action = Some(Action::Go(Location::Dir(drive.path.clone())));
-                    }
-                }
-            });
-        action
+        let group = self
+            .duplicate_groups
+            .get(&entry.path)
+            .map_or(String::new(), |group| format!("#{group}  "));
+        let origin = match (&self.location, entry.path.parent()) {
+            (Location::Dir(root), Some(parent)) => parent.strip_prefix(root).map_or_else(
+                |_| parent.display().to_string(),
+                |p| p.display().to_string(),
+            ),
+            (_, Some(parent)) => parent.display().to_string(),
+            _ => String::new(),
+        };
+        if origin.is_empty() {
+            format!("{group}{icon} {}", entry.name)
+        } else {
+            format!("{group}{icon} {}   —   {origin}", entry.name)
+        }
     }
 
     /// Texte de la colonne « Taille » d'une entrée de dossier.
     fn entry_size_text(&self, entry: &Entry) -> String {
         match entry.size {
             Some(bytes) => fs_nav::format_size(bytes),
-            None if entry.is_dir && !self.skip_folder_sizes => "Calcul…".to_string(),
+            None if entry.is_dir && !self.skip_folder_sizes && self.results.is_none() => {
+                "Calcul…".to_string()
+            }
             None => String::new(),
         }
     }
@@ -1760,16 +3401,41 @@ impl ExpliaApp {
 
     fn listing_view(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        if self.entries.is_empty() {
-            ui.label("Ce dossier est vide.");
-            return None;
-        }
-        if self.visible.is_empty() {
-            ui.label("Aucun élément ne correspond au filtre d'extension.");
-            return None;
-        }
+        // Première ligne : « .. » revient au dossier précédent (le parent).
+        let parent = if self.results.is_some() {
+            None
+        } else {
+            self.location.parent()
+        };
+        let shift = usize::from(parent.is_some());
+        let empty_message = if let Some(results) = &self.results {
+            if !self.visible.is_empty() {
+                None
+            } else if results.running {
+                Some("Analyse en cours…")
+            } else {
+                Some("Aucun résultat.")
+            }
+        } else if self.entries.is_empty() {
+            Some("Ce dossier est vide.")
+        } else if self.visible.is_empty() {
+            Some("Aucun élément ne correspond à la recherche.")
+        } else {
+            None
+        };
         let columns = self.active_columns();
-        table_header(ui, &columns);
+        if let Some(message) = empty_message {
+            if let Some(parent) = parent
+                && parent_row(ui).clicked()
+            {
+                action = Some(Action::Go(parent));
+            }
+            ui.label(message);
+            return action;
+        }
+        if let Some(key) = table_header(ui, &columns, (self.sort_key, self.sort_order)) {
+            action = Some(Action::SortBy(key));
+        }
         // `show_rows` veut la hauteur d'une ligne SANS l'espacement (il l'ajoute lui-même) ;
         // le pas réel entre deux lignes sert au calcul du défilement.
         let row_height = table_row_height(ui);
@@ -1789,19 +3455,29 @@ impl ExpliaApp {
             ui.ctx().request_repaint();
             let (offset, view_height) = self.last_scroll;
             area = area.vertical_scroll_offset(view::scroll_offset_for(
-                index,
+                index + shift,
                 row_pitch,
                 offset,
                 view_height,
             ));
         }
-        let output = area.show_rows(ui, row_height, self.visible.len(), |ui, range| {
-            for entry in &self.visible[range] {
+        let rows = self.visible.len() + shift;
+        let output = area.show_rows(ui, row_height, rows, |ui, range| {
+            for row in range {
+                if row < shift {
+                    if let Some(parent) = &parent
+                        && parent_row(ui).clicked()
+                    {
+                        action = Some(Action::Go(parent.clone()));
+                    }
+                    continue;
+                }
+                let entry = &self.visible[row - shift];
                 // Ligne en cours de renommage : champ de saisie à la place du libellé.
                 if let Some(state) = rename.as_mut()
                     && state.path == entry.path
                 {
-                    if let Some(rename_action) = rename_row(ui, state) {
+                    if let Some(rename_action) = rename_row(ui, state, Column::Size.width()) {
                         action = Some(rename_action);
                     }
                     continue;
@@ -1827,7 +3503,7 @@ impl ExpliaApp {
                     ui,
                     is_selected,
                     entry.hidden,
-                    &format!("{icon} {}", entry.name),
+                    &self.row_label(icon, entry),
                     &columns,
                     &cells,
                 );
@@ -1865,6 +3541,10 @@ impl ExpliaApp {
                 if response.long_touched() {
                     action = Some(Action::LongPress(entry.clone()));
                 }
+                // Appui puis déplacement : glisser vers le Bureau ou une autre application.
+                if let Some(drag) = self.drag_out_check(ui, &response, entry) {
+                    action = Some(drag);
+                }
                 let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
                 if response.clicked() && ctrl {
                     // Ctrl+clic : ajoute ou retire la ligne de la sélection multiple.
@@ -1890,44 +3570,8 @@ impl ExpliaApp {
                     });
                 }
                 response.context_menu(|ui| {
-                    if ui.button("Renommer  (F2)").clicked() {
-                        action = Some(Action::StartRename(entry.clone()));
-                        ui.close();
-                    }
-                    ui.separator();
-                    if entry.is_dir {
-                        if self.favorites.contains(&entry.path) {
-                            if ui.button("Retirer des favoris").clicked() {
-                                action = Some(Action::RemoveFavorite(entry.path.clone()));
-                                ui.close();
-                            }
-                        } else if ui.button("Ajouter aux favoris").clicked() {
-                            action = Some(Action::AddFavorite(entry.path.clone()));
-                            ui.close();
-                        }
-                    } else {
-                        let playable = is_playable(&entry.path);
-                        let label = if launch::is_executable(&entry.path) {
-                            "Exécuter"
-                        } else if playable {
-                            "Lire"
-                        } else {
-                            "Ouvrir"
-                        };
-                        if ui.button(label).clicked() {
-                            action = Some(open_action(&entry.path));
-                            ui.close();
-                        }
-                        if playable && ui.button("Ouvrir avec le lecteur externe").clicked() {
-                            action = Some(Action::Open(entry.path.clone()));
-                            ui.close();
-                        }
-                        if launch::is_executable(&entry.path)
-                            && ui.button("Exécuter en tant qu'administrateur").clicked()
-                        {
-                            action = Some(Action::OpenAsAdmin(entry.path.clone()));
-                            ui.close();
-                        }
+                    if let Some(menu_action) = self.entry_menu(ui, entry, true) {
+                        action = Some(menu_action);
                     }
                 });
             }
@@ -1937,12 +3581,126 @@ impl ExpliaApp {
         action
     }
 
+    /// Menu contextuel d'une ligne (liste, colonnes, colonne de navigation) : renommer
+    /// (si `allow_rename`), favoris pour un dossier, ouvrir / lire / exécuter pour un fichier.
+    fn entry_menu(&self, ui: &mut egui::Ui, entry: &Entry, allow_rename: bool) -> Option<Action> {
+        let mut action = None;
+        if allow_rename {
+            if ui.button("Renommer  (F2)").clicked() {
+                action = Some(Action::StartRename(entry.clone()));
+                ui.close();
+            }
+            ui.separator();
+        }
+        // Copier : l'élément, ou toute la multi-sélection s'il en fait partie.
+        let targets: Vec<PathBuf> = if self.multi.iter().any(|m| m.path == entry.path) {
+            self.multi.iter().map(|m| m.path.clone()).collect()
+        } else {
+            vec![entry.path.clone()]
+        };
+        let copy_label = if targets.len() > 1 {
+            format!("📋 Copier ({} éléments)  (Ctrl+C)", targets.len())
+        } else {
+            "📋 Copier  (Ctrl+C)".to_string()
+        };
+        if ui
+            .button(copy_label)
+            .on_hover_text("À coller dans l'Explorateur, sur le Bureau ou ailleurs (Ctrl+V)")
+            .clicked()
+        {
+            action = Some(Action::CopyFiles(targets));
+            ui.close();
+        }
+        if ui.button("Copier le chemin").clicked() {
+            action = Some(Action::CopyPath(entry.path.clone()));
+            ui.close();
+        }
+        if entry.is_dir {
+            if ui.button("🗂 Ouvrir dans un nouvel onglet").clicked() {
+                action = Some(Action::NewTab(entry.path.clone()));
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    clipboard::has_files(),
+                    egui::Button::new("📥 Coller dans ce dossier"),
+                )
+                .clicked()
+            {
+                action = Some(Action::Paste {
+                    dest: entry.path.clone(),
+                });
+                ui.close();
+            }
+            if ui.button(">_ PowerShell ici").clicked() {
+                action = Some(Action::OpenPowerShell {
+                    dir: entry.path.clone(),
+                    admin: false,
+                });
+                ui.close();
+            }
+            if ui.button(">_ PowerShell ici (administrateur)").clicked() {
+                action = Some(Action::OpenPowerShell {
+                    dir: entry.path.clone(),
+                    admin: true,
+                });
+                ui.close();
+            }
+        }
+        ui.separator();
+        if entry.is_dir {
+            if self.favorites.contains(&entry.path) {
+                if ui.button("Retirer des favoris").clicked() {
+                    action = Some(Action::RemoveFavorite(entry.path.clone()));
+                    ui.close();
+                }
+            } else if ui.button("Ajouter aux favoris").clicked() {
+                action = Some(Action::AddFavorite(entry.path.clone()));
+                ui.close();
+            }
+        } else {
+            let playable = is_playable(&entry.path);
+            let label = if launch::is_executable(&entry.path) {
+                "Exécuter"
+            } else if playable {
+                "Lire"
+            } else {
+                "Ouvrir"
+            };
+            if ui.button(label).clicked() {
+                action = Some(open_action(&entry.path));
+                ui.close();
+            }
+            if launch::is_executable(&entry.path) {
+                if self.applications.contains(&entry.path) {
+                    if ui.button("Retirer des applications").clicked() {
+                        action = Some(Action::RemoveApplication(entry.path.clone()));
+                        ui.close();
+                    }
+                } else if ui.button("Ajouter aux applications").clicked() {
+                    action = Some(Action::AddApplication(entry.path.clone()));
+                    ui.close();
+                }
+            }
+            if playable && ui.button("Ouvrir avec le lecteur externe").clicked() {
+                action = Some(Action::Open(entry.path.clone()));
+                ui.close();
+            }
+            if launch::is_executable(&entry.path)
+                && ui.button("Exécuter en tant qu'administrateur").clicked()
+            {
+                action = Some(Action::OpenAsAdmin(entry.path.clone()));
+                ui.close();
+            }
+        }
+        action
+    }
+
     /// Navigation aux flèches :
     /// - haut / bas : ligne précédente / suivante (avec Maj : étend la sélection) ;
     /// - gauche : dossier parent (le dossier quitté est resélectionné) ;
     /// - droite : entre dans le dossier sélectionné (son premier élément est sélectionné).
     ///
-    /// Dans la vue « Ce PC », haut / bas déplacent le lecteur en surbrillance et droite l'ouvre.
     fn arrow_key_action(&mut self, ctx: &egui::Context) -> Option<Action> {
         let (up, down, left, right, shift, backspace, enter) = ctx.input(|i| {
             (
@@ -1955,23 +3713,27 @@ impl ExpliaApp {
                 i.key_pressed(egui::Key::Enter),
             )
         });
-        let gallery = self.view_mode == ViewMode::Gallery;
+        let gallery = self.view_mode.is_grid();
         if !(up || down || left || right || backspace || (enter && gallery)) {
             return None;
         }
         let vertical = if down { 1 } else { -1 };
-        match &self.location {
-            Location::ThisPc => {
-                if up || down {
-                    self.drive_cursor =
-                        view::step_index(self.drive_cursor, self.drives.len(), vertical);
-                    return None;
-                }
-                if right && let Some(drive) = self.drive_cursor.and_then(|i| self.drives.get(i)) {
-                    return Some(Action::EnterFolder(drive.path.clone()));
-                }
-                None
+        // La barre latérale a la main (clic sur un lecteur, un dossier de Home ou un favori, ou
+        // flèche gauche au plus haut d'un lecteur) : ↑ / ↓ changent d'élément, → rend la main
+        // au dossier.
+        if self.sidebar_focus {
+            if up || down {
+                self.step_sidebar(vertical);
+            } else if right || (enter && gallery) {
+                self.sidebar_focus = false;
+                self.sidebar_cursor = None;
+                self.scroll_to_index = Some(0);
+                return self.visible.first().cloned().map(Action::Select);
             }
+            return None;
+        }
+        match &self.location {
+            Location::ThisPc => None,
             Location::Dir(_) => {
                 // Retour arrière : dossier parent, dans tous les modes d'affichage.
                 if backspace {
@@ -1989,9 +3751,9 @@ impl ExpliaApp {
                         _ => 0,
                     };
                     if delta != 0 {
-                        let next =
-                            view::step_index(self.cursor_index(), self.visible.len(), delta)?;
-                        let entry = self.visible[next].clone();
+                        let list = self.nav_list();
+                        let next = view::step_index(self.cursor_index(), list.len(), delta)?;
+                        let entry = list[next].clone();
                         self.scroll_to_index = Some(next);
                         return Some(if shift {
                             Action::SelectRange(entry)
@@ -2106,6 +3868,94 @@ impl ExpliaApp {
         action
     }
 
+    /// Emplacement d'un résultat, dans le volet de détail : le dossier qui le contient, puis
+    /// chaque dossier au-dessus jusqu'au dossier affiché (exclu). Chaque ligne permet d'**ouvrir**
+    /// ce dossier (on y retrouve le fichier, on peut remonter) ou de le **supprimer**
+    /// (corbeille, avec confirmation) : pratique pour éliminer un dossier entier de doublons.
+    fn result_location(&self, ui: &mut egui::Ui, entry: &Entry) -> Option<Action> {
+        let mut action = None;
+        let Location::Dir(root) = &self.location else {
+            return None;
+        };
+        let parent = entry.path.parent()?;
+        ui.add_space(2.0);
+        ui.weak("Emplacement");
+        let mut levels = fs_nav::levels_below(root, &entry.path);
+        if levels.is_empty() {
+            // Directement dans le dossier affiché : on peut seulement l'ouvrir.
+            levels.push(parent.to_path_buf());
+        }
+        for (index, level) in levels.iter().enumerate() {
+            let label = level
+                .strip_prefix(root)
+                .ok()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map_or_else(|| level.display().to_string(), |p| p.display().to_string());
+            ui.horizontal(|ui| {
+                let open = ui
+                    .small_button("↗ Ouvrir")
+                    .on_hover_text(format!("Aller dans {}", level.display()));
+                if open.clicked() {
+                    action = Some(if index == 0 {
+                        Action::GoSelect {
+                            dir: level.clone(),
+                            file: entry.path.clone(),
+                        }
+                    } else {
+                        Action::Go(Location::Dir(level.clone()))
+                    });
+                }
+                // Le dossier affiché lui-même se supprime depuis son propre volet.
+                if level != root
+                    && ui
+                        .small_button("🗑")
+                        .on_hover_text("Supprimer ce dossier (corbeille, avec confirmation)")
+                        .clicked()
+                {
+                    action = Some(Action::AskDeleteFolder(level.clone()));
+                }
+                ui.add(egui::Label::new(egui::RichText::new(label).weak()).truncate());
+            });
+        }
+        ui.add_space(2.0);
+        action
+    }
+
+    /// Outils d'un dossier, dans le volet de détail : PowerShell (normal ou administrateur) et
+    /// copie du chemin.
+    fn folder_tools(&self, ui: &mut egui::Ui, dir: &Path) -> Option<Action> {
+        let mut action = None;
+        ui.horizontal_wrapped(|ui| {
+            if powershell_button(ui, ">_ PowerShell")
+                .on_hover_text("Ouvre PowerShell dans ce dossier")
+                .clicked()
+            {
+                action = Some(Action::OpenPowerShell {
+                    dir: dir.to_path_buf(),
+                    admin: false,
+                });
+            }
+            if powershell_button(ui, ">_ Admin")
+                .on_hover_text("Ouvre PowerShell en tant qu'administrateur (fenêtre UAC)")
+                .clicked()
+            {
+                action = Some(Action::OpenPowerShell {
+                    dir: dir.to_path_buf(),
+                    admin: true,
+                });
+            }
+            if ui
+                .button("📋 Chemin")
+                .on_hover_text("Copie le chemin du dossier")
+                .clicked()
+            {
+                action = Some(Action::CopyPath(dir.to_path_buf()));
+            }
+        });
+        ui.add_space(4.0);
+        action
+    }
+
     /// Contenu du volet pendant la multi-sélection : résumé et actions (supprimer).
     fn actions_content(&self, ui: &mut egui::Ui) -> Option<Action> {
         let count = self.multi.len();
@@ -2117,7 +3967,19 @@ impl ExpliaApp {
         ui.label(egui::RichText::new(format!("{count} {kind} sélectionné(s)")).strong());
         ui.weak("Clic maintenu ou clic sur une ligne pour ajouter ou retirer.");
         ui.add_space(6.0);
-        let action = self.edit_controls(ui, &format!("{count} {kind}"), None, true);
+        let mut copy_action = None;
+        if ui
+            .button("📋 Copier  (Ctrl+C)")
+            .on_hover_text("À coller dans l'Explorateur, sur le Bureau ou ailleurs (Ctrl+V)")
+            .clicked()
+        {
+            copy_action = Some(Action::CopyFiles(
+                self.multi.iter().map(|e| e.path.clone()).collect(),
+            ));
+        }
+        let action = self
+            .edit_controls(ui, &format!("{count} {kind}"), None, true)
+            .or(copy_action);
         ui.add_space(6.0);
         ui.separator();
         let row_height = table_row_height(ui);
@@ -2142,28 +4004,59 @@ impl ExpliaApp {
     /// Volet d'aperçu. Renvoie `true` si l'utilisateur a cliqué sur la flèche
     /// « < » / « > » pour agrandir ou réduire le volet, et l'action éventuelle
     /// demandée (ouvrir le fichier).
-    fn preview_panel(&self, ui: &mut egui::Ui) -> (bool, Option<Action>) {
+    fn preview_panel(&self, ui: &mut egui::Ui) -> Option<Action> {
         let option_action = self.option_bar(ui);
-        let (toggle, content_action) = self.preview_content(ui);
-        (toggle, option_action.or(content_action))
+        let content_action = self.preview_content(ui);
+        option_action.or(content_action)
     }
 
-    /// Barre d'options, au-dessus de l'aperçu : navigation en colonnes (style Mac) et
-    /// visionnage d'images (grille de miniatures). Les éléments cachés se règlent dans « Afficher ».
+    /// Largeur minimale du volet de détail : la flèche et les boutons Colonnes, Images et Vidéos
+    /// tiennent sur une seule ligne.
+    fn detail_min_width(ui: &egui::Ui) -> f32 {
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let padding = ui.spacing().button_padding.x * 2.0;
+        let gap = ui.spacing().item_spacing.x;
+        let labels = [
+            OPTION_COLUMNS_LABEL,
+            OPTION_IMAGES_LABEL,
+            OPTION_VIDEOS_LABEL,
+        ];
+        let buttons: f32 = labels
+            .iter()
+            .map(|label| {
+                let galley = ui.painter().layout_no_wrap(
+                    (*label).to_string(),
+                    font.clone(),
+                    egui::Color32::WHITE,
+                );
+                galley.size().x + padding
+            })
+            .sum();
+        // Marges du panneau, poignée de redimensionnement, barre de défilement éventuelle.
+        buttons + gap * (labels.len() - 1) as f32 + 36.0
+    }
+
+    /// Barre du haut du volet de détail : flèche d'agrandissement, navigation en colonnes
+    /// (style Mac), visionnage d'images et de vidéos (grilles). Les éléments cachés se règlent dans « Afficher ».
     fn option_bar(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             for (mode, label, hint) in [
                 (
                     ViewMode::Columns,
-                    "▥ Colonnes",
+                    OPTION_COLUMNS_LABEL,
                     "Navigation en colonnes, comme sur Mac : un niveau du chemin par colonne",
                 ),
                 (
                     ViewMode::Gallery,
-                    "🖼 Images",
-                    "Visionnage d'images : grille de miniatures pour en voir plusieurs rapidement",
+                    OPTION_IMAGES_LABEL,
+                    "Visionnage d'images : les images du dossier en grille de miniatures",
+                ),
+                (
+                    ViewMode::Videos,
+                    OPTION_VIDEOS_LABEL,
+                    "Visionnage de vidéos : les vidéos du dossier en grille",
                 ),
             ] {
                 let active = self.view_mode == mode;
@@ -2206,18 +4099,34 @@ impl ExpliaApp {
     /// Image de la vidéo et commandes : lecture / pause, arrêt, position, volume.
     fn player_controls(ui: &mut egui::Ui, active: &ActivePlayer) -> Option<Action> {
         let mut action = None;
-        let player = &active.player;
         match &active.texture {
             Some(texture) => {
                 let size = texture.size_vec2();
                 let scale = (ui.available_width() / size.x).min(4.0);
-                ui.image(egui::load::SizedTexture::new(texture.id(), size * scale));
+                let image =
+                    egui::Image::new(egui::load::SizedTexture::new(texture.id(), size * scale))
+                        .sense(egui::Sense::click());
+                // Double-clic sur la vidéo : plein écran.
+                if ui
+                    .add(image)
+                    .on_hover_text("Double-clic : plein écran")
+                    .double_clicked()
+                {
+                    action = Some(Action::ToggleVideoFullscreen);
+                }
             }
             None => {
                 // Son (pas d'image) ou image pas encore décodée.
                 ui.label(egui::RichText::new("🎵").size(48.0));
             }
         }
+        Self::player_bar(ui, active).or(action)
+    }
+
+    /// Commandes du lecteur : lecture / pause, arrêt, position, volume.
+    fn player_bar(ui: &mut egui::Ui, active: &ActivePlayer) -> Option<Action> {
+        let mut action = None;
+        let player = &active.player;
         let state = player.state();
         let length = player.length();
         ui.horizontal(|ui| {
@@ -2268,29 +4177,41 @@ impl ExpliaApp {
     }
 
     /// Contenu du volet : en-tête, aperçu ou actions.
-    fn preview_content(&self, ui: &mut egui::Ui) -> (bool, Option<Action>) {
-        let mut toggle = false;
+    fn preview_content(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let (arrow, hint) = if self.preview_expanded {
-                (">", "Réduire le volet d'aperçu")
-            } else {
-                ("<", "Agrandir le volet d'aperçu")
-            };
-            toggle = ui.button(arrow).on_hover_text(hint).clicked();
-            // Un dossier (ou une multi-sélection) n'a pas d'aperçu : le volet propose des actions.
-            let actions_mode =
-                !self.multi.is_empty() || self.selected.as_ref().is_some_and(|s| s.is_dir);
-            ui.heading(if actions_mode { "Actions" } else { "Aperçu" });
-        });
-        ui.separator();
         if !self.multi.is_empty() {
-            return (toggle, self.actions_content(ui));
+            return self.actions_content(ui);
         }
         let Some(selected) = &self.selected else {
-            ui.weak("Sélectionnez un élément.");
-            return (toggle, None);
+            // Aucun élément choisi : le volet propose d'agir sur le dossier affiché lui-même.
+            if let Location::Dir(path) = &self.location
+                && self.results.is_none()
+                && path.parent().is_some()
+            {
+                ui.label(egui::RichText::new(favorite_name(path)).strong());
+                ui.label("Dossier courant");
+                ui.add_space(6.0);
+                let tools = self.folder_tools(ui, path);
+                if ui
+                    .add_enabled(clipboard::has_files(), egui::Button::new("📥 Coller ici"))
+                    .on_hover_text("Copie ici les fichiers du presse-papiers (Ctrl+V)")
+                    .clicked()
+                {
+                    return Some(Action::Paste { dest: path.clone() });
+                }
+                if ui
+                    .button("🗑 Supprimer ce dossier")
+                    .on_hover_text("Envoie le dossier affiché à la corbeille (après confirmation)")
+                    .clicked()
+                {
+                    return Some(Action::AskDeleteFolder(path.clone()));
+                }
+                ui.weak("Suppression : vers la corbeille de Windows.");
+                return tools;
+            } else {
+                ui.weak("Sélectionnez un élément.");
+            }
+            return None;
         };
         // La taille d'un dossier peut arriver après la sélection : on relit l'entrée à jour.
         let entry = self
@@ -2299,6 +4220,11 @@ impl ExpliaApp {
             .find(|e| e.path == selected.path)
             .unwrap_or(selected);
         ui.label(egui::RichText::new(&entry.name).strong());
+        // Parmi des résultats (doublons, recherche) : où se trouve l'élément, avec de quoi aller
+        // dans son dossier, remonter et supprimer un dossier parent.
+        if self.results.is_some() {
+            action = self.result_location(ui, entry);
+        }
         if entry.is_dir {
             ui.label("Dossier");
             let size = self.entry_size_text(entry);
@@ -2306,8 +4232,12 @@ impl ExpliaApp {
                 ui.label(format!("Taille : {size}"));
             }
             ui.add_space(6.0);
+            let tools = self.folder_tools(ui, &entry.path);
             let what = format!("le dossier « {} »", entry.name);
-            return (toggle, self.edit_controls(ui, &what, Some(entry), false));
+            return self
+                .edit_controls(ui, &what, Some(entry), false)
+                .or(action)
+                .or(tools);
         }
         ui.label(preview::kind_description(&entry.path));
         ui.label(format!("Taille : {}", self.entry_size_text(entry)));
@@ -2367,7 +4297,7 @@ impl ExpliaApp {
                 action = player_action;
             }
             if showing {
-                return (toggle, action);
+                return action;
             }
         }
         if !preview::is_previewable(&entry.path) {
@@ -2390,7 +4320,7 @@ impl ExpliaApp {
             } else {
                 ui.weak("Pas d'aperçu pour ce type de fichier.");
             }
-            return (toggle, action);
+            return action;
         }
         ui.add_space(8.0);
         match &self.preview {
@@ -2466,12 +4396,21 @@ impl ExpliaApp {
             }
             _ => {}
         }
-        (toggle, action)
+        action
     }
 
     fn status_text(&self) -> String {
+        if let Some(results) = &self.results {
+            let what = match results.kind {
+                ResultKind::Search => "résultat(s) de recherche",
+                ResultKind::EmptyFolders => "dossier(s) vide(s)",
+                ResultKind::Duplicates => "fichier(s) en doublon",
+                ResultKind::LargeFiles => "gros fichier(s)",
+            };
+            return format!("{} {what}", self.visible.len());
+        }
         match &self.location {
-            Location::ThisPc => format!("{} lecteur(s)", self.drives.len()),
+            Location::ThisPc => "Aucun dossier ouvert".to_string(),
             Location::Dir(_) => {
                 let count = if self.visible.len() == self.entries.len() {
                     format!("{} élément(s)", self.entries.len())
@@ -2488,17 +4427,59 @@ impl ExpliaApp {
     }
 }
 
+/// Bouton aux couleurs de PowerShell (fond bleu nuit, texte blanc).
+fn powershell_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(label)
+                .color(egui::Color32::WHITE)
+                .strong(),
+        )
+        .fill(egui::Color32::from_rgb(1, 36, 86)),
+    )
+}
+
+/// Ligne « .. » en tête de liste : un clic revient au dossier précédent (le parent).
+fn parent_row(ui: &mut egui::Ui) -> egui::Response {
+    table_row(ui, false, false, "⬆ ..", &[], &[])
+        .on_hover_text("Dossier parent (Retour arrière)")
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Mot du fil d'Ariane : sans cadre au repos, bouton coloré au survol (voir `breadcrumb_bar`).
+fn crumb_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(egui::Button::new(label).frame_when_inactive(false))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Agrandit le texte et les boutons d'une barre du haut (style local à `ui`).
+fn enlarge_toolbar(ui: &mut egui::Ui) {
+    let style = ui.style_mut();
+    for text_style in [egui::TextStyle::Body, egui::TextStyle::Button] {
+        if let Some(font) = style.text_styles.get_mut(&text_style) {
+            font.size += TOOLBAR_TEXT_BOOST;
+        }
+    }
+    style.spacing.interact_size.y = 30.0;
+    style.spacing.button_padding = egui::vec2(10.0, 5.0);
+}
+
 /// Bouton de menu qui reste ouvert tant qu'on ne clique pas à l'extérieur.
-fn menu(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+fn menu(
+    ui: &mut egui::Ui,
+    title: &str,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
     MenuButton::new(title)
         .config(MenuConfig::new().close_behavior(PopupCloseBehavior::CloseOnClickOutside))
-        .ui(ui, add_contents);
+        .ui(ui, add_contents)
+        .0
 }
 
 /// Ligne en cours de renommage : Entrée valide, Échap ou un clic ailleurs annule.
-fn rename_row(ui: &mut egui::Ui, state: &mut RenameState) -> Option<Action> {
+fn rename_row(ui: &mut egui::Ui, state: &mut RenameState, reserved: f32) -> Option<Action> {
     let id = egui::Id::unique("rename-edit");
-    let width = (ui.available_width() - Column::Size.width()).max(120.0);
+    let width = (ui.available_width() - reserved).max(120.0);
     let edit = ui.add_sized(
         [width, table_row_height(ui)],
         egui::TextEdit::singleline(&mut state.text).id(id),
@@ -2541,35 +4522,84 @@ fn table_row_height(ui: &egui::Ui) -> f32 {
 }
 
 /// En-tête du tableau : « Nom » à gauche, puis les colonnes demandées alignées à droite
-/// (`columns` dans l'ordre d'affichage, de gauche à droite).
-fn table_header(ui: &mut egui::Ui, columns: &[Column]) {
+/// (`columns` dans l'ordre d'affichage, de gauche à droite). Un clic sur un titre renvoie le
+/// critère de tri correspondant ; le tri actif (`sort`) est marqué d'une flèche.
+fn table_header(
+    ui: &mut egui::Ui,
+    columns: &[Column],
+    sort: (SortKey, SortOrder),
+) -> Option<SortKey> {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), table_row_height(ui)),
         egui::Sense::hover(),
     );
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let color = ui.visuals().strong_text_color();
     let pad = ui.spacing().button_padding.x;
-    let painter = ui.painter();
-    painter.text(
-        egui::pos2(rect.left() + pad, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Nom",
-        font.clone(),
-        color,
-    );
+    let mut clicked = None;
+    // Zones des titres : « Nom » prend la place restante, chaque colonne sa largeur.
+    let mut cells: Vec<(&str, Option<SortKey>, egui::Rect, egui::Align2)> = Vec::new();
     let mut right = rect.right() - pad;
     for column in columns.iter().rev() {
-        painter.text(
-            egui::pos2(right, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
+        let cell = egui::Rect::from_min_max(
+            egui::pos2(right - column.width() + pad, rect.top()),
+            egui::pos2(right + pad, rect.bottom()),
+        );
+        cells.push((
             column.title(),
+            column.sort_key(),
+            cell,
+            egui::Align2::RIGHT_CENTER,
+        ));
+        right -= column.width();
+    }
+    let name_cell = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2((right + pad).max(rect.left() + pad), rect.bottom()),
+    );
+    cells.push((
+        "Nom",
+        Some(SortKey::Name),
+        name_cell,
+        egui::Align2::LEFT_CENTER,
+    ));
+    for (title, key, cell, align) in cells {
+        let response = key.map(|_| {
+            ui.interact(
+                cell,
+                ui.scope_id().with(("header", title)),
+                egui::Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+        });
+        let hovered = response.as_ref().is_some_and(egui::Response::hovered);
+        let active = key == Some(sort.0);
+        let color = if hovered {
+            ui.visuals().hyperlink_color
+        } else {
+            ui.visuals().strong_text_color()
+        };
+        let arrow = match (active, sort.1) {
+            (false, _) => "",
+            (true, SortOrder::Ascending) => " ▲",
+            (true, SortOrder::Descending) => " ▼",
+        };
+        let anchor = match align {
+            egui::Align2::LEFT_CENTER => egui::pos2(cell.left() + pad, cell.center().y),
+            _ => egui::pos2(cell.right() - pad, cell.center().y),
+        };
+        ui.painter().text(
+            anchor,
+            align,
+            format!("{title}{arrow}"),
             font.clone(),
             color,
         );
-        right -= column.width();
+        if response.is_some_and(|r| r.clicked()) {
+            clicked = key;
+        }
     }
     ui.separator();
+    clicked
 }
 
 /// Ligne du tableau : nom à gauche, puis une cellule par colonne, alignées à droite.
@@ -2625,39 +4655,27 @@ fn table_row(
             egui::pos2(rect.left() + pad, rect.top()),
             egui::pos2((right - pad).max(rect.left() + pad), rect.bottom()),
         );
-        painter.with_clip_rect(name_rect).text(
-            egui::pos2(name_rect.left(), rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            name,
-            font,
-            text_color,
-        );
+        // Un nom trop long est coupé par « … ».
+        let mut job = egui::text::LayoutJob::simple_singleline(name.to_owned(), font, text_color);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(name_rect.width());
+        let galley = painter.layout_job(job);
+        let top_left = egui::pos2(name_rect.left(), rect.center().y - galley.size().y / 2.0);
+        painter.galley(top_left, galley, text_color);
     }
     response
 }
 
-/// Largeur d'une colonne (vue « style Mac ») adaptée aux noms les plus longs de la liste.
-fn column_width_for(ui: &egui::Ui, entries: &[Entry]) -> f32 {
+/// Largeur fixe d'une colonne de la vue « style Mac » : celle du nom de référence
+/// (`COLUMN_VIEW_REFERENCE_NAME`) suivi de « … », avec l'icône et une marge pour le remplissage
+/// des lignes et la barre de défilement.
+fn fixed_column_width(ui: &egui::Ui) -> f32 {
     let font = egui::TextStyle::Body.resolve(ui.style());
-    // Mesurer tous les noms serait coûteux dans un gros dossier : les plus longs suffisent.
-    let mut longest: Vec<&Entry> = entries.iter().collect();
-    longest.sort_by_key(|entry| std::cmp::Reverse(entry.name.chars().count()));
-    let widest = longest
-        .iter()
-        .take(40)
-        .map(|entry| {
-            ui.painter()
-                .layout_no_wrap(
-                    format!("📁 {}", entry.name),
-                    font.clone(),
-                    egui::Color32::WHITE,
-                )
-                .size()
-                .x
-        })
-        .fold(0.0, f32::max);
-    // Marge pour le remplissage des lignes et la barre de défilement.
-    (widest + 44.0).clamp(COLUMN_VIEW_MIN_WIDTH, COLUMN_VIEW_MAX_WIDTH)
+    let reference = ui.painter().layout_no_wrap(
+        format!("📁 {COLUMN_VIEW_REFERENCE_NAME}…"),
+        font,
+        egui::Color32::WHITE,
+    );
+    reference.size().x + 44.0
 }
 
 /// Tuile de la grille d'images : miniature (ou icône) et nom dessous.
@@ -2783,6 +4801,115 @@ fn favorite_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Couleur de la barre d'occupation : verte, orange à partir de 75 %, rouge à partir de 90 %.
+fn usage_color(percent: u8) -> egui::Color32 {
+    match percent {
+        90.. => egui::Color32::from_rgb(190, 35, 45),
+        75..=89 => egui::Color32::from_rgb(190, 125, 0),
+        _ => egui::Color32::from_rgb(30, 140, 55),
+    }
+}
+
+/// Texte de l'infobulle d'un lecteur : type, nom, format, capacité, occupation.
+fn drive_tooltip(drive: &Drive, info: Option<&DriveInfo>) -> String {
+    let mut text = format!("{}  —  {}", drive.label(), drive.kind_name());
+    let Some(info) = info else {
+        return text;
+    };
+    if !info.name.is_empty() {
+        text += &format!("\nNom : {}", info.name);
+    }
+    if !info.file_system.is_empty() {
+        text += &format!("\nFormat : {}", info.file_system);
+    }
+    text += &format!(
+        "\nTotal : {}\nUtilisé : {} ({} %)\nLibre : {}",
+        fs_nav::format_size(info.total),
+        fs_nav::format_size(info.used()),
+        info.used_percent(),
+        fs_nav::format_size(info.free)
+    );
+    text
+}
+
+/// Ligne d'un lecteur dans la barre latérale : icône, lettre et nom du volume ; dessous, si
+/// l'option est cochée, la barre d'occupation avec le pourcentage à l'intérieur.
+fn drive_entry(
+    ui: &mut egui::Ui,
+    drive: &Drive,
+    info: Option<&DriveInfo>,
+    selected: bool,
+    show_usage: bool,
+) -> egui::Response {
+    let line = table_row_height(ui);
+    let usage = info.filter(|info| show_usage && info.total > 0);
+    let height = if usage.is_some() {
+        line + DRIVE_BAR_HEIGHT + 4.0
+    } else {
+        line
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.visuals();
+        let (background, text_color) = if selected {
+            (
+                Some(visuals.selection.bg_fill),
+                visuals.selection.stroke.color,
+            )
+        } else if response.hovered() {
+            (
+                Some(visuals.widgets.hovered.weak_bg_fill),
+                visuals.text_color(),
+            )
+        } else {
+            (None, visuals.text_color())
+        };
+        let corner = visuals.widgets.inactive.corner_radius;
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let pad = ui.spacing().button_padding.x;
+        let mut title = format!("{} {}", drive_icon(drive.kind), drive.label());
+        if let Some(info) = info
+            && !info.name.is_empty()
+        {
+            title += &format!("  {}", info.name);
+        }
+        let painter = ui.painter();
+        if let Some(fill) = background {
+            painter.rect_filled(rect, corner, fill);
+        }
+        let title_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), line));
+        painter.with_clip_rect(title_rect).text(
+            egui::pos2(rect.left() + pad, title_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            title,
+            font.clone(),
+            text_color,
+        );
+        if let Some(info) = usage {
+            let percent = info.used_percent();
+            let bar = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + pad, rect.top() + line),
+                egui::vec2((rect.width() - 2.0 * pad).max(20.0), DRIVE_BAR_HEIGHT),
+            );
+            painter.rect_filled(bar, 3.0, egui::Color32::from_gray(60));
+            let mut filled = bar;
+            filled.set_width(bar.width() * f32::from(percent) / 100.0);
+            painter.rect_filled(filled, 3.0, usage_color(percent));
+            painter.text(
+                bar.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{percent} %"),
+                egui::FontId::proportional(font.size - 1.5),
+                egui::Color32::WHITE,
+            );
+        }
+    }
+    response.on_hover_text(drive_tooltip(drive, info))
+}
+
 fn drive_icon(kind: DriveKind) -> &'static str {
     match kind {
         // Symboles présents dans la police d'egui (le symbole « disque dur » n'y est pas).
@@ -2802,27 +4929,112 @@ impl eframe::App for ExpliaApp {
         self.update_player(&ctx);
         if ctx.input(|i| i.pointer.primary_pressed()) {
             self.long_press_done = false;
+            self.drag_out_done = false;
         }
         // Échap annule la confirmation de suppression, sinon quitte la multi-sélection
         // (sauf pendant la saisie d'un chemin).
-        if !self.address_editing && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if !self.address_editing
+            && !self.video_fullscreen
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
             if self.confirm_delete {
-                self.confirm_delete = false;
+                self.cancel_delete();
             } else if !self.multi.is_empty() {
                 self.clear_multi();
             }
         }
         let mut action = None;
+        // Ctrl+F : va dans la barre de recherche.
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+            self.focus_search = true;
+        }
+        let typing =
+            ctx.egui_wants_keyboard_input() || self.address_editing || self.renaming.is_some();
+        // Ctrl+T : nouvel onglet sur le dossier affiché ; Ctrl+W : ferme l'onglet affiché.
+        if !typing && let Location::Dir(current) = &self.location {
+            let (new_tab, close_tab) = ctx.input(|i| {
+                (
+                    i.modifiers.command && i.key_pressed(egui::Key::T),
+                    i.modifiers.command && i.key_pressed(egui::Key::W),
+                )
+            });
+            if new_tab {
+                action = Some(Action::NewTab(current.clone()));
+            } else if close_tab && !self.tabs.is_empty() {
+                action = Some(Action::CloseTab(self.active_tab));
+            }
+        }
+        // Ctrl+V : coller les fichiers du presse-papiers dans le dossier affiché (détecté à
+        // l'appui, voir `clipboard::paste_keys_down`).
+        let paste_down = ctx.input(|i| i.focused) && clipboard::paste_keys_down();
+        if paste_down
+            && !self.paste_keys_were_down
+            && !typing
+            && clipboard::has_files()
+            && let Location::Dir(current) = &self.location
+        {
+            action = Some(Action::Paste {
+                dest: current.clone(),
+            });
+        }
+        self.paste_keys_were_down = paste_down;
+        // Éléments glissés depuis l'Explorateur (ou le Bureau) et déposés dans la fenêtre :
+        // copiés dans le dossier affiché. Un dépôt juste après un glisser lancé depuis ExPLIA
+        // est ignoré (bouton relâché dans sa propre fenêtre).
+        let (dropped, hovering, now) = ctx.input(|i| {
+            (
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .map(|f| f.path().to_path_buf())
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .collect::<Vec<PathBuf>>(),
+                !i.raw.hovered_files.is_empty(),
+                i.time,
+            )
+        });
+        let own_drag = self
+            .drag_out_ended_at
+            .is_some_and(|ended| now - ended < OWN_DROP_GUARD_SECONDS);
+        if !dropped.is_empty()
+            && !own_drag
+            && let Location::Dir(current) = &self.location
+        {
+            action = Some(Action::CopyInto {
+                sources: dropped,
+                dest: current.clone(),
+            });
+        }
+        if hovering
+            && !self.drag_out_done
+            && let Location::Dir(current) = &self.location
+        {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::unique("drop-hint"),
+            ));
+            let screen = ctx.content_rect();
+            painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(90));
+            painter.text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("Déposer pour copier dans « {} »", favorite_name(current)),
+                egui::FontId::proportional(22.0),
+                egui::Color32::WHITE,
+            );
+        }
 
         // Raccourcis (jamais pendant une saisie) : F2 renomme ; Suppr demande la suppression,
         // puis Entrée la confirme (Échap l'annule).
         if !ctx.egui_wants_keyboard_input() && self.renaming.is_none() && !self.address_editing {
-            let (f2, delete, enter, space) = ctx.input(|i| {
+            let (f2, delete, enter, space, copy) = ctx.input(|i| {
                 (
                     i.key_pressed(egui::Key::F2),
                     i.key_pressed(egui::Key::Delete),
                     i.key_pressed(egui::Key::Enter),
                     i.key_pressed(egui::Key::Space),
+                    // Ctrl+C : egui le transmet comme un événement « Copier ».
+                    i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
                 )
             });
             // Espace : lecture / pause du lecteur intégré.
@@ -2838,6 +5050,9 @@ impl eframe::App for ExpliaApp {
                 action = Some(Action::ConfirmDelete);
             } else if f2 && let Some(entry) = single {
                 action = Some(Action::StartRename(entry.clone()));
+            } else if copy && !self.delete_targets().is_empty() {
+                let paths = self.delete_targets().into_iter().map(|e| e.path).collect();
+                action = Some(Action::CopyFiles(paths));
             } else if delete && !self.delete_targets().is_empty() {
                 action = Some(Action::AskDelete);
             } else if !self.confirm_delete {
@@ -2845,11 +5060,17 @@ impl eframe::App for ExpliaApp {
             }
         }
 
+        // Vidéo en plein écran : elle seule occupe la fenêtre.
+        if self.video_fullscreen && self.fullscreen_video(ui) {
+            self.track_window_size(&ctx);
+            self.save_settings_if_changed();
+            return;
+        }
+
         egui::Panel::top("toolbar").show(ui, |ui| {
+            enlarge_toolbar(ui);
             ui.add_space(4.0);
-            action = self.address_bar(ui).or(action.take());
-            ui.add_space(2.0);
-            self.options_bar(ui);
+            action = self.options_bar(ui).or(action.take());
             ui.add_space(4.0);
         });
         egui::Panel::bottom("status").show(ui, |ui| {
@@ -2861,35 +5082,18 @@ impl eframe::App for ExpliaApp {
                 ui.label(self.status_text());
             }
         });
-        egui::Panel::left("sidebar")
-            .default_size(200.0)
-            .resizable(true)
-            .show(ui, |ui| {
-                action = self.sidebar(ui).or(action.take());
-            });
-        // Pendant la multi-sélection, le volet devient un volet d'actions, même masqué.
-        if self.show_preview || !self.multi.is_empty() {
-            // Deux identifiants distincts : chaque mode garde sa propre largeur.
-            let (id, width) = if self.preview_expanded {
-                (
-                    "preview_wide",
-                    ui.available_width() * PREVIEW_EXPANDED_RATIO,
-                )
-            } else {
-                ("preview", 300.0)
-            };
-            let (toggle, preview_action) = egui::Panel::right(id)
-                .default_size(width)
-                .resizable(true)
-                .show(ui, |ui| self.preview_panel(ui))
-                .inner;
-            if toggle {
-                self.preview_expanded = !self.preview_expanded;
-            }
-            action = preview_action.or(action.take());
-        }
+        // Barre latérale à gauche ; volet latéral (détail, ou navigation si le détail est au
+        // centre) à gauche ou à droite selon la disposition ; le reste au centre.
+        action = self.sidebar_panel(ui).or(action.take());
+        action = self.side_panel(ui).or(action.take());
+        let detail_in_center = self.detail_central && self.detail_shown();
         egui::CentralPanel::default().show(ui, |ui| {
-            action = self.central(ui).or(action.take());
+            let central_action = if detail_in_center {
+                self.preview_panel(ui)
+            } else {
+                self.navigation_area(ui)
+            };
+            action = central_action.or(action.take());
         });
 
         if let Some(action) = action {
@@ -2904,5 +5108,398 @@ impl eframe::App for ExpliaApp {
         self.stop_player();
         let settings = self.current_settings();
         self.write_settings(settings);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Dossier de test jetable, dans `target/`.
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new(name: &str) -> Self {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("test-app")
+                .join(name);
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn file(&self, rel: &str, content: &[u8]) {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+
+        fn dir(&self, rel: &str) {
+            std::fs::create_dir_all(self.0.join(rel)).unwrap();
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Application sans fenêtre, positionnée sur `tree` (aucun réglage n'est écrit).
+    fn app_in(tree: &TempTree) -> (ExpliaApp, egui::Context) {
+        let ctx = egui::Context::default();
+        let mut app = ExpliaApp::new(ctx.clone(), Settings::default(), None);
+        app.navigate(Location::Dir(tree.0.clone()));
+        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        (app, ctx)
+    }
+
+    /// Traite les événements jusqu'à la fin du parcours en cours.
+    fn wait_scan(app: &mut ExpliaApp, ctx: &egui::Context) {
+        let start = Instant::now();
+        loop {
+            app.poll_events(ctx);
+            if app.results.as_ref().is_some_and(|r| !r.running) {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "parcours trop long"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn names(app: &ExpliaApp) -> Vec<String> {
+        let mut names: Vec<String> = app.visible.iter().map(|e| e.name.clone()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn empty_folder_scan_lists_and_selects_them() {
+        let tree = TempTree::new("empty");
+        tree.dir("vide");
+        tree.dir("b/c");
+        tree.file("b/d/fichier.txt", b"x");
+        let (mut app, ctx) = app_in(&tree);
+        app.apply(&ctx, Action::FindEmptyFolders);
+        wait_scan(&mut app, &ctx);
+        assert_eq!(names(&app), ["c", "vide"]);
+        // Tous sont sélectionnés (multi-sélection de dossiers), prêts à être supprimés.
+        assert_eq!(app.multi.len(), 2);
+        assert!(app.multi.iter().all(|e| e.is_dir));
+        // Sans récursivité : seulement les sous-dossiers directs.
+        app.recursive = false;
+        app.on_recursive_changed();
+        wait_scan(&mut app, &ctx);
+        assert_eq!(names(&app), ["vide"]);
+        // Fermer revient au contenu du dossier.
+        app.apply(&ctx, Action::CloseResults);
+        assert!(app.results.is_none());
+        assert_eq!(names(&app), ["b", "vide"]);
+    }
+
+    #[test]
+    fn duplicate_scan_groups_copies_and_selects_all_but_the_first() {
+        let tree = TempTree::new("dups");
+        let big = vec![3u8; 1_200_000];
+        tree.file("a.bin", &big);
+        tree.file("sub/b.bin", &big);
+        tree.file("sub/c.bin", &big);
+        tree.file("autre.bin", &vec![4u8; 1_200_000]);
+        let (mut app, ctx) = app_in(&tree);
+        app.duplicate_min_mb = 1;
+        app.apply(&ctx, Action::FindDuplicates);
+        wait_scan(&mut app, &ctx);
+        assert_eq!(names(&app), ["a.bin", "b.bin", "c.bin"]);
+        assert_eq!(app.duplicate_groups.len(), 3);
+        app.apply(&ctx, Action::SelectDuplicateCopies);
+        assert_eq!(app.multi.len(), 2);
+        // Le premier fichier du groupe (ordre des chemins) est conservé.
+        assert!(app.multi.iter().all(|e| e.name != "a.bin"));
+        // Seuil plus haut que les fichiers : aucun doublon.
+        app.duplicate_min_mb = 2;
+        app.apply(&ctx, Action::FindDuplicates);
+        wait_scan(&mut app, &ctx);
+        assert!(app.visible.is_empty());
+    }
+
+    #[test]
+    fn large_file_scan_lists_files_from_the_biggest_and_keeps_that_order() {
+        let tree = TempTree::new("large");
+        tree.file("moyen.bin", &vec![1u8; 1_500_000]);
+        tree.file("sub/gros.bin", &vec![1u8; 2_500_000]);
+        tree.file("petit.bin", &vec![1u8; 500_000]);
+        let (mut app, ctx) = app_in(&tree);
+        app.large_min_mb = 1;
+        app.apply(&ctx, Action::FindLargeFiles);
+        wait_scan(&mut app, &ctx);
+        let order: Vec<String> = app.visible.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(order, ["gros.bin", "moyen.bin"]);
+        // Le tri par nom ne défait pas le classement par taille.
+        app.sort_key = SortKey::Name;
+        app.sort_order = SortOrder::Ascending;
+        app.recompute_visible();
+        assert_eq!(app.visible[0].name, "gros.bin");
+        // Rien n'est sélectionné d'office (ce ne sont pas forcément des fichiers à supprimer).
+        assert!(app.multi.is_empty());
+        // Sans récursivité : seulement les fichiers du dossier affiché.
+        app.recursive = false;
+        app.on_recursive_changed();
+        wait_scan(&mut app, &ctx);
+        assert_eq!(names(&app), ["moyen.bin"]);
+    }
+
+    #[test]
+    fn recursive_search_goes_into_subfolders_and_plain_search_does_not() {
+        let tree = TempTree::new("search");
+        tree.file("racine.exe", b"x");
+        tree.file("sous/dossier/outil.exe", b"x");
+        tree.file("sous/note.txt", b"x");
+        let (mut app, ctx) = app_in(&tree);
+        app.search = "*.exe".to_string();
+        app.recursive = true;
+        app.on_search_changed();
+        wait_scan(&mut app, &ctx);
+        assert_eq!(names(&app), ["outil.exe", "racine.exe"]);
+        // Effacer la recherche ferme les résultats.
+        app.search.clear();
+        app.on_search_changed();
+        assert!(app.results.is_none());
+        // Non récursive : simple filtre du dossier affiché.
+        app.recursive = false;
+        app.search = "*.exe".to_string();
+        app.on_search_changed();
+        assert!(app.results.is_none());
+        assert_eq!(names(&app), ["racine.exe"]);
+    }
+
+    #[test]
+    fn changing_folder_cancels_and_closes_results() {
+        let tree = TempTree::new("navigate");
+        tree.dir("sous");
+        let (mut app, ctx) = app_in(&tree);
+        app.apply(&ctx, Action::FindEmptyFolders);
+        assert!(app.results.is_some());
+        app.navigate(Location::Dir(tree.0.join("sous")));
+        assert!(app.results.is_none());
+        assert!(app.result_entries.is_empty());
+    }
+
+    #[test]
+    fn deleting_the_current_folder_needs_a_confirmation_that_can_be_cancelled() {
+        let tree = TempTree::new("current");
+        tree.dir("vide");
+        let (mut app, ctx) = app_in(&tree);
+        app.apply(&ctx, Action::AskDeleteFolder(tree.0.clone()));
+        assert!(app.confirm_delete);
+        assert_eq!(
+            app.selected.as_ref().map(|e| e.path.clone()),
+            Some(tree.0.clone())
+        );
+        assert_eq!(app.delete_targets().len(), 1);
+        // Annuler retire la sélection provisoire du dossier affiché.
+        app.apply(&ctx, Action::CancelDelete);
+        assert!(!app.confirm_delete);
+        assert!(app.selected.is_none());
+        // On ne renomme pas le dossier affiché depuis sa propre liste.
+        let current = fs_nav::entry_from_path(&tree.0).unwrap();
+        app.start_rename(&current);
+        assert!(app.renaming.is_none());
+    }
+
+    #[test]
+    fn a_parent_folder_of_a_result_can_be_targeted_then_cancelled() {
+        let tree = TempTree::new("parent-of-result");
+        let big = vec![9u8; 1_200_000];
+        tree.file("a/b/copie1.bin", &big);
+        tree.file("c/copie2.bin", &big);
+        let (mut app, ctx) = app_in(&tree);
+        app.duplicate_min_mb = 1;
+        app.apply(&ctx, Action::FindDuplicates);
+        wait_scan(&mut app, &ctx);
+        assert_eq!(app.visible.len(), 2);
+        let first = app.visible[0].clone();
+        app.apply(&ctx, Action::Select(first.clone()));
+        assert_eq!(
+            app.selected.as_ref().map(|e| e.path.clone()),
+            Some(first.path.clone())
+        );
+        // Le dossier parent du résultat devient la cible provisoire de la suppression.
+        let parent = first.path.parent().unwrap().to_path_buf();
+        app.apply(&ctx, Action::AskDeleteFolder(parent.clone()));
+        assert!(app.confirm_delete);
+        assert_eq!(app.delete_targets()[0].path, parent);
+        app.apply(&ctx, Action::CancelDelete);
+        assert!(!app.confirm_delete && app.selected.is_none());
+        // Un résultat sélectionné normalement reste sélectionné après un Échap sans demande.
+        app.apply(&ctx, Action::Select(first.clone()));
+        app.cancel_delete();
+        assert!(app.selected.is_some());
+        // « Ouvrir » : on arrive dans le dossier du fichier, résultats fermés, fichier choisi.
+        app.apply(
+            &ctx,
+            Action::GoSelect {
+                dir: parent.clone(),
+                file: first.path.clone(),
+            },
+        );
+        assert!(app.results.is_none());
+        assert_eq!(app.location, Location::Dir(parent));
+        assert_eq!(
+            app.selected.as_ref().map(|e| e.name.clone()),
+            Some(first.name)
+        );
+    }
+
+    #[test]
+    fn full_screen_toggles_on_and_off() {
+        let tree = TempTree::new("fullscreen");
+        let (mut app, ctx) = app_in(&tree);
+        app.apply(&ctx, Action::ToggleVideoFullscreen);
+        assert!(app.video_fullscreen);
+        app.apply(&ctx, Action::ToggleVideoFullscreen);
+        assert!(!app.video_fullscreen);
+    }
+
+    #[test]
+    fn dropped_items_are_copied_into_the_current_folder_without_overwriting() {
+        let tree = TempTree::new("drop");
+        tree.file("ailleurs/photo.jpg", b"img");
+        tree.file("ici/photo.jpg", b"ancienne");
+        let here = tree.0.join("ici");
+        let (mut app, ctx) = app_in(&tree);
+        app.navigate(Location::Dir(here.clone()));
+        app.apply(
+            &ctx,
+            Action::CopyInto {
+                sources: vec![tree.0.join("ailleurs/photo.jpg")],
+                dest: here.clone(),
+            },
+        );
+        let start = Instant::now();
+        while app.copying {
+            app.poll_events(&ctx);
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read(here.join("photo.jpg")).unwrap(), b"ancienne");
+        assert_eq!(
+            std::fs::read(here.join("photo - Copie.jpg")).unwrap(),
+            b"img"
+        );
+        // Le dossier est relu et la copie sélectionnée.
+        assert_eq!(names(&app), ["photo - Copie.jpg", "photo.jpg"]);
+        assert_eq!(
+            app.selected.as_ref().map(|e| e.name.clone()),
+            Some("photo - Copie.jpg".to_string())
+        );
+    }
+
+    #[test]
+    fn tabs_open_switch_and_close() {
+        let tree = TempTree::new("tabs");
+        tree.dir("a");
+        tree.dir("b");
+        let (mut app, ctx) = app_in(&tree);
+        assert!(app.tabs.is_empty());
+        app.apply(&ctx, Action::NewTab(tree.0.join("a")));
+        assert_eq!(app.tabs, [tree.0.clone(), tree.0.join("a")]);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.location, Location::Dir(tree.0.join("a")));
+        // Naviguer change le dossier de l'onglet affiché.
+        app.navigate(Location::Dir(tree.0.join("b")));
+        assert_eq!(app.tabs[1], tree.0.join("b"));
+        app.apply(&ctx, Action::SwitchTab(0));
+        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        // Fermer l'onglet affiché passe au voisin ; avec un seul dossier, plus d'onglets.
+        app.apply(&ctx, Action::CloseTab(0));
+        assert!(app.tabs.is_empty());
+        assert_eq!(app.location, Location::Dir(tree.0.join("b")));
+        // Trois onglets : fermer un onglet non affiché garde le dossier affiché.
+        app.apply(&ctx, Action::NewTab(tree.0.join("a")));
+        app.apply(&ctx, Action::NewTab(tree.0.clone()));
+        assert_eq!(app.tabs.len(), 3);
+        app.apply(&ctx, Action::CloseTab(0));
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+    }
+
+    #[test]
+    fn arrows_walk_through_the_home_list_after_a_click_in_it() {
+        let tree = TempTree::new("home-arrows");
+        tree.dir("Apple");
+        tree.dir("build");
+        tree.dir("Contacts");
+        let (mut app, ctx) = app_in(&tree);
+        app.home = Some(tree.0.clone());
+        app.set_sidebar_tab(SidebarTab::Home);
+        assert_eq!(
+            app.sidebar_items(),
+            [
+                tree.0.clone(),
+                tree.0.join("Apple"),
+                tree.0.join("build"),
+                tree.0.join("Contacts")
+            ]
+        );
+        app.apply(&ctx, Action::SidebarGo(tree.0.join("build")));
+        assert!(app.sidebar_focus);
+        app.step_sidebar(1);
+        assert_eq!(app.location, Location::Dir(tree.0.join("Contacts")));
+        app.step_sidebar(-1);
+        app.step_sidebar(-1);
+        assert_eq!(app.location, Location::Dir(tree.0.join("Apple")));
+        // Le titre (le dossier de l'utilisateur) est le premier élément.
+        app.step_sidebar(-1);
+        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        assert_eq!(app.sidebar_cursor_path(), Some(tree.0.clone()));
+        // Un clic dans la zone centrale ne donne pas la main à la barre latérale.
+        app.apply(&ctx, Action::Go(Location::Dir(tree.0.join("Apple"))));
+        assert!(!app.sidebar_focus);
+    }
+
+    #[test]
+    fn ctrl_click_in_a_previous_column_starts_from_its_highlighted_folder() {
+        let tree = TempTree::new("column-multi");
+        tree.file("grec/doc.txt", b"x");
+        tree.dir("aa");
+        tree.dir("models");
+        let (mut app, ctx) = app_in(&tree);
+        // « grec » est ouvert : sa colonne parente le montre en surbrillance.
+        app.navigate(Location::Dir(tree.0.join("grec")));
+        let models = fs_nav::entry_from_path(&tree.0.join("models")).unwrap();
+        app.apply(
+            &ctx,
+            Action::ColumnMultiSelect {
+                dir: tree.0.clone(),
+                anchor: Some(tree.0.join("grec")),
+                entry: models,
+                range: false,
+            },
+        );
+        assert_eq!(app.location, Location::Dir(tree.0.clone()));
+        let mut selected: Vec<String> = app.multi.iter().map(|e| e.name.clone()).collect();
+        selected.sort();
+        assert_eq!(selected, ["grec", "models"]);
+        // Maj+clic : la plage depuis l'élément en surbrillance.
+        app.navigate(Location::Dir(tree.0.join("grec")));
+        let aa = fs_nav::entry_from_path(&tree.0.join("aa")).unwrap();
+        app.apply(
+            &ctx,
+            Action::ColumnMultiSelect {
+                dir: tree.0.clone(),
+                anchor: Some(tree.0.join("grec")),
+                entry: aa,
+                range: true,
+            },
+        );
+        let mut range: Vec<String> = app.multi.iter().map(|e| e.name.clone()).collect();
+        range.sort();
+        assert_eq!(range, ["aa", "grec"]);
     }
 }

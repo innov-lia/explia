@@ -12,27 +12,91 @@ pub struct Entry {
     pub is_dir: bool,
     /// Taille en octets. Pour un dossier : `None` tant qu'elle n'est pas calculée.
     pub size: Option<u64>,
-    /// Élément caché (attribut « caché » de Windows, ou nom commençant par un point ailleurs).
+    /// Élément caché (attribut « caché » de Windows, ou nom commençant par un point).
     pub hidden: bool,
     pub modified: Option<SystemTime>,
     pub created: Option<SystemTime>,
 }
 
-/// Vrai si l'élément est caché. `meta` doit décrire l'élément lui-même (sans suivre les liens).
-fn is_hidden(name: &str, meta: Option<&fs::Metadata>) -> bool {
+/// Vrai si l'élément est caché : attribut « caché » de Windows (`meta` doit décrire l'élément
+/// lui-même, sans suivre les liens) ou nom commençant par un point (`.git`, `.config`, …).
+pub fn is_hidden(name: &str, meta: Option<&fs::Metadata>) -> bool {
+    name.starts_with('.') || has_hidden_attribute(meta)
+}
+
+#[cfg(windows)]
+fn has_hidden_attribute(meta: Option<&fs::Metadata>) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    /// `FILE_ATTRIBUTE_HIDDEN`.
+    const HIDDEN: u32 = 0x2;
+    meta.is_some_and(|m| m.file_attributes() & HIDDEN != 0)
+}
+
+#[cfg(not(windows))]
+fn has_hidden_attribute(_meta: Option<&fs::Metadata>) -> bool {
+    false
+}
+
+/// Lien symbolique ou jonction (point d'analyse Windows) : jamais suivi lors d'un parcours.
+/// `meta` doit décrire l'élément lui-même (`DirEntry::metadata`, pas `fs::metadata`).
+pub fn is_link(meta: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        /// `FILE_ATTRIBUTE_HIDDEN`.
-        const HIDDEN: u32 = 0x2;
-        let _ = name;
-        meta.is_some_and(|m| m.file_attributes() & HIDDEN != 0)
+        /// `FILE_ATTRIBUTE_REPARSE_POINT`.
+        const REPARSE_POINT: u32 = 0x400;
+        meta.file_attributes() & REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     {
-        let _ = meta;
-        name.starts_with('.')
+        meta.file_type().is_symlink()
     }
+}
+
+/// Dossiers qui séparent `path` de `root` (exclu), du plus proche au plus éloigné, en commençant
+/// par le dossier qui contient `path` : `a\\b` puis `a` pour `root\\a\\b\\f.txt`. Vide si `path`
+/// n'est pas sous `root` ou directement dans `root`.
+pub fn levels_below(root: &Path, path: &Path) -> Vec<PathBuf> {
+    if !path.starts_with(root) {
+        return Vec::new();
+    }
+    path.ancestors()
+        .skip(1)
+        .take_while(|ancestor| *ancestor != root && ancestor.starts_with(root))
+        .map(Path::to_path_buf)
+        .collect()
+}
+
+/// Niveaux affichés par la vue en colonnes pour `path`. Dans le dossier de l'utilisateur, les
+/// niveaux jusqu'à `home` compris (`C:`, `Users`, nom) sont omis : la barre latérale (onglet
+/// Home) montre déjà le contenu de `home`. Le dossier affiché lui-même est toujours gardé.
+pub fn column_levels(path: &Path, home: Option<&Path>) -> Vec<(String, PathBuf)> {
+    let crumbs = breadcrumbs(path);
+    match home {
+        Some(home) if path.starts_with(home) => crumbs
+            .into_iter()
+            .filter(|(_, level)| level == path || !home.starts_with(level))
+            .collect(),
+        _ => crumbs,
+    }
+}
+
+/// Construit l'entrée décrivant un chemin (nom, type, taille, dates). `None` s'il est illisible.
+pub fn entry_from_path(path: &Path) -> Option<Entry> {
+    let own = fs::symlink_metadata(path).ok()?;
+    let meta = fs::metadata(path).unwrap_or_else(|_| own.clone());
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let is_dir = meta.is_dir();
+    let hidden = is_hidden(&name, Some(&own));
+    Some(Entry {
+        name,
+        path: path.to_path_buf(),
+        is_dir,
+        size: if is_dir { None } else { Some(meta.len()) },
+        hidden,
+        modified: meta.modified().ok(),
+        created: meta.created().ok(),
+    })
 }
 
 /// Où se trouve l'utilisateur : l'accueil (liste des lecteurs) ou un dossier.
@@ -197,9 +261,103 @@ pub fn format_size(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit]).replace('.', ",")
 }
 
+/// Comme `breadcrumbs`, mais un chemin situé dans le dossier de l'utilisateur (`home`) commence
+/// par « Home » au lieu de `C:` > `Users` > nom : `Home`, `Videos` pour `C:\Users\Bob\Videos`.
+pub fn breadcrumbs_with_home(path: &Path, home: Option<&Path>) -> Vec<(String, PathBuf)> {
+    let Some(home) = home else {
+        return breadcrumbs(path);
+    };
+    let Ok(relative) = path.strip_prefix(home) else {
+        return breadcrumbs(path);
+    };
+    let mut crumbs = vec![("Home".to_string(), home.to_path_buf())];
+    let mut current = home.to_path_buf();
+    for component in relative.components() {
+        if let std::path::Component::Normal(name) = component {
+            current.push(name);
+            crumbs.push((name.to_string_lossy().into_owned(), current.clone()));
+        }
+    }
+    crumbs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn levels_below_lists_the_folders_between_root_and_file() {
+        let root = Path::new("C:\\Data");
+        let deep = Path::new("C:\\Data\\a\\b\\f.txt");
+        assert_eq!(
+            levels_below(root, deep),
+            [
+                PathBuf::from("C:\\Data\\a\\b"),
+                PathBuf::from("C:\\Data\\a")
+            ]
+        );
+        assert!(levels_below(root, Path::new("C:\\Data\\f.txt")).is_empty());
+        assert!(levels_below(root, Path::new("D:\\x\\f.txt")).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn column_levels_skip_the_path_up_to_home() {
+        let home = Path::new("C:\\Users\\Bob");
+        let levels = |path: &str| -> Vec<PathBuf> {
+            column_levels(Path::new(path), Some(home))
+                .into_iter()
+                .map(|(_, p)| p)
+                .collect()
+        };
+        assert_eq!(
+            levels("C:\\Users\\Bob\\Documents"),
+            [PathBuf::from("C:\\Users\\Bob\\Documents")]
+        );
+        assert_eq!(
+            levels("C:\\Users\\Bob\\Documents\\Codex"),
+            [
+                PathBuf::from("C:\\Users\\Bob\\Documents"),
+                PathBuf::from("C:\\Users\\Bob\\Documents\\Codex")
+            ]
+        );
+        // Le dossier de l'utilisateur lui-même : une seule colonne, son contenu.
+        assert_eq!(levels("C:\\Users\\Bob"), [PathBuf::from("C:\\Users\\Bob")]);
+        // Hors de Home : tout le chemin, depuis le lecteur.
+        assert_eq!(levels("D:\\Data\\x").len(), 3);
+        assert_eq!(levels("C:\\Users").len(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn breadcrumbs_inside_home_start_with_home() {
+        let home = Path::new("C:\\Users\\Bob");
+        let deep = Path::new("C:\\Users\\Bob\\Videos\\2026");
+        assert_eq!(
+            breadcrumbs_with_home(deep, Some(home)),
+            [
+                ("Home".to_string(), PathBuf::from("C:\\Users\\Bob")),
+                (
+                    "Videos".to_string(),
+                    PathBuf::from("C:\\Users\\Bob\\Videos")
+                ),
+                (
+                    "2026".to_string(),
+                    PathBuf::from("C:\\Users\\Bob\\Videos\\2026")
+                ),
+            ]
+        );
+        // Le dossier de l'utilisateur lui-même : « Home » seul.
+        assert_eq!(breadcrumbs_with_home(home, Some(home)).len(), 1);
+        // Hors du dossier de l'utilisateur (ou sans dossier connu) : chemin complet.
+        let other = Path::new("D:\\Data");
+        assert_eq!(breadcrumbs_with_home(other, Some(home)), breadcrumbs(other));
+        assert_eq!(breadcrumbs_with_home(other, None), breadcrumbs(other));
+        // `C:\Users\Bobby` n'est pas dans `C:\Users\Bob`.
+        let bobby = Path::new("C:\\Users\\Bobby");
+        assert_eq!(breadcrumbs_with_home(bobby, Some(home)), breadcrumbs(bobby));
+    }
 
     #[cfg(windows)]
     #[test]
@@ -251,6 +409,18 @@ mod tests {
         let sub = Location::Dir(PathBuf::from("C:\\Users"));
         assert_eq!(sub.parent(), Some(Location::Dir(PathBuf::from("C:\\"))));
         assert_eq!(Location::ThisPc.parent(), None);
+    }
+
+    #[test]
+    fn names_starting_with_a_dot_are_hidden() {
+        assert!(is_hidden(".git", None));
+        assert!(is_hidden(".env", None));
+        assert!(!is_hidden("src", None));
+        assert!(!is_hidden("a.rs", None));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let entries = list_dir(root).expect("le dossier du projet est lisible");
+        assert!(entries.iter().any(|e| e.name == ".cargo" && e.hidden));
+        assert!(entries.iter().any(|e| e.name == "src" && !e.hidden));
     }
 
     #[test]

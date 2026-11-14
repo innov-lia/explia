@@ -65,10 +65,37 @@ pub fn detect_drives() -> Vec<Drive> {
     imp::detect_drives()
 }
 
-/// Taille totale d'un lecteur en octets. Peut être lent (lecteur réseau) :
-/// à appeler hors du thread d'interface. `None` si le lecteur n'est pas prêt.
-pub fn drive_total_size(root: &Path) -> Option<u64> {
-    imp::drive_total_size(root)
+/// Capacité, espace libre, nom et système de fichiers d'un lecteur.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DriveInfo {
+    pub total: u64,
+    pub free: u64,
+    /// Nom du volume (vide s'il n'en a pas).
+    pub name: String,
+    /// Système de fichiers, par exemple `NTFS` (vide si inconnu).
+    pub file_system: String,
+}
+
+impl DriveInfo {
+    pub fn used(&self) -> u64 {
+        self.total.saturating_sub(self.free)
+    }
+
+    /// Part occupée du lecteur, en pourcentage arrondi (0 à 100).
+    pub fn used_percent(&self) -> u8 {
+        if self.total == 0 {
+            return 0;
+        }
+        let percent =
+            (u128::from(self.used()) * 100 + u128::from(self.total) / 2) / u128::from(self.total);
+        u8::try_from(percent).map_or(100, |p| p.min(100))
+    }
+}
+
+/// Informations d'un lecteur. Peut être lent (lecteur réseau) : à appeler hors du thread
+/// d'interface. `None` si le lecteur n'est pas prêt.
+pub fn drive_info(root: &Path) -> Option<DriveInfo> {
+    imp::drive_info(root)
 }
 
 /// Évite les boîtes de dialogue système quand un lecteur est vide (CD, lecteur amovible).
@@ -78,11 +105,11 @@ pub fn suppress_drive_error_dialogs() {
 
 #[cfg(windows)]
 mod imp {
-    use super::{Drive, DriveKind, letters_from_mask};
+    use super::{Drive, DriveInfo, DriveKind, letters_from_mask};
     use std::os::windows::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use windows_sys::Win32::Storage::FileSystem::{
-        GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
+        GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
     };
     use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetErrorMode};
 
@@ -120,20 +147,52 @@ mod imp {
             .collect()
     }
 
-    pub fn drive_total_size(root: &Path) -> Option<u64> {
+    /// Texte d'un tampon UTF-16 terminé par un zéro.
+    fn text_of(buffer: &[u16]) -> String {
+        let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
+        String::from_utf16_lossy(&buffer[..len])
+    }
+
+    pub fn drive_info(root: &Path) -> Option<DriveInfo> {
         let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
         let mut total: u64 = 0;
-        // SAFETY: `wide` est terminée par un zéro ; `total` est un `u64` valide en écriture ;
-        // les autres pointeurs de sortie sont optionnels et laissés nuls.
+        let mut free: u64 = 0;
+        // SAFETY: `wide` est terminée par un zéro ; `total` et `free` sont des `u64` valides
+        // en écriture ; le pointeur « octets disponibles pour l'appelant » est facultatif.
         let ok = unsafe {
-            GetDiskFreeSpaceExW(
+            GetDiskFreeSpaceExW(wide.as_ptr(), std::ptr::null_mut(), &mut total, &mut free)
+        };
+        if ok == 0 {
+            return None;
+        }
+        let mut name = [0u16; 261];
+        let mut file_system = [0u16; 261];
+        // SAFETY: `wide` est terminée par un zéro ; les deux tampons ont la taille annoncée ;
+        // les autres pointeurs de sortie sont facultatifs et laissés nuls. Un échec (volume
+        // sans nom lisible) laisse simplement les textes vides.
+        let ok = unsafe {
+            GetVolumeInformationW(
                 wide.as_ptr(),
+                name.as_mut_ptr(),
+                name.len() as u32,
                 std::ptr::null_mut(),
-                &mut total,
                 std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                file_system.as_mut_ptr(),
+                file_system.len() as u32,
             )
         };
-        (ok != 0).then_some(total)
+        let (name, file_system) = if ok != 0 {
+            (text_of(&name), text_of(&file_system))
+        } else {
+            (String::new(), String::new())
+        };
+        Some(DriveInfo {
+            total,
+            free,
+            name,
+            file_system,
+        })
     }
 
     pub fn suppress_drive_error_dialogs() {
@@ -144,7 +203,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    use super::{Drive, DriveKind};
+    use super::{Drive, DriveInfo, DriveKind};
     use std::path::{Path, PathBuf};
 
     pub fn detect_drives() -> Vec<Drive> {
@@ -154,7 +213,7 @@ mod imp {
         }]
     }
 
-    pub fn drive_total_size(_root: &Path) -> Option<u64> {
+    pub fn drive_info(_root: &Path) -> Option<DriveInfo> {
         None
     }
 
@@ -196,18 +255,36 @@ mod tests {
         assert_eq!(drive.label(), "D:");
     }
 
+    #[test]
+    fn used_percent_is_rounded_and_bounded() {
+        let info = |total, free| DriveInfo {
+            total,
+            free,
+            ..DriveInfo::default()
+        };
+        assert_eq!(info(0, 0).used_percent(), 0);
+        assert_eq!(info(1000, 1000).used_percent(), 0);
+        assert_eq!(info(1000, 0).used_percent(), 100);
+        assert_eq!(info(833, 37).used_percent(), 96);
+        assert_eq!(info(3, 1).used_percent(), 67);
+        // Espace libre supérieur au total (valeurs incohérentes) : 0 % occupé.
+        assert_eq!(info(100, 500).used_percent(), 0);
+        assert_eq!(info(1000, 250).used(), 750);
+    }
+
     #[cfg(windows)]
     #[test]
     fn detects_at_least_one_drive_with_a_size() {
         let drives = detect_drives();
         assert!(!drives.is_empty());
         let system_drive = Path::new("C:\\");
-        assert!(drive_total_size(system_drive).is_some_and(|size| size > 0));
+        let info = drive_info(system_drive).expect("le lecteur système répond");
+        assert!(info.total > 0 && info.free <= info.total);
     }
 
     #[cfg(windows)]
     #[test]
-    fn size_of_missing_path_is_none() {
-        assert_eq!(drive_total_size(Path::new("Z:\\inexistant-explia\\")), None);
+    fn info_of_missing_drive_is_none() {
+        assert_eq!(drive_info(Path::new("Z:\\inexistant-explia\\")), None);
     }
 }
