@@ -280,10 +280,16 @@ impl ExpliaApp {
                 self.applications.add(path);
             }
             Action::RemoveApplication(path) => self.applications.remove(&path),
-            Action::Open(path) => self.report_launch(launch::open(&path)),
+            Action::Open(path) => {
+                let result = self.storage.open(&path).map_err(|e| e.to_string());
+                self.report_launch(result);
+            }
             Action::Play(path) => self.start_player(path),
             Action::StopPlayer => self.stop_player(),
-            Action::OpenAsAdmin(path) => self.report_launch(launch::open_as_admin(&path)),
+            Action::OpenAsAdmin(path) => {
+                let result = self.storage.open_as_admin(&path).map_err(|e| e.to_string());
+                self.report_launch(result);
+            }
             Action::EditAddress => {
                 self.address_editing = true;
                 self.focus_address = true;

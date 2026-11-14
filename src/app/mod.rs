@@ -10,7 +10,7 @@ use eframe::egui::containers::menu::{MenuButton, MenuConfig};
 use eframe::egui::{self, PopupCloseBehavior};
 
 use crate::clipboard;
-use crate::copy::{self, CopyReport};
+use crate::copy::CopyReport;
 use crate::dates;
 use crate::dragdrop;
 use crate::favorites::Favorites;
@@ -24,7 +24,7 @@ use crate::preview::{self, ArchivePreview, ImagePreview, PreviewContent, TextPre
 use crate::scan;
 use crate::selection_manager::{MIXED_TYPES_MESSAGE, Selection, SelectionError, Toggle};
 use crate::settings::Settings;
-use crate::trash;
+use crate::storage_manager::StorageManager;
 use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
 
 mod action_manager;
@@ -375,6 +375,8 @@ pub struct ExpliaApp {
     window_sized: bool,
     /// Élément sélectionné, multi-sélection et point d'ancrage (voir `selection_manager`).
     selection: Selection,
+    /// Sources de stockage : toutes les opérations sur les fichiers passent par elles.
+    storage: StorageManager,
     /// Attente de confirmation de la suppression de la multi-sélection.
     confirm_delete: bool,
     /// Un clic maintenu vient d'être traité : le relâchement ne doit pas compter comme un clic.
@@ -470,6 +472,7 @@ impl ExpliaApp {
             window_sized: settings.window_size.is_some(),
             saved_settings: settings,
             selection: Selection::default(),
+            storage: StorageManager::default(),
             confirm_delete: false,
             long_press_done: false,
             drag_out_done: false,
@@ -530,7 +533,7 @@ impl ExpliaApp {
         self.home_dirs = self
             .home
             .as_deref()
-            .and_then(|home| fs_nav::list_dir(home).ok())
+            .and_then(|home| self.storage.list(home).ok())
             .map(|entries| entries.into_iter().filter(|e| e.is_dir).collect())
             .unwrap_or_default();
     }
@@ -681,8 +684,9 @@ impl ExpliaApp {
         ));
         let tx = self.event_tx.clone();
         let ctx = self.ctx.clone();
+        let storage = self.storage.clone();
         std::thread::spawn(move || {
-            let report = copy::copy_into(&sources, &dest);
+            let report = storage.copy_into(&sources, &dest);
             let _ = tx.send(Event::CopyDone { dest, report });
             ctx.request_repaint();
         });
@@ -1052,7 +1056,7 @@ impl ExpliaApp {
             Location::Dir(path) => Some(path.clone()),
             Location::ThisPc => None,
         };
-        match fs_nav::list_dir(&path) {
+        match self.storage.list(&path) {
             Ok(entries) => {
                 self.entries = entries;
                 self.start_folder_sizes();
@@ -1202,7 +1206,7 @@ impl ExpliaApp {
         let Location::Dir(path) = &self.location else {
             return;
         };
-        match fs_nav::list_dir(path) {
+        match self.storage.list(path) {
             Ok(entries) => {
                 self.entries = entries;
                 // Les listings mis en cache pour la vue en colonnes ne sont plus à jour.
@@ -1256,7 +1260,7 @@ impl ExpliaApp {
         let paths: Vec<PathBuf> = self.delete_targets().into_iter().map(|e| e.path).collect();
         let count = paths.len();
         self.confirm_delete = false;
-        match trash::move_to_recycle_bin(&paths) {
+        match self.storage.delete(&paths).map_err(|e| e.to_string()) {
             Ok(()) => {
                 self.error = None;
                 self.notice = Some(format!("{count} élément(s) envoyé(s) à la corbeille."));
@@ -1304,7 +1308,11 @@ impl ExpliaApp {
     /// Applique le renommage ; en cas d'erreur, la saisie reste ouverte pour corriger.
     fn commit_rename(&mut self, ctx: &egui::Context, path: PathBuf, new_name: &str) {
         self.stop_player();
-        match fileops::rename_in_place(&path, new_name) {
+        match self
+            .storage
+            .rename(&path, new_name)
+            .map_err(|e| e.to_string())
+        {
             Ok(new_path) => {
                 self.renaming = None;
                 self.error = None;
@@ -1414,7 +1422,7 @@ impl ExpliaApp {
         self.stop_player();
         if !player::is_available() {
             self.error = Some(player::VLC_MISSING_MESSAGE.to_string());
-            self.report_launch_keep_error(launch::open(&path));
+            self.report_launch_keep_error(self.storage.open(&path).map_err(|e| e.to_string()));
             return;
         }
         self.error = None;
@@ -1447,7 +1455,7 @@ impl ExpliaApp {
                 self.error = Some(format!(
                     "{message} Ouverture avec l'application par défaut."
                 ));
-                self.report_launch_keep_error(launch::open(&path));
+                self.report_launch_keep_error(self.storage.open(&path).map_err(|e| e.to_string()));
             }
             Err(_) => {}
         }
@@ -2546,7 +2554,7 @@ impl ExpliaApp {
         // Listings des dossiers traversés (le dernier est le dossier courant : `self.visible`).
         for (_, path) in crumbs.iter().take(crumbs.len().saturating_sub(1)) {
             if !self.column_cache.contains_key(path)
-                && let Ok(list) = fs_nav::list_dir(path)
+                && let Ok(list) = self.storage.list(path)
             {
                 let processed = self.filtered_and_sorted(&list, false);
                 self.column_cache.insert(path.clone(), processed);
