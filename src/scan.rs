@@ -1,4 +1,5 @@
-//! Parcours de dossiers en lecture seule : recherche récursive, dossiers vides, doublons.
+//! Parcours de dossiers en lecture seule : recherche récursive, dossiers vides, doublons,
+//! gros fichiers.
 //!
 //! Ces fonctions s'exécutent dans un thread de travail ; elles testent `cancel` régulièrement
 //! pour s'arrêter dès qu'un nouveau parcours remplace le courant. Les liens symboliques et les
@@ -215,6 +216,48 @@ pub fn find_duplicates(
     groups
 }
 
+/// Fichiers de plus de `min_bytes` octets, triés du plus gros au plus petit (puis par chemin).
+/// `recursive` : tout l'arbre de `root` ; sinon, seulement les fichiers directs de `root`.
+/// `progress` reçoit régulièrement le nombre de fichiers trouvés.
+pub fn find_large_files(
+    root: &Path,
+    recursive: bool,
+    min_bytes: u64,
+    cancel: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(usize),
+) -> Vec<(PathBuf, u64)> {
+    let mut found: Vec<(PathBuf, u64)> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for item in read.flatten() {
+            if cancel() {
+                return Vec::new();
+            }
+            let Ok(meta) = item.metadata() else {
+                continue;
+            };
+            if fs_nav::is_link(&meta) {
+                continue;
+            }
+            if meta.is_dir() {
+                if recursive {
+                    stack.push(item.path());
+                }
+            } else if meta.len() > min_bytes {
+                found.push((item.path(), meta.len()));
+                if found.len().is_multiple_of(50) {
+                    progress(found.len());
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    found
+}
+
 /// Hachage 64 bits du contenu (au plus `limit` octets si donné). `None` en cas d'erreur de
 /// lecture ou d'annulation.
 fn hash_file(path: &Path, limit: Option<u64>, cancel: &dyn Fn() -> bool) -> Option<u64> {
@@ -378,6 +421,30 @@ mod tests {
         assert!(find_duplicates(&tree.0, true, 2000, &never, &mut |_| {}).is_empty());
         // Sans récursivité : le doublon du sous-dossier n'est pas vu.
         assert!(find_duplicates(&tree.0, false, 1000, &never, &mut |_| {}).is_empty());
+    }
+
+    #[test]
+    fn large_files_are_sorted_from_the_biggest() {
+        let tree = TempTree::new("large");
+        tree.file("moyen.bin", &[0u8; 3000]);
+        tree.file("sub/gros.bin", &[0u8; 5000]);
+        tree.file("petit.bin", &[0u8; 500]);
+        tree.dir("vide");
+        let found = find_large_files(&tree.0, true, 1000, &never, &mut |_| {});
+        let paths: Vec<PathBuf> = found.iter().map(|(p, _)| p.clone()).collect();
+        let sizes: Vec<u64> = found.iter().map(|(_, s)| *s).collect();
+        assert_eq!(sizes, [5000, 3000]);
+        assert!(paths[0].ends_with("sub/gros.bin"));
+        // Sans récursivité : le fichier du sous-dossier n'est pas vu.
+        let direct = find_large_files(&tree.0, false, 1000, &never, &mut |_| {});
+        assert_eq!(direct.len(), 1);
+        assert!(direct[0].0.ends_with("moyen.bin"));
+        // Strictement plus gros que le seuil.
+        assert_eq!(
+            find_large_files(&tree.0, true, 3000, &never, &mut |_| {}).len(),
+            1
+        );
+        assert!(find_large_files(&tree.0, true, 1000, &|| true, &mut |_| {}).is_empty());
     }
 
     #[test]

@@ -29,7 +29,7 @@ ExPLIA réunit dans une seule fenêtre ce qu'on va d'habitude chercher dans plus
 - 🔎 **Recherche** par nom avec jokers (`*.exe`, `img_??.png`), **récursive** dans les sous-dossiers, résultats au fil de l'eau.
 - 👁 **Trois affichages** : liste détaillée triable, colonnes « style Mac » et grilles de miniatures (images ou vidéos).
 - 🎬 **Aperçu et lecture intégrés** : images, texte, archives ZIP, audio et vidéo (via VLC), **plein écran** d'un double-clic.
-- 🧹 **Nettoyage** : dossiers vides et **doublons** (même contenu), sélectionnés pour vous, supprimés en un clic (vers la corbeille).
+- 🧹 **Nettoyage** : dossiers vides, **doublons** (même contenu) et **gros fichiers** (> 50 Mo, réglable), classés du plus gros au plus petit, supprimés en un clic (vers la corbeille).
 - 📋 **Copier, coller, glisser-déposer** avec l'Explorateur et le Bureau, **sans jamais écraser** un fichier existant.
 - `>_` **PowerShell** ouvert directement dans le dossier, normal ou administrateur.
 - 🔒 **Aucune télémétrie, aucune connexion réseau.** Vos réglages restent dans un simple fichier texte.
@@ -49,9 +49,9 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ 🖥 Ce PC │ Sélection │ Afficher │ Option │ 🗂 onglet 1 × │ 🗂 onglet 2 ×       │  barre de menus
+│ 🖥 Ce PC │ Afficher │ Option │ 🗂 onglet 1 × │ 🗂 onglet 2 ×                   │  barre de menus
 ├───┬──────────────┬─────────────────────────────────────────┬─────────────────┤
-│ C │ 🏠 pphal      │ Ce PC > Home > Documents  ☑ Récursive 🔍 │ ▥  🖼  🎬        │
+│ C │ 🏠 pphal      │ Home > Documents ☑ Récursive 🔍 ⏷Sélection│ ▥  🖼  🎬        │
 │ e │  📁 Bureau    │ Nom ▲                 Modifié le  Taille │ aperçu, lecture  │
 │   │  📁 Documents │ ⬆ ..                                      │ ou actions du    │
 │ P │  📁 Vidéos    │ 📁 Projets            12/11/2026  2,1 Go │ dossier          │
@@ -108,16 +108,17 @@ La barre latérale, à gauche, montre la liste de l'intercalaire choisi ; les in
 - **Glisser-déposer** : appuyez sur une ligne ou une tuile et faites glisser vers le Bureau ou l'Explorateur (copie) ; à l'inverse, déposez dans ExPLIA des fichiers venus de l'Explorateur : ils sont copiés dans le dossier affiché, avec les mêmes règles que Coller.
 - **Ouvrir** : double-clic (application par défaut). Clic droit sur un exécutable : « Exécuter » ou « Exécuter en tant qu'administrateur » (UAC).
 
-### Nettoyage : dossiers vides et doublons
-Menu **Sélection** (barre de menus), selon l'option **Récursive** :
+### Nettoyage : dossiers vides, doublons et gros fichiers
+Filtre **⏷ Sélection**, à droite de la barre de recherche, selon l'option **Récursive** :
 - **📂 Dossiers vides** : liste et **sélectionne** les dossiers sans aucun fichier (des sous-dossiers vides ne comptent pas). Il ne reste qu'à cliquer sur « Supprimer ».
-- **📑 Doublons > [50] Mo** : liste les fichiers de **même contenu** (même taille, puis même empreinte du contenu) au-dessus du seuil, réglable. Les copies sont groupées (`#1`, `#2`…) avec leur dossier d'origine ; **« Sélectionner les copies »** garde le premier fichier de chaque groupe et sélectionne les autres.
+- **📑 Doublons > [50] Mo** : liste les fichiers de **même contenu** (même taille, puis même empreinte du contenu) au-dessus du seuil, réglable, **du plus gros au plus petit**. Les copies sont groupées (`#1`, `#2`…) avec leur dossier d'origine ; **« Sélectionner les copies »** garde le premier fichier de chaque groupe et sélectionne les autres.
+- **📦 Fichiers > [50] Mo** : liste les fichiers plus gros que le seuil (réglable), **du plus gros au plus petit**, avec leur taille totale. Rien n'est sélectionné d'office.
 - Pour un résultat, le volet de détail montre son **emplacement** : chaque dossier parent avec **↗ Ouvrir** (pour y aller, puis remonter) et **🗑** (supprimer ce dossier entier, corbeille avec confirmation). Idéal pour éliminer d'un coup un dossier rempli de doublons.
 
 ### Personnalisation et réglages
 - **Afficher > Disposition** : intercalaires et volet de détail à gauche ou à droite.
 - **Option** : « Pas de calcul de taille de dossier » (gros disques), « Occupation des disques » (barres de l'intercalaire *Ce PC*).
-- Tout est mémorisé automatiquement dans `%APPDATA%\ExPLIA\settings.txt` (format `clé=valeur`, modifiable à la main) : taille de la fenêtre, tri, affichage, colonnes, éléments cachés, disposition, échange des volets, options, récursivité, seuil des doublons, favoris et applications.
+- Tout est mémorisé automatiquement dans `%APPDATA%\ExPLIA\settings.txt` (format `clé=valeur`, modifiable à la main) : taille de la fenêtre, tri, affichage, colonnes, éléments cachés, disposition, échange des volets, options, récursivité, seuils des doublons et des gros fichiers, favoris et applications.
 
 ## Raccourcis clavier
 
@@ -146,7 +147,7 @@ Menu **Sélection** (barre de menus), selon l'option **Récursive** :
   - **renommer**, dans le même dossier, sans jamais écraser ;
   - **copier** (Coller, dépôt dans la fenêtre), sans jamais écraser, sans suivre les liens ni copier un dossier dans lui-même ; **jamais de déplacement** ;
   - **supprimer**, toujours **vers la corbeille** et après confirmation ; jamais de suppression définitive de sa propre initiative.
-- Les recherches, dossiers vides et doublons sont en **lecture seule**.
+- Les recherches, dossiers vides, doublons et gros fichiers sont en **lecture seule**.
 - Il lance une application ou PowerShell uniquement sur votre geste ; en administrateur, c'est Windows qui demande la confirmation (UAC).
 - Le seul fichier qu'il écrit de lui-même est `%APPDATA%\ExPLIA\settings.txt`.
 
@@ -224,7 +225,7 @@ cargo clippy -- -D warnings
 | `src/app.rs` | Interface : barre de menus, barre latérale, onglets, vues liste / colonnes / grilles, volet de détail, résultats, clavier. |
 | `src/fs_nav.rs` | Entrées de dossier (nom, taille, dates, caché), listage, fil d'Ariane (Home), niveaux de colonnes, taille d'un dossier. |
 | `src/view.rs` | Tri, recherche par motifs (`*`, `?`), colonnes, modes d'affichage, sélection d'une plage, défilement. |
-| `src/scan.rs` | Parcours en lecture seule : recherche récursive, dossiers vides, doublons (empreintes). |
+| `src/scan.rs` | Parcours en lecture seule : recherche récursive, dossiers vides, doublons (empreintes), gros fichiers. |
 | `src/copy.rs` | Copie de fichiers et dossiers sans écrasement (Coller, dépôt). |
 | `src/clipboard.rs` | Presse-papiers de Windows : liste de fichiers (`CF_HDROP`), lecture et écriture. |
 | `src/dragdrop.rs` | Glisser vers une autre application (OLE `DoDragDrop`, copie seulement). |

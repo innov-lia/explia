@@ -71,6 +71,8 @@ const DRIVE_BAR_HEIGHT: f32 = 16.0;
 const SEARCH_WIDTH: f32 = 300.0;
 /// Place réservée à la case « Récursive », à gauche de la barre de recherche.
 const RECURSIVE_WIDTH: f32 = 110.0;
+/// Libellé du filtre « Sélection », à droite de la barre de recherche (mesuré pour sa place).
+const SELECTION_MENU_LABEL: &str = "⏷ Sélection";
 /// Libellés des boutons de la barre du volet de détail (mesurés pour sa largeur minimale).
 const OPTION_COLUMNS_LABEL: &str = "▥ Colonnes";
 const OPTION_IMAGES_LABEL: &str = "🖼 Images";
@@ -89,6 +91,8 @@ enum ResultKind {
     EmptyFolders,
     /// Fichiers de même contenu.
     Duplicates,
+    /// Fichiers plus gros que le seuil, du plus gros au plus petit.
+    LargeFiles,
 }
 
 /// Résultats d'un parcours (recherche récursive, dossiers vides, doublons), affichés dans la
@@ -306,6 +310,8 @@ enum Action {
     FindEmptyFolders,
     /// Lance la recherche des doublons (selon l'option « Récursive » et le seuil en Mo).
     FindDuplicates,
+    /// Lance la liste des fichiers plus gros que le seuil en Mo (selon l'option « Récursive »).
+    FindLargeFiles,
     /// Sélectionne les copies : tout sauf le premier fichier de chaque groupe de doublons.
     SelectDuplicateCopies,
     /// Ferme les résultats et revient au contenu du dossier.
@@ -427,6 +433,8 @@ pub struct ExpliaApp {
     recursive: bool,
     /// Taille minimale (Mo) des fichiers examinés pour les doublons.
     duplicate_min_mb: u32,
+    /// Taille minimale (Mo) des fichiers listés par « Fichiers > N Mo ».
+    large_min_mb: u32,
     /// Résultats affichés à la place du contenu du dossier.
     results: Option<Results>,
     /// Éléments trouvés par le parcours en cours ou terminé.
@@ -549,6 +557,7 @@ impl ExpliaApp {
             search: String::new(),
             recursive: settings.recursive,
             duplicate_min_mb: settings.duplicate_min_mb,
+            large_min_mb: settings.large_min_mb,
             results: None,
             result_entries: Vec::new(),
             duplicate_groups: HashMap::new(),
@@ -757,8 +766,12 @@ impl ExpliaApp {
                 })
                 .cloned()
                 .collect();
-            // Les doublons restent groupés ; le reste suit le tri choisi.
-            if results.kind != ResultKind::Duplicates {
+            // Les doublons restent groupés et les gros fichiers classés du plus gros au plus petit ;
+            // le reste suit le tri choisi.
+            if !matches!(
+                results.kind,
+                ResultKind::Duplicates | ResultKind::LargeFiles
+            ) {
                 view::sort_entries(&mut list, self.sort_key, self.sort_order);
             }
             self.visible = list;
@@ -907,6 +920,7 @@ impl ExpliaApp {
         let recursive = self.recursive;
         let show_hidden = self.show_hidden;
         let min_bytes = u64::from(self.duplicate_min_mb) * 1024 * 1024;
+        let large_min_bytes = u64::from(self.large_min_mb) * 1024 * 1024;
         let current = Arc::clone(&self.scan_generation);
         let tx = self.event_tx.clone();
         let ctx = self.ctx.clone();
@@ -968,6 +982,28 @@ impl ExpliaApp {
                         })
                         .collect();
                     send(Event::ScanGroups { generation, groups });
+                }
+                ResultKind::LargeFiles => {
+                    let found = scan::find_large_files(
+                        &root,
+                        recursive,
+                        large_min_bytes,
+                        &cancelled,
+                        &mut |count| {
+                            send(Event::ScanProgress {
+                                generation,
+                                text: format!("{count} fichier(s) trouvé(s)…"),
+                            });
+                        },
+                    );
+                    let entries: Vec<Entry> = found
+                        .iter()
+                        .filter_map(|(path, _)| fs_nav::entry_from_path(path))
+                        .collect();
+                    send(Event::ScanBatch {
+                        generation,
+                        entries,
+                    });
                 }
             }
             send(Event::ScanDone {
@@ -1912,6 +1948,7 @@ impl ExpliaApp {
             Action::ToggleVideoFullscreen => self.set_video_fullscreen(ctx, !self.video_fullscreen),
             Action::FindEmptyFolders => self.start_scan(ResultKind::EmptyFolders),
             Action::FindDuplicates => self.start_scan(ResultKind::Duplicates),
+            Action::FindLargeFiles => self.start_scan(ResultKind::LargeFiles),
             Action::SelectDuplicateCopies => {
                 // On garde le premier fichier de chaque groupe ; les autres sont sélectionnés.
                 let mut seen = HashSet::new();
@@ -2017,6 +2054,7 @@ impl ExpliaApp {
             show_drive_usage: self.show_drive_usage,
             recursive: self.recursive,
             duplicate_min_mb: self.duplicate_min_mb,
+            large_min_mb: self.large_min_mb,
             view_mode: self.view_mode,
             show_hidden: self.show_hidden,
             columns: self.columns,
@@ -2078,6 +2116,14 @@ impl ExpliaApp {
                     self.duplicate_min_mb
                 )
             }
+            ResultKind::LargeFiles => {
+                let total: u64 = self.visible.iter().filter_map(|e| e.size).sum();
+                format!(
+                    "Fichiers > {} Mo : {count} fichier(s), {} au total",
+                    self.large_min_mb,
+                    fs_nav::format_size(total)
+                )
+            }
         };
         let scope = if self.recursive {
             "sous-dossiers inclus"
@@ -2126,8 +2172,21 @@ impl ExpliaApp {
             let search_width = SEARCH_WIDTH.min(ui.available_width() * 0.4);
             // La case « Récursive » prend sa place à gauche de la barre de recherche.
             let recursive_width = RECURSIVE_WIDTH;
-            let address_width =
-                (ui.available_width() - search_width - recursive_width - 2.0 * spacing).max(80.0);
+            let selection_width = {
+                let font = egui::TextStyle::Button.resolve(ui.style());
+                let galley = ui.painter().layout_no_wrap(
+                    SELECTION_MENU_LABEL.to_string(),
+                    font,
+                    egui::Color32::WHITE,
+                );
+                galley.size().x + ui.spacing().button_padding.x * 2.0
+            };
+            let address_width = (ui.available_width()
+                - search_width
+                - recursive_width
+                - selection_width
+                - 3.0 * spacing)
+                .max(80.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(address_width, ui.spacing().interact_size.y),
                 egui::Layout::left_to_right(egui::Align::Center),
@@ -2150,6 +2209,72 @@ impl ExpliaApp {
                 self.on_recursive_changed();
             }
             self.search_box(ui, search_width);
+            if let Some(chosen) = self.selection_menu(ui) {
+                action = Some(chosen);
+            }
+        });
+        action
+    }
+
+    /// Filtre « Sélection », à droite de la barre de recherche : dossiers vides, doublons (du plus
+    /// gros au plus petit) et fichiers plus gros qu'un seuil, selon l'option « Récursive ».
+    fn selection_menu(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        let on_dir = matches!(self.location, Location::Dir(_));
+        let scope = if self.recursive {
+            "sous-dossiers compris"
+        } else {
+            "dossier courant seulement"
+        };
+        menu(ui, SELECTION_MENU_LABEL, |ui| {
+            ui.weak(format!("Portée : {scope} (case Récursive)"));
+            if ui
+                .add_enabled(on_dir, egui::Button::new("📂 Dossiers vides"))
+                .on_hover_text("Liste et sélectionne les dossiers sans aucun fichier")
+                .clicked()
+            {
+                action = Some(Action::FindEmptyFolders);
+                ui.close();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(on_dir, egui::Button::new("📑 Doublons"))
+                    .on_hover_text(
+                        "Fichiers de même contenu (même empreinte), plus gros que la taille \
+                         indiquée, classés du plus gros au plus petit",
+                    )
+                    .clicked()
+                {
+                    action = Some(Action::FindDuplicates);
+                    ui.close();
+                }
+                ui.label(">");
+                ui.add(
+                    egui::DragValue::new(&mut self.duplicate_min_mb)
+                        .range(1..=1_000_000)
+                        .suffix(" Mo"),
+                )
+                .on_hover_text("Taille minimale des fichiers examinés (modifiable)");
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(on_dir, egui::Button::new("📦 Fichiers"))
+                    .on_hover_text(
+                        "Fichiers plus gros que la taille indiquée, du plus gros au plus petit",
+                    )
+                    .clicked()
+                {
+                    action = Some(Action::FindLargeFiles);
+                    ui.close();
+                }
+                ui.label(">");
+                ui.add(
+                    egui::DragValue::new(&mut self.large_min_mb)
+                        .range(1..=1_000_000)
+                        .suffix(" Mo"),
+                )
+                .on_hover_text("Taille minimale des fichiers listés (modifiable)");
+            });
         });
         action
     }
@@ -2268,41 +2393,6 @@ impl ExpliaApp {
             if ui.button("🖥 Ce PC").clicked() {
                 action = Some(Action::Go(Location::ThisPc));
             }
-            ui.separator();
-            menu(ui, "Sélection", |ui| {
-                let on_dir = matches!(self.location, Location::Dir(_));
-                let scope = if self.recursive {
-                    "sous-dossiers compris"
-                } else {
-                    "dossier courant seulement"
-                };
-                ui.weak(format!("Portée : {scope} (case Récursive)"));
-                if ui
-                    .add_enabled(on_dir, egui::Button::new("📂 Dossiers vides"))
-                    .on_hover_text("Liste et sélectionne les dossiers sans aucun fichier")
-                    .clicked()
-                {
-                    action = Some(Action::FindEmptyFolders);
-                    ui.close();
-                }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(on_dir, egui::Button::new("📑 Doublons"))
-                        .on_hover_text("Fichiers de même contenu (même empreinte), plus gros que la taille indiquée")
-                        .clicked()
-                    {
-                        action = Some(Action::FindDuplicates);
-                        ui.close();
-                    }
-                    ui.label(">");
-                    ui.add(
-                        egui::DragValue::new(&mut self.duplicate_min_mb)
-                            .range(1..=1_000_000)
-                            .suffix(" Mo"),
-                    )
-                    .on_hover_text("Taille minimale des fichiers examinés (modifiable)");
-                });
-            });
             ui.separator();
             menu(ui, "Afficher", |ui| {
                 ui.weak("Colonnes");
@@ -4315,6 +4405,7 @@ impl ExpliaApp {
                 ResultKind::Search => "résultat(s) de recherche",
                 ResultKind::EmptyFolders => "dossier(s) vide(s)",
                 ResultKind::Duplicates => "fichier(s) en doublon",
+                ResultKind::LargeFiles => "gros fichier(s)",
             };
             return format!("{} {what}", self.visible.len());
         }
@@ -5134,6 +5225,32 @@ mod tests {
         app.apply(&ctx, Action::FindDuplicates);
         wait_scan(&mut app, &ctx);
         assert!(app.visible.is_empty());
+    }
+
+    #[test]
+    fn large_file_scan_lists_files_from_the_biggest_and_keeps_that_order() {
+        let tree = TempTree::new("large");
+        tree.file("moyen.bin", &vec![1u8; 1_500_000]);
+        tree.file("sub/gros.bin", &vec![1u8; 2_500_000]);
+        tree.file("petit.bin", &vec![1u8; 500_000]);
+        let (mut app, ctx) = app_in(&tree);
+        app.large_min_mb = 1;
+        app.apply(&ctx, Action::FindLargeFiles);
+        wait_scan(&mut app, &ctx);
+        let order: Vec<String> = app.visible.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(order, ["gros.bin", "moyen.bin"]);
+        // Le tri par nom ne défait pas le classement par taille.
+        app.sort_key = SortKey::Name;
+        app.sort_order = SortOrder::Ascending;
+        app.recompute_visible();
+        assert_eq!(app.visible[0].name, "gros.bin");
+        // Rien n'est sélectionné d'office (ce ne sont pas forcément des fichiers à supprimer).
+        assert!(app.multi.is_empty());
+        // Sans récursivité : seulement les fichiers du dossier affiché.
+        app.recursive = false;
+        app.on_recursive_changed();
+        wait_scan(&mut app, &ctx);
+        assert_eq!(names(&app), ["moyen.bin"]);
     }
 
     #[test]

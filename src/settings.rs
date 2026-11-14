@@ -24,6 +24,8 @@ pub struct Settings {
     pub recursive: bool,
     /// Taille minimale (en Mo) des fichiers examinés par la recherche de doublons.
     pub duplicate_min_mb: u32,
+    /// Taille minimale (en Mo) des fichiers listés par « Fichiers > N Mo ».
+    pub large_min_mb: u32,
     /// Barre d'occupation (et pourcentage) des lecteurs dans la barre latérale.
     pub show_drive_usage: bool,
     pub view_mode: ViewMode,
@@ -49,6 +51,7 @@ impl Default for Settings {
             skip_folder_sizes: false,
             recursive: true,
             duplicate_min_mb: 50,
+            large_min_mb: 50,
             show_drive_usage: true,
             view_mode: ViewMode::List,
             show_hidden: false,
@@ -109,6 +112,13 @@ impl Settings {
                         settings.duplicate_min_mb = mb;
                     }
                 }
+                "large_min_mb" => {
+                    if let Ok(mb) = value.parse::<u32>()
+                        && (1..=1_000_000).contains(&mb)
+                    {
+                        settings.large_min_mb = mb;
+                    }
+                }
                 "show_drive_usage" => settings.show_drive_usage = value != "false",
                 "view_mode" => {
                     if let Some(mode) = ViewMode::from_id(value) {
@@ -155,6 +165,7 @@ impl Settings {
         text += &format!("show_drive_usage={}\n", self.show_drive_usage);
         text += &format!("recursive={}\n", self.recursive);
         text += &format!("duplicate_min_mb={}\n", self.duplicate_min_mb);
+        text += &format!("large_min_mb={}\n", self.large_min_mb);
         text += &format!("view_mode={}\n", self.view_mode.id());
         text += &format!("show_hidden={}\n", self.show_hidden);
         text += &format!("tabs_side={}\n", self.tabs_side.id());
@@ -212,6 +223,7 @@ mod tests {
             show_drive_usage: false,
             recursive: false,
             duplicate_min_mb: 120,
+            large_min_mb: 300,
             view_mode: ViewMode::Videos,
             show_hidden: true,
             columns: Columns {
