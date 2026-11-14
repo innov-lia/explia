@@ -18,6 +18,33 @@ pub struct Entry {
     pub created: Option<SystemTime>,
 }
 
+impl Entry {
+    /// Élément décrit par son seul chemin (sans lire le disque) : fichier.
+    pub fn file_at(path: &Path) -> Self {
+        Self::bare(path, false)
+    }
+
+    /// Élément décrit par son seul chemin (sans lire le disque) : dossier.
+    pub fn folder_at(path: &Path) -> Self {
+        Self::bare(path, true)
+    }
+
+    fn bare(path: &Path, is_dir: bool) -> Self {
+        Self {
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+            path: path.to_path_buf(),
+            is_dir,
+            size: None,
+            hidden: false,
+            modified: None,
+            created: None,
+        }
+    }
+}
+
 /// Vrai si l'élément est caché : attribut « caché » de Windows (`meta` doit décrire l'élément
 /// lui-même, sans suivre les liens) ou nom commençant par un point (`.git`, `.config`, …).
 pub fn is_hidden(name: &str, meta: Option<&fs::Metadata>) -> bool {

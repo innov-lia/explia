@@ -27,6 +27,10 @@ use crate::settings::Settings;
 use crate::trash;
 use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
 
+mod action_manager;
+
+use action_manager::{Action, Command};
+
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
 pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
 /// Durée du clic maintenu qui démarre la multi-sélection, en secondes.
@@ -260,116 +264,6 @@ enum PreviewState {
         path: PathBuf,
         message: String,
     },
-}
-
-/// Action demandée par l'interface pendant une frame, appliquée ensuite.
-enum Action {
-    Go(Location),
-    /// Clic sur un dossier de la barre latérale : l'ouvre, et les flèches ↑ / ↓ parcourent
-    /// ensuite la liste de l'onglet.
-    SidebarGo(PathBuf),
-    /// Change d'onglet dans le classeur de la barre latérale.
-    SidebarTab(SidebarTab),
-    Select(Entry),
-    AddFavorite(PathBuf),
-    RemoveFavorite(PathBuf),
-    /// Ajoute un exécutable à l'onglet « Applications ».
-    AddApplication(PathBuf),
-    RemoveApplication(PathBuf),
-    /// Ouvre un fichier avec son application associée (ou lance un exécutable).
-    Open(PathBuf),
-    /// Lance un exécutable en tant qu'administrateur (fenêtre UAC).
-    OpenAsAdmin(PathBuf),
-    /// Passe la barre d'adresse en mode saisie.
-    EditAddress,
-    /// Clic maintenu sur une ligne : démarre (ou complète) la multi-sélection.
-    LongPress(Entry),
-    /// Clic sur une ligne pendant la multi-sélection : l'ajoute ou la retire.
-    ToggleMulti(Entry),
-    /// Maj+clic : sélectionne tout entre le dernier élément choisi et celui-ci.
-    SelectRange(Entry),
-    /// Quitte la multi-sélection.
-    ClearMulti,
-    /// Demande confirmation avant de supprimer la sélection.
-    AskDelete,
-    CancelDelete,
-    /// Envoie la sélection à la corbeille.
-    ConfirmDelete,
-    /// Entre dans un dossier au clavier (flèche droite) : son premier élément est sélectionné.
-    EnterFolder(PathBuf),
-    /// Lit un fichier audio ou vidéo dans le volet d'aperçu (VLC), sinon avec l'application
-    /// par défaut de Windows.
-    Play(PathBuf),
-    /// Arrête la lecture intégrée.
-    StopPlayer,
-    /// Change la façon d'afficher le dossier (liste, colonnes, grille d'images).
-    SetViewMode(ViewMode),
-    /// Lance la recherche des dossiers vides (selon l'option « Récursive »).
-    FindEmptyFolders,
-    /// Lance la recherche des doublons (selon l'option « Récursive » et le seuil en Mo).
-    FindDuplicates,
-    /// Lance la liste des fichiers plus gros que le seuil en Mo (selon l'option « Récursive »).
-    FindLargeFiles,
-    /// Sélectionne les copies : tout sauf le premier fichier de chaque groupe de doublons.
-    SelectDuplicateCopies,
-    /// Ferme les résultats et revient au contenu du dossier.
-    CloseResults,
-    /// Passe la vidéo en plein écran, ou en sort.
-    ToggleVideoFullscreen,
-    /// Copie le chemin complet dans le presse-papiers (texte).
-    CopyPath(PathBuf),
-    /// Copie des fichiers ou dossiers dans le presse-papiers de Windows (à coller ailleurs).
-    CopyFiles(Vec<PathBuf>),
-    /// Colle dans `dest` les fichiers et dossiers du presse-papiers (copie, sans écrasement).
-    Paste {
-        dest: PathBuf,
-    },
-    /// Copie des éléments déposés dans la fenêtre vers `dest` (sans écrasement).
-    CopyInto {
-        sources: Vec<PathBuf>,
-        dest: PathBuf,
-    },
-    /// Glisse des éléments vers une autre application (Bureau, Explorateur), en copie.
-    DragOut(Vec<PathBuf>),
-    /// Ouvre un dossier dans un nouvel onglet.
-    NewTab(PathBuf),
-    /// Affiche l'onglet donné.
-    SwitchTab(usize),
-    /// Ferme l'onglet donné.
-    CloseTab(usize),
-    /// Ouvre PowerShell dans un dossier, éventuellement en administrateur (UAC).
-    OpenPowerShell {
-        dir: PathBuf,
-        admin: bool,
-    },
-    /// Demande la suppression d'un dossier qui n'est pas une ligne de la liste (le dossier
-    /// affiché lui-même, ou un dossier parent d'un résultat).
-    AskDeleteFolder(PathBuf),
-    /// Clic sur un en-tête de colonne : trie dessus, ou inverse l'ordre s'il est déjà actif.
-    SortBy(SortKey),
-    /// Affiche ou masque les dossiers et fichiers cachés.
-    ToggleHidden,
-    /// Ctrl+clic (ou Maj+clic) dans une colonne qui n'est pas la dernière (vue en colonnes) :
-    /// cette colonne devient le dossier affiché, l'élément qui y était en surbrillance est
-    /// sélectionné, puis `entry` est ajouté (ou la plage jusqu'à `entry` si `range`).
-    ColumnMultiSelect {
-        dir: PathBuf,
-        anchor: Option<PathBuf>,
-        entry: Entry,
-        range: bool,
-    },
-    /// Ouvre un dossier et y sélectionne un fichier (vue en colonnes).
-    GoSelect {
-        dir: PathBuf,
-        file: PathBuf,
-    },
-    /// Passe une ligne en mode renommage (F2, menu contextuel, bouton « Renommer »).
-    StartRename(Entry),
-    CommitRename {
-        path: PathBuf,
-        new_name: String,
-    },
-    CancelRename,
 }
 
 /// Renommage en cours, directement dans la liste.
@@ -1766,232 +1660,6 @@ impl ExpliaApp {
         }
     }
 
-    fn apply(&mut self, ctx: &egui::Context, action: Action) {
-        match action {
-            Action::Go(location) => self.navigate(location),
-            Action::SidebarGo(path) => {
-                let index = self.sidebar_items().iter().position(|p| *p == path);
-                self.navigate(Location::Dir(path));
-                if index.is_some() {
-                    self.sidebar_focus = true;
-                    self.sidebar_cursor = index;
-                }
-            }
-            Action::SidebarTab(tab) => self.set_sidebar_tab(tab),
-            Action::SortBy(key) => {
-                if self.sort_key == key {
-                    self.sort_order = match self.sort_order {
-                        SortOrder::Ascending => SortOrder::Descending,
-                        SortOrder::Descending => SortOrder::Ascending,
-                    };
-                } else {
-                    self.sort_key = key;
-                    // Nom : de A à Z ; taille et dates : les plus grands / récents d'abord.
-                    self.sort_order = match key {
-                        SortKey::Name | SortKey::Type => SortOrder::Ascending,
-                        SortKey::Size | SortKey::Modified | SortKey::Created => {
-                            SortOrder::Descending
-                        }
-                    };
-                }
-                self.recompute_visible();
-                // Les colonnes de la vue « style Mac » dépendent du tri.
-                self.invalidate_columns();
-            }
-            Action::Select(entry) => self.select(ctx, entry),
-            Action::AddFavorite(path) => {
-                self.favorites.add(path);
-            }
-            Action::RemoveFavorite(path) => self.favorites.remove(&path),
-            Action::AddApplication(path) => {
-                self.applications.add(path);
-            }
-            Action::RemoveApplication(path) => self.applications.remove(&path),
-            Action::Open(path) => self.report_launch(launch::open(&path)),
-            Action::Play(path) => self.start_player(path),
-            Action::StopPlayer => self.stop_player(),
-            Action::OpenAsAdmin(path) => self.report_launch(launch::open_as_admin(&path)),
-            Action::EditAddress => {
-                self.address_editing = true;
-                self.focus_address = true;
-            }
-            Action::LongPress(entry) => {
-                self.long_press_done = true;
-                // Un clic maintenu sur l'élément sélectionné démarre la multi-sélection avec lui.
-                if self.selection.multi.is_empty()
-                    && self
-                        .selection
-                        .single
-                        .as_ref()
-                        .is_some_and(|s| s.path == entry.path)
-                {
-                    self.selection.single = None;
-                    self.preview = PreviewState::None;
-                }
-                self.toggle_multi(entry);
-                // Après un clic maintenu, chaque clic ajoute ou retire une ligne.
-                self.selection.toggle_mode = !self.selection.multi.is_empty();
-            }
-            Action::ToggleMulti(entry) => self.toggle_multi(entry),
-            Action::SelectRange(entry) => self.select_range(entry),
-            Action::ClearMulti => self.clear_multi(),
-            Action::AskDelete => {
-                self.confirm_delete = !self.delete_targets().is_empty();
-                self.delete_asked_at = Some(ctx.input(|i| i.time));
-            }
-            Action::CancelDelete => self.cancel_delete(),
-            Action::CopyPath(path) => {
-                let text = path.display().to_string();
-                ctx.copy_text(text.clone());
-                self.error = None;
-                self.notice = Some(format!("Chemin copié : {text}"));
-            }
-            Action::CopyFiles(paths) => match clipboard::copy_files(&paths) {
-                Ok(()) => {
-                    self.error = None;
-                    self.notice = Some(format!(
-                        "{} élément(s) copié(s) : collez-les dans l'Explorateur ou sur le Bureau (Ctrl+V).",
-                        paths.len()
-                    ));
-                }
-                Err(message) => self.error = Some(message),
-            },
-            Action::Paste { dest } => match clipboard::clipboard_files() {
-                Ok(files) if files.is_empty() => {
-                    self.notice = Some("Rien à coller : copiez d'abord des fichiers.".to_string());
-                }
-                Ok(files) => self.start_copy(files, dest),
-                Err(message) => self.error = Some(message),
-            },
-            Action::CopyInto { sources, dest } => self.start_copy(sources, dest),
-            Action::DragOut(paths) => {
-                self.drag_out_done = true;
-                let result = dragdrop::drag_files_out(&paths);
-                self.drag_out_ended_at = Some(ctx.input(|i| i.time));
-                match result {
-                    Ok(true) => {
-                        self.error = None;
-                        self.notice =
-                            Some(format!("{} élément(s) déposé(s) (copie).", paths.len()));
-                    }
-                    Ok(false) => {}
-                    Err(message) => self.error = Some(message),
-                }
-            }
-            Action::NewTab(path) => {
-                if self.tabs.is_empty()
-                    && let Location::Dir(current) = &self.location
-                {
-                    self.tabs.push(current.clone());
-                    self.active_tab = 0;
-                }
-                self.tabs.push(path.clone());
-                self.active_tab = self.tabs.len() - 1;
-                self.navigate(Location::Dir(path));
-            }
-            Action::SwitchTab(index) => {
-                if let Some(path) = self.tabs.get(index).cloned() {
-                    self.active_tab = index;
-                    self.navigate(Location::Dir(path));
-                }
-            }
-            Action::CloseTab(index) => self.close_tab(index),
-            Action::OpenPowerShell { dir, admin } => {
-                self.report_launch(launch::open_powershell(&dir, admin));
-            }
-            Action::ToggleVideoFullscreen => self.set_video_fullscreen(ctx, !self.video_fullscreen),
-            Action::FindEmptyFolders => self.start_scan(ResultKind::EmptyFolders),
-            Action::FindDuplicates => self.start_scan(ResultKind::Duplicates),
-            Action::FindLargeFiles => self.start_scan(ResultKind::LargeFiles),
-            Action::SelectDuplicateCopies => {
-                // On garde le premier fichier de chaque groupe ; les autres sont sélectionnés.
-                let mut seen = HashSet::new();
-                let copies: Vec<Entry> = self
-                    .visible
-                    .iter()
-                    .filter(|e| {
-                        self.duplicate_groups
-                            .get(&e.path)
-                            .is_some_and(|group| !seen.insert(*group))
-                    })
-                    .cloned()
-                    .collect();
-                if !copies.is_empty() {
-                    self.clear_multi();
-                    self.selection.single = None;
-                    self.preview = PreviewState::None;
-                    self.selection.anchor = copies.first().map(|e| e.path.clone());
-                    self.selection.multi = copies;
-                }
-            }
-            Action::CloseResults => {
-                let was_search = self
-                    .results
-                    .as_ref()
-                    .is_some_and(|r| r.kind == ResultKind::Search);
-                self.close_results();
-                if was_search {
-                    self.search.clear();
-                }
-                self.clear_multi();
-                self.selection.single = None;
-                self.preview = PreviewState::None;
-                self.recompute_visible();
-            }
-            Action::AskDeleteFolder(path) => {
-                if let Some(entry) = fs_nav::entry_from_path(&path) {
-                    self.clear_multi();
-                    self.selection.single = Some(entry);
-                    self.confirm_delete = true;
-                    self.delete_asked_at = Some(ctx.input(|i| i.time));
-                }
-            }
-            Action::ConfirmDelete => self.delete_selection(),
-            Action::EnterFolder(path) => {
-                self.select_first_after_nav = true;
-                self.navigate(Location::Dir(path));
-            }
-            Action::SetViewMode(mode) => {
-                self.view_mode = mode;
-                self.scroll_to_index = self.cursor_index();
-            }
-            Action::ToggleHidden => {
-                self.show_hidden = !self.show_hidden;
-                self.invalidate_columns();
-                self.recompute_visible();
-            }
-            Action::GoSelect { dir, file } => {
-                self.select_path_after_nav = Some(file);
-                self.navigate(Location::Dir(dir));
-            }
-            Action::ColumnMultiSelect {
-                dir,
-                anchor,
-                entry,
-                range,
-            } => {
-                self.select_path_after_nav = anchor;
-                self.navigate(Location::Dir(dir.clone()));
-                if self.location == Location::Dir(dir) {
-                    let target = self
-                        .visible
-                        .iter()
-                        .find(|e| e.path == entry.path)
-                        .cloned()
-                        .unwrap_or(entry);
-                    if range {
-                        self.select_range(target);
-                    } else {
-                        self.toggle_multi(target);
-                    }
-                }
-            }
-            Action::StartRename(entry) => self.start_rename(&entry),
-            Action::CommitRename { path, new_name } => self.commit_rename(ctx, path, &new_name),
-            Action::CancelRename => self.renaming = None,
-        }
-    }
-
     fn report_launch(&mut self, result: Result<(), String>) {
         self.error = result.err();
     }
@@ -2803,26 +2471,17 @@ impl ExpliaApp {
                 action = Some(Action::Open(path.clone()));
             }
             response.context_menu(|ui| {
-                if ui.button("Lancer").clicked() {
-                    action = Some(Action::Open(path.clone()));
-                    ui.close();
+                let mut commands = vec![
+                    Some(Command::Open),
+                    Some(Command::RunAsAdmin),
+                    Some(Command::ShowInFolder),
+                ];
+                if removable {
+                    commands.push(Some(Command::RemoveApplication));
                 }
-                if ui.button("Lancer en tant qu'administrateur").clicked() {
-                    action = Some(Action::OpenAsAdmin(path.clone()));
-                    ui.close();
-                }
-                if let Some(dir) = path.parent()
-                    && ui.button("Afficher dans son dossier").clicked()
-                {
-                    action = Some(Action::GoSelect {
-                        dir: dir.to_path_buf(),
-                        file: path.clone(),
-                    });
-                    ui.close();
-                }
-                if removable && ui.button("Retirer des applications").clicked() {
-                    action = Some(Action::RemoveApplication(path.clone()));
-                    ui.close();
+                let entry = Entry::file_at(path);
+                if let Some(chosen) = show_commands(ui, &entry, &commands, vec![path.clone()]) {
+                    action = Some(chosen);
                 }
             });
         }
@@ -2847,9 +2506,10 @@ impl ExpliaApp {
                 action = Some(Action::SidebarGo(path.clone()));
             }
             response.context_menu(|ui| {
-                if ui.button("Retirer des favoris").clicked() {
-                    action = Some(Action::RemoveFavorite(path.clone()));
-                    ui.close();
+                let entry = Entry::folder_at(path);
+                let commands = [Some(Command::RemoveFavorite)];
+                if let Some(chosen) = show_commands(ui, &entry, &commands, vec![path.clone()]) {
+                    action = Some(chosen);
                 }
             });
         }
@@ -3537,112 +3197,41 @@ impl ExpliaApp {
     /// Menu contextuel d'une ligne (liste, colonnes, colonne de navigation) : renommer
     /// (si `allow_rename`), favoris pour un dossier, ouvrir / lire / exécuter pour un fichier.
     fn entry_menu(&self, ui: &mut egui::Ui, entry: &Entry, allow_rename: bool) -> Option<Action> {
-        let mut action = None;
+        let mut commands: Vec<Option<Command>> = Vec::new();
         if allow_rename {
-            if ui.button("Renommer  (F2)").clicked() {
-                action = Some(Action::StartRename(entry.clone()));
-                ui.close();
-            }
-            ui.separator();
+            commands.extend([Some(Command::Rename), None]);
         }
-        // Copier : l'élément, ou toute la multi-sélection s'il en fait partie.
-        let targets: Vec<PathBuf> = self.selection.paths_from(entry);
-        let copy_label = if targets.len() > 1 {
-            format!("📋 Copier ({} éléments)  (Ctrl+C)", targets.len())
-        } else {
-            "📋 Copier  (Ctrl+C)".to_string()
-        };
-        if ui
-            .button(copy_label)
-            .on_hover_text("À coller dans l'Explorateur, sur le Bureau ou ailleurs (Ctrl+V)")
-            .clicked()
-        {
-            action = Some(Action::CopyFiles(targets));
-            ui.close();
-        }
-        if ui.button("Copier le chemin").clicked() {
-            action = Some(Action::CopyPath(entry.path.clone()));
-            ui.close();
-        }
+        commands.extend([Some(Command::Copy), Some(Command::CopyPath)]);
         if entry.is_dir {
-            if ui.button("🗂 Ouvrir dans un nouvel onglet").clicked() {
-                action = Some(Action::NewTab(entry.path.clone()));
-                ui.close();
-            }
-            if ui
-                .add_enabled(
-                    clipboard::has_files(),
-                    egui::Button::new("📥 Coller dans ce dossier"),
-                )
-                .clicked()
-            {
-                action = Some(Action::Paste {
-                    dest: entry.path.clone(),
-                });
-                ui.close();
-            }
-            if ui.button(">_ PowerShell ici").clicked() {
-                action = Some(Action::OpenPowerShell {
-                    dir: entry.path.clone(),
-                    admin: false,
-                });
-                ui.close();
-            }
-            if ui.button(">_ PowerShell ici (administrateur)").clicked() {
-                action = Some(Action::OpenPowerShell {
-                    dir: entry.path.clone(),
-                    admin: true,
-                });
-                ui.close();
-            }
+            commands.push(Some(Command::OpenInNewTab));
+            commands.push(Some(Command::Paste));
+            commands.extend([Some(Command::PowerShell), Some(Command::PowerShellAdmin)]);
         }
-        ui.separator();
+        commands.push(None);
         if entry.is_dir {
-            if self.favorites.contains(&entry.path) {
-                if ui.button("Retirer des favoris").clicked() {
-                    action = Some(Action::RemoveFavorite(entry.path.clone()));
-                    ui.close();
-                }
-            } else if ui.button("Ajouter aux favoris").clicked() {
-                action = Some(Action::AddFavorite(entry.path.clone()));
-                ui.close();
-            }
-        } else {
-            let playable = is_playable(&entry.path);
-            let label = if launch::is_executable(&entry.path) {
-                "Exécuter"
-            } else if playable {
-                "Lire"
+            commands.push(Some(if self.favorites.contains(&entry.path) {
+                Command::RemoveFavorite
             } else {
-                "Ouvrir"
-            };
-            if ui.button(label).clicked() {
-                action = Some(open_action(&entry.path));
-                ui.close();
+                Command::AddFavorite
+            }));
+        } else {
+            let executable = launch::is_executable(&entry.path);
+            commands.push(Some(Command::Open));
+            if executable {
+                commands.push(Some(if self.applications.contains(&entry.path) {
+                    Command::RemoveApplication
+                } else {
+                    Command::AddApplication
+                }));
             }
-            if launch::is_executable(&entry.path) {
-                if self.applications.contains(&entry.path) {
-                    if ui.button("Retirer des applications").clicked() {
-                        action = Some(Action::RemoveApplication(entry.path.clone()));
-                        ui.close();
-                    }
-                } else if ui.button("Ajouter aux applications").clicked() {
-                    action = Some(Action::AddApplication(entry.path.clone()));
-                    ui.close();
-                }
+            if is_playable(&entry.path) {
+                commands.push(Some(Command::OpenExternally));
             }
-            if playable && ui.button("Ouvrir avec le lecteur externe").clicked() {
-                action = Some(Action::Open(entry.path.clone()));
-                ui.close();
-            }
-            if launch::is_executable(&entry.path)
-                && ui.button("Exécuter en tant qu'administrateur").clicked()
-            {
-                action = Some(Action::OpenAsAdmin(entry.path.clone()));
-                ui.close();
+            if executable {
+                commands.push(Some(Command::RunAsAdmin));
             }
         }
-        action
+        show_commands(ui, entry, &commands, self.selection.paths_from(entry))
     }
 
     /// Navigation aux flèches :
@@ -4746,6 +4335,34 @@ fn open_action(path: &Path) -> Action {
     } else {
         Action::Open(path.to_path_buf())
     }
+}
+
+/// Boutons d'un menu de commandes (`None` : séparateur) pour `entry` ; `targets` : tous les
+/// éléments visés. Renvoie l'action de la commande choisie.
+fn show_commands(
+    ui: &mut egui::Ui,
+    entry: &Entry,
+    commands: &[Option<Command>],
+    targets: Vec<PathBuf>,
+) -> Option<Action> {
+    let mut action = None;
+    for command in commands {
+        let Some(command) = *command else {
+            ui.separator();
+            continue;
+        };
+        let enabled = command != Command::Paste || clipboard::has_files();
+        let label = command.label(&entry.path, entry.is_dir, targets.len());
+        let mut response = ui.add_enabled(enabled, egui::Button::new(label));
+        if let Some(hint) = command.hint() {
+            response = response.on_hover_text(hint);
+        }
+        if response.clicked() {
+            action = Some(command.action(entry, targets.clone()));
+            ui.close();
+        }
+    }
+    action
 }
 
 fn favorite_name(path: &Path) -> String {
