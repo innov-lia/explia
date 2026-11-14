@@ -7,6 +7,7 @@
 //!   les modules de stockage, jamais par l'interface.
 
 use super::*;
+use event_manager::Shortcut;
 
 /// Commande de l'utilisateur sur un élément (ou la sélection dont il fait partie).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +53,7 @@ impl Command {
             Command::OpenInNewTab => "🗂 Ouvrir dans un nouvel onglet",
             Command::ShowInFolder => "Afficher dans son dossier",
             Command::Copy if count > 1 => {
-                return format!("📋 Copier ({count} éléments)  (Ctrl+C)");
+                return format!("📋 Copier ({count} éléments)  ({})", Shortcut::Copy.label());
             }
             Command::Copy => "📋 Copier",
             Command::Paste => "📥 Coller dans ce dossier",
@@ -74,12 +75,13 @@ impl Command {
 
     /// Raccourci clavier affiché à côté du libellé (déclaré dans `event_manager`).
     pub(super) fn shortcut(self) -> Option<&'static str> {
-        match self {
-            Command::Copy => Some("Ctrl+C"),
-            Command::Rename => Some("F2"),
-            Command::Delete => Some("Suppr"),
-            _ => None,
-        }
+        let shortcut = match self {
+            Command::Copy => Shortcut::Copy,
+            Command::Rename => Shortcut::Rename,
+            Command::Delete => Shortcut::Delete,
+            _ => return None,
+        };
+        Some(shortcut.label())
     }
 
     /// Bulle d'aide éventuelle.

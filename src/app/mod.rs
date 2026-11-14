@@ -29,8 +29,10 @@ use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
 
 mod action_manager;
 mod context_menu_manager;
+mod event_manager;
 
 use action_manager::Action;
+use event_manager::ItemView;
 
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
 pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
@@ -744,31 +746,6 @@ impl ExpliaApp {
         if was_active && let Some(path) = next {
             self.navigate(Location::Dir(path));
         }
-    }
-
-    /// Éléments glissés depuis une ligne : toute la multi-sélection si la ligne en fait partie,
-    /// sinon la ligne seule.
-    fn drag_targets(&self, entry: &Entry) -> Vec<PathBuf> {
-        self.selection.paths_from(entry)
-    }
-
-    /// Appui maintenu sur une ligne et pointeur déplacé : lance un glisser vers l'extérieur.
-    fn drag_out_check(
-        &self,
-        ui: &egui::Ui,
-        response: &egui::Response,
-        entry: &Entry,
-    ) -> Option<Action> {
-        if self.drag_out_done || !response.is_pointer_button_down_on() {
-            return None;
-        }
-        let moved = ui.input(
-            |i| match (i.pointer.press_origin(), i.pointer.latest_pos()) {
-                (Some(origin), Some(position)) => origin.distance(position) > DRAG_OUT_DISTANCE,
-                _ => false,
-            },
-        );
-        moved.then(|| Action::DragOut(self.drag_targets(entry)))
     }
 
     /// Annule le parcours en cours et ferme les résultats.
@@ -1715,6 +1692,29 @@ impl ExpliaApp {
         without_window.window_size = self.saved_settings.window_size;
         if without_window != self.saved_settings {
             self.write_settings(current);
+        }
+    }
+
+    /// Pendant le survol de fichiers venus d'une autre application : voile et consigne.
+    fn drop_hint(&self, ctx: &egui::Context) {
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        if hovering
+            && !self.drag_out_done
+            && let Location::Dir(current) = &self.location
+        {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::unique("drop-hint"),
+            ));
+            let screen = ctx.content_rect();
+            painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(90));
+            painter.text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("Déposer pour copier dans « {} »", favorite_name(current)),
+                egui::FontId::proportional(22.0),
+                egui::Color32::WHITE,
+            );
         }
     }
 
@@ -2666,41 +2666,15 @@ impl ExpliaApp {
                                             row_columns,
                                             &cells,
                                         );
-                                        let (ctrl, shift) =
-                                            ui.input(|i| (i.modifiers.command, i.modifiers.shift));
-                                        if let Some(drag) =
-                                            self.drag_out_check(ui, &response, entry)
+                                        let view = ItemView::Column {
+                                            dir,
+                                            highlighted: next_dir.map(PathBuf::as_path),
+                                            is_last,
+                                        };
+                                        if let Some(gesture) =
+                                            self.item_events(ui, &response, entry, view)
                                         {
-                                            action = Some(drag);
-                                        } else if is_last && response.clicked() && ctrl {
-                                            // Ctrl+clic : ajoute ou retire l'élément de la sélection
-                                            // multiple (dossier ou fichier de la dernière colonne).
-                                            action = Some(Action::ToggleMulti(entry.clone()));
-                                        } else if is_last && response.clicked() && shift {
-                                            action = Some(Action::SelectRange(entry.clone()));
-                                        } else if !is_last && response.clicked() && (ctrl || shift)
-                                        {
-                                            // Colonne précédente : la sélection multiple part de
-                                            // l'élément en surbrillance dans cette colonne.
-                                            action = Some(Action::ColumnMultiSelect {
-                                                dir: dir.clone(),
-                                                anchor: next_dir.cloned(),
-                                                entry: entry.clone(),
-                                                range: shift && !ctrl,
-                                            });
-                                        } else if response.double_clicked() && !entry.is_dir {
-                                            action = Some(open_action(&entry.path));
-                                        } else if response.clicked() {
-                                            action = Some(if entry.is_dir {
-                                                Action::Go(Location::Dir(entry.path.clone()))
-                                            } else if is_last {
-                                                Action::Select(entry.clone())
-                                            } else {
-                                                Action::GoSelect {
-                                                    dir: dir.clone(),
-                                                    file: entry.path.clone(),
-                                                }
-                                            });
+                                            action = Some(gesture);
                                         }
                                         // Mêmes fonctions que la liste : renommer (dernière
                                         // colonne), favoris, ouvrir / lire / exécuter.
@@ -2888,23 +2862,10 @@ impl ExpliaApp {
                             wanted.push(entry.path.clone());
                         }
                         let response = gallery_tile(ui, entry, selected, thumb);
-                        let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
-                        if let Some(drag) = self.drag_out_check(ui, &response, entry) {
-                            action = Some(drag);
-                        } else if response.clicked() && ctrl {
-                            // Ctrl+clic : ajoute ou retire la tuile de la sélection multiple.
-                            action = Some(Action::ToggleMulti(entry.clone()));
-                        } else if response.clicked() && shift {
-                            // Maj+clic : sélectionne la plage depuis la dernière tuile choisie.
-                            action = Some(Action::SelectRange(entry.clone()));
-                        } else if response.double_clicked() {
-                            action = Some(if entry.is_dir {
-                                Action::Go(Location::Dir(entry.path.clone()))
-                            } else {
-                                open_action(&entry.path)
-                            });
-                        } else if response.clicked() {
-                            action = Some(Action::Select(entry.clone()));
+                        if let Some(gesture) =
+                            self.item_events(ui, &response, entry, ItemView::Grid)
+                        {
+                            action = Some(gesture);
                         }
                     }
                 });
@@ -3119,67 +3080,8 @@ impl ExpliaApp {
                     &columns,
                     &cells,
                 );
-                // Après un clic maintenu : chaque clic ajoute ou retire une ligne.
-                // Avec Ctrl/Maj : un clic simple remplace la sélection (comportement habituel).
-                let multi_mode = self.selection.toggle_mode && !self.selection.multi.is_empty();
-                // Clic maintenu : démarre la multi-sélection (ou ajoute la ligne).
-                // La détection se fait sur la position du pointeur, avec une tolérance
-                // pour les mouvements de la main, sans dépendre de l'état du widget.
-                if !self.long_press_done {
-                    let held = ui.input(|i| {
-                        if !i.pointer.primary_down() {
-                            return None;
-                        }
-                        let origin = i.pointer.press_origin()?;
-                        let position = i.pointer.latest_pos()?;
-                        let started = i.pointer.press_start_time()?;
-                        let on_this_row = response.rect.contains(origin)
-                            && origin.distance(position) <= LONG_PRESS_TOLERANCE;
-                        on_this_row.then_some(i.time - started)
-                    });
-                    match held {
-                        Some(seconds) if seconds >= LONG_PRESS_SECONDS => {
-                            action = Some(Action::LongPress(entry.clone()));
-                        }
-                        Some(_) => {
-                            // Réveille l'interface pour détecter la fin du délai.
-                            ui.ctx()
-                                .request_repaint_after(std::time::Duration::from_millis(100));
-                        }
-                        None => {}
-                    }
-                }
-                // Appui long sur écran tactile.
-                if response.long_touched() {
-                    action = Some(Action::LongPress(entry.clone()));
-                }
-                // Appui puis déplacement : glisser vers le Bureau ou une autre application.
-                if let Some(drag) = self.drag_out_check(ui, &response, entry) {
-                    action = Some(drag);
-                }
-                let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
-                if response.clicked() && ctrl {
-                    // Ctrl+clic : ajoute ou retire la ligne de la sélection multiple.
-                    action = Some(Action::ToggleMulti(entry.clone()));
-                } else if response.clicked() && shift {
-                    // Maj+clic : sélectionne toute la plage depuis le dernier élément choisi.
-                    action = Some(Action::SelectRange(entry.clone()));
-                } else if self.long_press_done {
-                    // Le relâchement qui suit un clic maintenu n'est pas un clic.
-                } else if response.double_clicked() && !multi_mode {
-                    // Dossier : on entre ; audio ou vidéo : on la lit ; autre fichier : on l'ouvre
-                    // avec son application.
-                    action = Some(if entry.is_dir {
-                        Action::Go(Location::Dir(entry.path.clone()))
-                    } else {
-                        open_action(&entry.path)
-                    });
-                } else if response.clicked() {
-                    action = Some(if multi_mode {
-                        Action::ToggleMulti(entry.clone())
-                    } else {
-                        Action::Select(entry.clone())
-                    });
+                if let Some(gesture) = self.item_events(ui, &response, entry, ItemView::List) {
+                    action = Some(gesture);
                 }
                 response.context_menu(|ui| {
                     if let Some(menu_action) = self.entry_menu(ui, entry, true) {
@@ -3191,103 +3093,6 @@ impl ExpliaApp {
         self.last_scroll = (output.state.clamped_offset().y, output.inner_rect.height());
         self.renaming = rename;
         action
-    }
-
-    /// Navigation aux flèches :
-    /// - haut / bas : ligne précédente / suivante (avec Maj : étend la sélection) ;
-    /// - gauche : dossier parent (le dossier quitté est resélectionné) ;
-    /// - droite : entre dans le dossier sélectionné (son premier élément est sélectionné).
-    ///
-    fn arrow_key_action(&mut self, ctx: &egui::Context) -> Option<Action> {
-        let (up, down, left, right, shift, backspace, enter) = ctx.input(|i| {
-            (
-                i.key_pressed(egui::Key::ArrowUp),
-                i.key_pressed(egui::Key::ArrowDown),
-                i.key_pressed(egui::Key::ArrowLeft),
-                i.key_pressed(egui::Key::ArrowRight),
-                i.modifiers.shift,
-                i.key_pressed(egui::Key::Backspace),
-                i.key_pressed(egui::Key::Enter),
-            )
-        });
-        let gallery = self.view_mode.is_grid();
-        if !(up || down || left || right || backspace || (enter && gallery)) {
-            return None;
-        }
-        let vertical = if down { 1 } else { -1 };
-        // La barre latérale a la main (clic sur un lecteur, un dossier de Home ou un favori, ou
-        // flèche gauche au plus haut d'un lecteur) : ↑ / ↓ changent d'élément, → rend la main
-        // au dossier.
-        if self.sidebar_focus {
-            if up || down {
-                self.step_sidebar(vertical);
-            } else if right || (enter && gallery) {
-                self.sidebar_focus = false;
-                self.sidebar_cursor = None;
-                self.scroll_to_index = Some(0);
-                return self.visible.first().cloned().map(Action::Select);
-            }
-            return None;
-        }
-        match &self.location {
-            Location::ThisPc => None,
-            Location::Dir(_) => {
-                // Retour arrière : dossier parent, dans tous les modes d'affichage.
-                if backspace {
-                    return self.location.parent().map(Action::Go);
-                }
-                // Grille d'images : les quatre flèches déplacent la sélection dans la grille
-                // et Entrée ouvre l'élément (dossier ou fichier).
-                if gallery {
-                    let columns = i32::try_from(self.gallery_columns.max(1)).unwrap_or(1);
-                    let delta = match (left, right, up, down) {
-                        (true, ..) => -1,
-                        (_, true, ..) => 1,
-                        (_, _, true, _) => -columns,
-                        (_, _, _, true) => columns,
-                        _ => 0,
-                    };
-                    if delta != 0 {
-                        let list = self.nav_list();
-                        let next = view::step_index(self.cursor_index(), list.len(), delta)?;
-                        let entry = list[next].clone();
-                        self.scroll_to_index = Some(next);
-                        return Some(if shift {
-                            Action::SelectRange(entry)
-                        } else {
-                            Action::Select(entry)
-                        });
-                    }
-                    return match &self.selection.single {
-                        Some(entry) if enter && entry.is_dir => {
-                            Some(Action::EnterFolder(entry.path.clone()))
-                        }
-                        Some(entry) if enter => Some(open_action(&entry.path)),
-                        _ => None,
-                    };
-                }
-                if up || down {
-                    let current = self.cursor_index();
-                    let next = view::step_index(current, self.visible.len(), vertical)?;
-                    let entry = self.visible[next].clone();
-                    self.scroll_to_index = Some(next);
-                    return Some(if shift {
-                        Action::SelectRange(entry)
-                    } else {
-                        Action::Select(entry)
-                    });
-                }
-                if left {
-                    return self.location.parent().map(Action::Go);
-                }
-                match &self.selection.single {
-                    Some(entry) if right && entry.is_dir && self.selection.multi.is_empty() => {
-                        Some(Action::EnterFolder(entry.path.clone()))
-                    }
-                    _ => None,
-                }
-            }
-        }
     }
 
     /// Deux boutons côte à côte, de même largeur :
@@ -4439,138 +4244,8 @@ impl eframe::App for ExpliaApp {
         self.size_window_once(&ctx);
         self.poll_events(&ctx);
         self.update_player(&ctx);
-        if ctx.input(|i| i.pointer.primary_pressed()) {
-            self.long_press_done = false;
-            self.drag_out_done = false;
-        }
-        // Échap annule la confirmation de suppression, sinon quitte la multi-sélection
-        // (sauf pendant la saisie d'un chemin).
-        if !self.address_editing
-            && !self.video_fullscreen
-            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
-        {
-            if self.confirm_delete {
-                self.cancel_delete();
-            } else if !self.selection.multi.is_empty() {
-                self.clear_multi();
-            }
-        }
-        let mut action = None;
-        // Ctrl+F : va dans la barre de recherche.
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
-            self.focus_search = true;
-        }
-        let typing =
-            ctx.egui_wants_keyboard_input() || self.address_editing || self.renaming.is_some();
-        // Ctrl+T : nouvel onglet sur le dossier affiché ; Ctrl+W : ferme l'onglet affiché.
-        if !typing && let Location::Dir(current) = &self.location {
-            let (new_tab, close_tab) = ctx.input(|i| {
-                (
-                    i.modifiers.command && i.key_pressed(egui::Key::T),
-                    i.modifiers.command && i.key_pressed(egui::Key::W),
-                )
-            });
-            if new_tab {
-                action = Some(Action::NewTab(current.clone()));
-            } else if close_tab && !self.tabs.is_empty() {
-                action = Some(Action::CloseTab(self.active_tab));
-            }
-        }
-        // Ctrl+V : coller les fichiers du presse-papiers dans le dossier affiché (détecté à
-        // l'appui, voir `clipboard::paste_keys_down`).
-        let paste_down = ctx.input(|i| i.focused) && clipboard::paste_keys_down();
-        if paste_down
-            && !self.paste_keys_were_down
-            && !typing
-            && clipboard::has_files()
-            && let Location::Dir(current) = &self.location
-        {
-            action = Some(Action::Paste {
-                dest: current.clone(),
-            });
-        }
-        self.paste_keys_were_down = paste_down;
-        // Éléments glissés depuis l'Explorateur (ou le Bureau) et déposés dans la fenêtre :
-        // copiés dans le dossier affiché. Un dépôt juste après un glisser lancé depuis ExPLIA
-        // est ignoré (bouton relâché dans sa propre fenêtre).
-        let (dropped, hovering, now) = ctx.input(|i| {
-            (
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .map(|f| f.path().to_path_buf())
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .collect::<Vec<PathBuf>>(),
-                !i.raw.hovered_files.is_empty(),
-                i.time,
-            )
-        });
-        let own_drag = self
-            .drag_out_ended_at
-            .is_some_and(|ended| now - ended < OWN_DROP_GUARD_SECONDS);
-        if !dropped.is_empty()
-            && !own_drag
-            && let Location::Dir(current) = &self.location
-        {
-            action = Some(Action::CopyInto {
-                sources: dropped,
-                dest: current.clone(),
-            });
-        }
-        if hovering
-            && !self.drag_out_done
-            && let Location::Dir(current) = &self.location
-        {
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::unique("drop-hint"),
-            ));
-            let screen = ctx.content_rect();
-            painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(90));
-            painter.text(
-                screen.center(),
-                egui::Align2::CENTER_CENTER,
-                format!("Déposer pour copier dans « {} »", favorite_name(current)),
-                egui::FontId::proportional(22.0),
-                egui::Color32::WHITE,
-            );
-        }
-
-        // Raccourcis (jamais pendant une saisie) : F2 renomme ; Suppr demande la suppression,
-        // puis Entrée la confirme (Échap l'annule).
-        if !ctx.egui_wants_keyboard_input() && self.renaming.is_none() && !self.address_editing {
-            let (f2, delete, enter, space, copy) = ctx.input(|i| {
-                (
-                    i.key_pressed(egui::Key::F2),
-                    i.key_pressed(egui::Key::Delete),
-                    i.key_pressed(egui::Key::Enter),
-                    i.key_pressed(egui::Key::Space),
-                    // Ctrl+C : egui le transmet comme un événement « Copier ».
-                    i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
-                )
-            });
-            // Espace : lecture / pause du lecteur intégré.
-            if space && let PlayerSlot::Ready(active) = &self.player {
-                active.player.toggle_pause();
-            }
-            let single = match self.selection.multi.len() {
-                0 => self.selection.single.as_ref(),
-                1 => self.selection.multi.first(),
-                _ => None,
-            };
-            if enter && self.confirm_delete {
-                action = Some(Action::ConfirmDelete);
-            } else if f2 && let Some(entry) = single {
-                action = Some(Action::StartRename(entry.clone()));
-            } else if copy && !self.delete_targets().is_empty() {
-                let paths = self.delete_targets().into_iter().map(|e| e.path).collect();
-                action = Some(Action::CopyFiles(paths));
-            } else if delete && !self.delete_targets().is_empty() {
-                action = Some(Action::AskDelete);
-            } else if !self.confirm_delete {
-                action = self.arrow_key_action(&ctx);
-            }
-        }
+        let mut action = self.input_events(&ctx);
+        self.drop_hint(&ctx);
 
         // Vidéo en plein écran : elle seule occupe la fenêtre.
         if self.video_fullscreen && self.fullscreen_video(ui) {
