@@ -21,6 +21,12 @@ pub fn open(path: &Path) -> Result<(), String> {
     imp::shell_execute("open", path)
 }
 
+/// Ouvre la fenêtre « Propriétés » de Windows pour un fichier ou un dossier (lecture seule
+/// pour ExPLIA : ce que l'utilisateur y change, c'est Windows qui l'applique).
+pub fn show_properties(path: &Path) -> Result<(), String> {
+    imp::show_properties(path)
+}
+
 /// Lance le fichier en tant qu'administrateur : Windows affiche la fenêtre UAC.
 pub fn open_as_admin(path: &Path) -> Result<(), String> {
     imp::shell_execute("runas", path)
@@ -44,13 +50,32 @@ pub fn open_powershell(dir: &Path, admin: bool) -> Result<(), String> {
 mod imp {
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::Shell::{SHOP_FILEPATH, SHObjectProperties, ShellExecuteW};
 
     /// `SW_SHOWNORMAL` : affiche la fenêtre de l'application lancée.
     const SW_SHOWNORMAL: i32 = 1;
 
     fn wide(text: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
         text.as_ref().encode_wide().chain(Some(0)).collect()
+    }
+
+    pub fn show_properties(path: &Path) -> Result<(), String> {
+        let name = wide(path);
+        // SAFETY: `name` est terminée par un zéro et vit pendant l'appel ; fenêtre parente et
+        // page de propriétés nulles (autorisé par l'API). La fenêtre de Windows est autonome.
+        let shown = unsafe {
+            SHObjectProperties(
+                std::ptr::null_mut(),
+                SHOP_FILEPATH as u32,
+                name.as_ptr(),
+                std::ptr::null(),
+            )
+        };
+        if shown != 0 {
+            Ok(())
+        } else {
+            Err(format!("Propriétés indisponibles : {}", path.display()))
+        }
     }
 
     /// Lance `program` avec ses arguments, dans le dossier `dir`.
@@ -115,6 +140,10 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use std::path::Path;
+
+    pub fn show_properties(_path: &Path) -> Result<(), String> {
+        Err("Propriétés disponibles uniquement sous Windows.".to_string())
+    }
 
     pub fn shell_execute(_verb: &str, _path: &Path) -> Result<(), String> {
         Err("Ouverture de fichiers disponible uniquement sous Windows.".to_string())

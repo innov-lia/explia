@@ -60,6 +60,11 @@ fn user_home_from(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<Pa
         .find(|path| !path.as_os_str().is_empty())
 }
 
+/// Type du lecteur dont `root` est la racine (par exemple `C:\`).
+pub fn drive_kind(root: &Path) -> DriveKind {
+    imp::drive_kind(root)
+}
+
 /// Lecteurs logiques détectés.
 pub fn detect_drives() -> Vec<Drive> {
     imp::detect_drives()
@@ -127,6 +132,12 @@ mod imp {
             DRIVE_CDROM => DriveKind::Optical,
             _ => DriveKind::Other,
         }
+    }
+
+    pub fn drive_kind(root: &Path) -> DriveKind {
+        let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: `wide` est une chaîne UTF-16 terminée par un zéro, valide pendant l'appel.
+        kind_from_type(unsafe { GetDriveTypeW(wide.as_ptr()) })
     }
 
     pub fn detect_drives() -> Vec<Drive> {
@@ -205,6 +216,10 @@ mod imp {
 mod imp {
     use super::{Drive, DriveInfo, DriveKind};
     use std::path::{Path, PathBuf};
+
+    pub fn drive_kind(_root: &Path) -> DriveKind {
+        DriveKind::Fixed
+    }
 
     pub fn detect_drives() -> Vec<Drive> {
         vec![Drive {

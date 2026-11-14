@@ -70,6 +70,32 @@ pub fn rename_in_place(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+/// Nom proposé pour un nouveau dossier.
+pub const NEW_FOLDER_NAME: &str = "Nouveau dossier";
+
+/// Crée un dossier vide dans `parent`, sous un nom libre : « Nouveau dossier », puis
+/// « Nouveau dossier (2) »… Rien d'existant n'est jamais réutilisé. Renvoie son chemin.
+pub fn create_folder(parent: &Path) -> Result<PathBuf, String> {
+    if !parent.is_dir() {
+        return Err(format!("Dossier introuvable : {}", parent.display()));
+    }
+    for n in 1..1000u32 {
+        let name = if n == 1 {
+            NEW_FOLDER_NAME.to_string()
+        } else {
+            format!("{NEW_FOLDER_NAME} ({n})")
+        };
+        let path = parent.join(name);
+        // `create_dir` échoue si le nom est pris : jamais de fusion avec un dossier existant.
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("Création du dossier impossible : {err}")),
+        }
+    }
+    Err("Trop de dossiers « Nouveau dossier » ici.".to_string())
+}
+
 /// Sélection initiale proposée à l'édition : le nom sans l'extension (pour un fichier).
 pub fn stem_len(name: &str, is_dir: bool) -> usize {
     if is_dir {
@@ -188,6 +214,23 @@ mod tests {
     fn missing_source_is_an_error_not_a_panic() {
         let dir = test_dir("missing");
         assert!(rename_in_place(&dir.join("absent.txt"), "x.txt").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_folders_take_a_free_name() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-fileops")
+            .join("new-folder");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let first = create_folder(&dir).unwrap();
+        let second = create_folder(&dir).unwrap();
+        assert_eq!(first, dir.join("Nouveau dossier"));
+        assert_eq!(second, dir.join("Nouveau dossier (2)"));
+        assert!(second.is_dir());
+        assert!(create_folder(&dir.join("absent")).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -5,9 +5,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::storage_manager::ItemId;
+
+/// Élément d'un dossier (fichier ou dossier), tel que l'affiche la liste.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entry {
+    /// Identifiant de l'élément dans sa source : c'est lui qu'on remet au stockage.
+    pub id: ItemId,
     pub name: String,
+    /// Chemin affiché et utilisé pour la navigation.
     pub path: PathBuf,
     pub is_dir: bool,
     /// Taille en octets. Pour un dossier : `None` tant qu'elle n'est pas calculée.
@@ -16,6 +22,34 @@ pub struct Entry {
     pub hidden: bool,
     pub modified: Option<SystemTime>,
     pub created: Option<SystemTime>,
+}
+
+impl Entry {
+    /// Élément décrit par son seul chemin (sans lire le disque) : fichier.
+    pub fn file_at(path: &Path) -> Self {
+        Self::bare(path, false)
+    }
+
+    /// Élément décrit par son seul chemin (sans lire le disque) : dossier.
+    pub fn folder_at(path: &Path) -> Self {
+        Self::bare(path, true)
+    }
+
+    fn bare(path: &Path, is_dir: bool) -> Self {
+        Self {
+            id: ItemId::path(path),
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+            path: path.to_path_buf(),
+            is_dir,
+            size: None,
+            hidden: false,
+            modified: None,
+            created: None,
+        }
+    }
 }
 
 /// Vrai si l'élément est caché : attribut « caché » de Windows (`meta` doit décrire l'élément
@@ -89,6 +123,7 @@ pub fn entry_from_path(path: &Path) -> Option<Entry> {
     let is_dir = meta.is_dir();
     let hidden = is_hidden(&name, Some(&own));
     Some(Entry {
+        id: ItemId::path(path),
         name,
         path: path.to_path_buf(),
         is_dir,
@@ -193,6 +228,7 @@ pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
         // L'attribut « caché » se lit sur l'élément lui-même (pas sur la cible d'un lien).
         let hidden = is_hidden(&name, item.metadata().ok().as_ref());
         entries.push(Entry {
+            id: ItemId::path(&item_path),
             name,
             path: item_path,
             is_dir,

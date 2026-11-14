@@ -71,6 +71,22 @@ décodage d'images si cela devient coûteux.
 * Séparer autant que nécessaire l'interface, la navigation dans le
 système de fichiers et la génération des aperçus, sans
 sur-architecture.
+* Respecter l'architecture des événements et des actions (validée par
+l'utilisateur) :
+  * `app/event_manager` traduit les gestes egui (clics, clavier, glisser) en actions ;
+  tous les raccourcis clavier y sont déclarés ;
+  * `selection_manager` porte la sélection (élément, multi-sélection, point d'ancrage) ;
+  * `app/context_menu_manager` construit les menus contextuels selon la sélection et
+  les capacités de la source ;
+  * `app/action_manager` définit chaque commande une seule fois et l'exécute ;
+  * `storage_manager` expose les sources de stockage par une interface commune
+  (`Connector`) et leurs capacités ; seul le connecteur local existe (les lecteurs
+  réseau SMB passent par lui) : SharePoint et OneDrive via Microsoft Graph sont
+  reportés (connexion réseau et compte, interdits pour l'instant) ;
+  * `clipboard_manager` distingue Copier et Couper (références) de la copie réelle ;
+  * `app/ui` ne fait que dessiner et renvoyer des actions : pas de logique métier.
+* Code applicatif uniquement en Rust ; seule exception, la lecture vidéo facultative
+par `libvlc.dll` (voir plus haut).
 * Ajouter des tests pour la logique qui peut être testée
 indépendamment de l'interface.
 * Mettre à jour le README avec les prérequis, la compilation et
@@ -94,10 +110,21 @@ fichier. **Exceptions autorisées par l'utilisateur** :
   * sur demande explicite de l'utilisateur (Coller, ou dépôt de fichiers glissés dans
   la fenêtre), elle peut **copier** des fichiers ou dossiers dans le dossier affiché,
   sans jamais écraser un élément existant (nom libre « nom - Copie » si besoin), sans
-  suivre les liens ni copier un dossier dans lui-même ; jamais de déplacement ;
-  * elle peut placer des fichiers dans le presse-papiers de Windows (Copier) et les
-  faire glisser vers une autre application (Bureau, Explorateur) en mode **copie** :
-  c'est l'application de destination qui écrit.
+  suivre les liens ni copier un dossier dans lui-même ;
+  * sur demande explicite de l'utilisateur (Couper puis Coller), elle peut **déplacer**
+  des fichiers ou dossiers dans le dossier affiché, sans jamais écraser un élément
+  existant ni déplacer un dossier dans lui-même ; entre deux lecteurs, la source n'est
+  retirée qu'après une copie complète et réussie (décision de l'utilisateur) ;
+  * sur demande explicite de l'utilisateur, elle peut **créer un dossier** dans le
+  dossier affiché, sous un nom libre (« Nouveau dossier », « Nouveau dossier (2) »…) ;
+  * elle peut placer des fichiers dans le presse-papiers de Windows (Copier, Couper) et
+  les faire glisser vers une autre application (Bureau, Explorateur) : la destination
+  choisit copie, déplacement ou raccourci selon les touches, comme depuis l'Explorateur,
+  et c'est elle qui écrit ; ExPLIA ne supprime jamais rien de lui-même à l'issue d'un
+  glisser (décision de l'utilisateur) ;
+  * des fichiers glissés depuis une autre application (ou depuis ExPLIA) et lâchés sur
+  un dossier d'ExPLIA y sont copiés ou déplacés, comme dans l'Explorateur (même lecteur :
+  déplacement ; autre lecteur : copie ; Ctrl copie, Maj déplace), sans jamais écraser.
 Aucun autre fichier ne doit être écrit.
 * Ne jamais lancer de commande destructive ou modifier des fichiers en
 dehors du dépôt.
@@ -135,8 +162,9 @@ La priorité est d'obtenir d'abord un explorateur utilisable : **lecteurs
 → navigation par dossiers → barre latérale → aperçu des images**.
 
 Ne pas développer pour l'instant : réseau, connexions à des serveurs, cloud,
-opérations sur fichiers autres que renommer, copier (Coller, glisser-déposer) et
-envoyer à la corbeille (donc ni déplacement, ni création), recherche avancée,
+opérations sur fichiers autres que renommer, copier (Coller, glisser-déposer),
+déplacer (Couper, Coller), créer un dossier et envoyer à la corbeille (donc jamais
+de suppression définitive), recherche avancée,
 plugins, synchronisation ou personnalisation complexe. Les onglets de navigation
 (décision de l'utilisateur) sont autorisés.
 

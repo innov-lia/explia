@@ -18,7 +18,7 @@ Rapide, natif, écrit en Rust — un seul `explia.exe`, rien à installer.
 
 </div>
 
-ExPLIA réunit dans une seule fenêtre ce qu'on va d'habitude chercher dans plusieurs outils : une navigation au clavier très rapide, trois façons de voir un dossier (liste, colonnes « style Mac », grilles d'images et de vidéos), des aperçus et un lecteur vidéo intégrés, une recherche récursive, la chasse aux **doublons** et aux **dossiers vides**, l'occupation des disques en un coup d'œil, des onglets, PowerShell à portée de clic… tout en restant **prudent avec vos fichiers** : rien n'est jamais écrasé, et la suppression passe toujours par la corbeille, après confirmation.
+ExPLIA réunit dans une seule fenêtre ce qu'on va d'habitude chercher dans plusieurs outils : une navigation au clavier très rapide, trois façons de voir un dossier (liste, colonnes « style Mac », grilles d'images et de vidéos), des aperçus et un lecteur vidéo intégrés, une recherche récursive, la chasse aux **doublons** et aux **gros fichiers**, l'occupation des disques en un coup d'œil, des onglets, PowerShell à portée de clic… tout en restant **prudent avec vos fichiers** : rien n'est jamais écrasé, et la suppression passe toujours par la corbeille, après confirmation.
 
 > ⭐ **ExPLIA vous plaît ? Laissez une étoile au dépôt** : c'est ce qui nous aide le plus à le faire connaître.
 
@@ -29,8 +29,8 @@ ExPLIA réunit dans une seule fenêtre ce qu'on va d'habitude chercher dans plus
 - 🔎 **Recherche** par nom avec jokers (`*.exe`, `img_??.png`), **récursive** dans les sous-dossiers, résultats au fil de l'eau.
 - 👁 **Trois affichages** : liste détaillée triable, colonnes « style Mac » et grilles de miniatures (images ou vidéos).
 - 🎬 **Aperçu et lecture intégrés** : images, texte, archives ZIP, audio et vidéo (via VLC), **plein écran** d'un double-clic.
-- 🧹 **Nettoyage** : dossiers vides, **doublons** (même contenu) et **gros fichiers** (> 50 Mo, réglable), classés du plus gros au plus petit, supprimés en un clic (vers la corbeille).
-- 📋 **Copier, coller, glisser-déposer** avec l'Explorateur et le Bureau, **sans jamais écraser** un fichier existant.
+- 🧹 **Nettoyage** : **doublons** (même contenu, quelle que soit la taille) et **gros fichiers** (> 50 Mo, réglable), classés du plus gros au plus petit, supprimés en un clic (vers la corbeille).
+- 📋 **Copier, couper, coller, glisser-déposer** avec l'Explorateur et le Bureau, **sans jamais écraser** un fichier existant ; **nouveau dossier** et **propriétés** Windows en un clic.
 - `>_` **PowerShell** ouvert directement dans le dossier, normal ou administrateur.
 - 🔒 **Aucune télémétrie, aucune connexion réseau.** Vos réglages restent dans un simple fichier texte.
 
@@ -51,7 +51,7 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ 🖥 Ce PC │ Afficher │ Option │ 🗂 onglet 1 × │ 🗂 onglet 2 ×                   │  barre de menus
 ├───┬──────────────┬─────────────────────────────────────────┬─────────────────┤
-│ C │ 🏠 pphal      │ Home > Documents ☑ Récursive 🔍 ⏷Sélection│ ▥  🖼  🎬        │
+│ C │ 🏠 pphal      │ Home > Documents  🔍 Rechercher ⏷Sélection│ ▥  🖼  🎬        │
 │ e │  📁 Bureau    │ Nom ▲                 Modifié le  Taille │ aperçu, lecture  │
 │   │  📁 Documents │ ⬆ ..                                      │ ou actions du    │
 │ P │  📁 Vidéos    │ 📁 Projets            12/11/2026  2,1 Go │ dossier          │
@@ -69,56 +69,66 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 - **Barre d'adresse** (en haut de la zone centrale) : fil d'Ariane cliquable (`Ce PC > D: > Projets > …`) dont chaque mot s'illumine au survol. Dans votre dossier utilisateur, le chemin commence par `Home` (`Ce PC > Home > Vidéos`) plutôt que `C: > Users > nom`. Un clic sur l'espace libre permet de saisir un chemin (`C:\Users`, `D:`, `Ce PC`) ; Entrée valide, Échap annule.
 - **Ligne `..`** en tête de liste pour remonter ; **Retour arrière** ou **←** aussi (le dossier quitté est resélectionné). Double-clic ou **→** pour entrer dans un dossier.
 - **Onglets** : clic droit sur un dossier « 🗂 Ouvrir dans un nouvel onglet », ou **Ctrl+T** pour le dossier affiché. Les onglets s'affichent dans la barre de menus après **Option** ; un clic en change, « × » ou **Ctrl+W** le ferme.
+- Les dossiers sont **lus en arrière-plan** : la fenêtre reste réactive sur un lecteur réseau lent (un indicateur tourne dans la barre d'état) ; le dossier s'affiche dès qu'il est lu, et en cas d'erreur on reste sur le dossier précédent.
 - La zone centrale n'affiche jamais la liste des lecteurs : « Ce PC » (bouton de la barre de menus, fil d'Ariane, ou **←** au plus haut d'un lecteur) ouvre l'intercalaire *Ce PC* de la barre latérale.
 
 ### Barre latérale en « classeur »
 La barre latérale, à gauche, montre la liste de l'intercalaire choisi ; les intercalaires sont sur son bord gauche (ou droit, au choix).
 - **Ce PC** : les lecteurs (`C:`, `D:`…) avec leur nom de volume et une **barre d'occupation** avec le pourcentage à l'intérieur (verte, orange dès 75 %, rouge dès 90 %). L'infobulle donne le type, le format (NTFS…), la capacité, l'espace utilisé et libre.
 - **Home** : votre dossier utilisateur (🏠 et votre nom, un clic l'ouvre) et ses sous-dossiers.
+- Dans la barre latérale, le dossier affiché est marqué d'un **trait à gauche** ; la surbrillance est réservée à la sélection (et à l'élément choisi aux flèches quand la barre latérale a la main).
 - **Favoris** : vide au départ ; clic droit sur un dossier « Ajouter aux favoris » / « Retirer des favoris ».
 - **Applications** : ExPLIA en tête, puis les programmes que vous ajoutez (clic droit sur un `.exe`, `.bat`, `.cmd`, `.msi` ou `.com` > « Ajouter aux applications »). Un clic lance ; clic droit : lancer en administrateur (UAC), afficher dans son dossier, retirer.
 - **Réseau** : les lecteurs réseau connectés (lettres de lecteur).
 - **Au clavier** : après un clic sur un lecteur, un dossier de Home ou un favori, **↑ / ↓** ouvrent l'élément précédent / suivant de la liste et **→** rend la main au dossier.
 
 ### Recherche
-- Barre de recherche à droite de la barre d'adresse (**Ctrl+F**, **Échap** pour effacer). Un mot est cherché dans le nom (`rapport`, `.exe`) ; `*` et `?` sont des jokers sur le nom entier (`*.exe`, `img_??.png`) ; plusieurs motifs se séparent par `,` ou `;` (`*.mkv, *.avi`). Majuscules et minuscules sont indifférentes.
-- **☑ Récursive** (cochée par défaut) : la recherche parcourt aussi tous les sous-dossiers, en arrière-plan ; les résultats (5 000 au plus) apparaissent au fur et à mesure, avec leur dossier d'origine. Décochée, la recherche filtre simplement le dossier affiché.
+- Barre **🔍 Rechercher** à droite de la barre d'adresse (**Ctrl+F**, **Échap** pour effacer ; la bulle d'aide rappelle la syntaxe). Un mot est cherché dans le nom (`rapport`, `.exe`) ; `*` et `?` sont des jokers sur le nom entier (`*.exe`, `img_??.png`) ; plusieurs motifs se séparent par `,` ou `;` (`*.mkv, *.avi`). Majuscules et minuscules sont indifférentes.
+- **☑ Récursive** (menu **⏷ Sélection**, cochée par défaut) : la recherche parcourt aussi tous les sous-dossiers, en arrière-plan ; les résultats (5 000 au plus) apparaissent au fur et à mesure, avec leur dossier d'origine. Décochée, la recherche filtre simplement le dossier affiché.
 - Les liens et jonctions ne sont jamais suivis ; la recherche s'efface quand on change de dossier.
 
 ### Affichages
 - **Liste** (par défaut) : nom, taille (celle des dossiers est calculée en arrière-plan), date de modification. Le menu **Afficher** ajoute la date de création, les **dimensions** des images, la **résolution** et la **durée** des vidéos et des sons (lues dans les en-têtes : MP4/MOV/M4A, MKV/WebM, AVI, WAV, MP3, FLAC, OGG/Opus).
 - **Tri d'un clic sur un en-tête** (Nom, Créé le, Modifié le, Taille) ; un second clic inverse l'ordre, une flèche ▲ / ▼ marque le tri actif.
 - **▥ Colonnes « style Mac »** : une colonne de largeur fixe par niveau du chemin (un nom trop long se termine par « … »), la dernière avec taille, dates et en-têtes triables. Dans Home, les colonnes commencent sous votre dossier (l'intercalaire Home en tient lieu). Ctrl+clic / Maj+clic fonctionnent dans toutes les colonnes, renommer (F2) et clic droit aussi.
-- **🖼 Images** et **🎬 Vidéos** : une grille avec seulement les images (miniatures décodées au fil de l'eau) ou seulement les vidéos du dossier. Hors de Home, une colonne des lecteurs (si l'intercalaire *Ce PC* ne les montre pas déjà) et une colonne de navigation (`..` et sous-dossiers) l'accompagnent ; dans Home, la grille prend toute la place et les sous-dossiers y sont des tuiles.
-- Un second clic sur ▥, 🖼 ou 🎬 revient à la liste. **Afficher** gère aussi les **dossiers et fichiers cachés** (attribut « caché » de Windows, et noms commençant par un point comme `.git`), masqués par défaut.
+- **🖼 Images** et **🎬 Vidéos** : une grille avec seulement les images (miniatures décodées au fil de l'eau) ou seulement les vidéos du dossier. Hors de Home, une colonne des lecteurs (si l'intercalaire *Ce PC* ne les montre pas déjà) et une colonne de navigation (`..` et sous-dossiers) l'accompagnent ; dans Home, la grille prend toute la place. La grille ne montre jamais de dossier : seulement les images, ou seulement les vidéos.
+- **↔ Fractionné** (à gauche de ▥) : **deux volets côte à côte**, chacun avec son chemin (fil d'Ariane cliquable, ou saisie) et sa liste, pour transférer de l'un à l'autre (comme WinSCP). La croix **✕** en haut à droite d'un volet le ferme : l'autre reste affiché, seul. Le volet actif est encadré et lui seul a une sélection (elle s'efface du volet qu'on quitte : on sait toujours sur quoi agira « Supprimer ») ; un clic dans l'autre volet ou **Tab** lui donne la main, et la barre latérale, le clavier et le volet de détail agissent sur le volet actif. **Glisser** des éléments d'un volet à l'autre les y dépose (mêmes règles que le glisser-déposer ci-dessous). **F5** copie et **F6** déplace la sélection vers l'autre volet (aussi au clic droit). Jamais d'écrasement, comme pour Coller. Mémorisé d'une session à l'autre.
+- Un second clic sur ▥, 🖼, 🎬 ou ↔ revient à la liste. **Afficher** gère aussi les **dossiers et fichiers cachés** (attribut « caché » de Windows, et noms commençant par un point comme `.git`), masqués par défaut.
 
 ### Volet de détail, aperçu et lecture
 - **Aperçu** des images (PNG, JPEG, BMP, GIF, WebP), du texte (`.txt`, `.md`, `.json`, `.rs`, `.log`…, 64 Ko au plus) et du **contenu des archives ZIP** (rien n'est extrait). Pour les autres types : type, taille et bouton « Ouvrir ».
-- **Lecture audio et vidéo intégrée** (VLC, voir plus bas) : « ▶ Lire », double-clic ou Entrée ; lecture / pause (bouton ou **Espace**), arrêt, position, volume ; « ↗ Lecteur externe » pour l'application par défaut.
-- **Vidéo en plein écran** : double-clic sur la vidéo ; commandes en bas, double-clic ou **Échap** pour revenir.
+- **Lecture audio et vidéo intégrée** (VLC, voir plus bas) : « ▶ Lire », double-clic ou Entrée ; « ↗ Lecteur externe » pour l'application par défaut. Barre de commandes comme celle de VLC : **temps écoulé**, **barre de progression** (clic ou glisser pour s'y rendre, le temps visé s'affiche au survol), **temps restant** ; **⏪ 10 s** / **10 s ⏩** (reculer / avancer de 10 secondes), lecture / pause (**Espace**), arrêt, **vitesse** (0,5× à 2×), **son coupé** et volume, **⛶ plein écran**.
+- **Vidéo en plein écran** : double-clic sur la vidéo ou ⛶. La barre se pose sur la vidéo quand la souris bouge (ou à la pause) et disparaît, avec le pointeur, après 2,5 secondes d'immobilité. Clavier : **Espace** lecture / pause, **← / →** -10 s / +10 s, **↑ / ↓** volume, **M** son coupé, **Échap** (ou double-clic) pour revenir.
 - **◀ Triangle d'échange** (en bas du volet latéral) : le volet de détail passe au centre, en grand, et la navigation sur le côté ; un clic sur le triangle les remet en place.
-- **Actions sur un dossier** (dossier sélectionné, ou dossier affiché quand rien n'est sélectionné) : **>_ PowerShell** et **>_ Admin** (console ouverte dans ce dossier ; administrateur via UAC), **📋 Chemin**, **📥 Coller ici**, renommer, **🗑 Supprimer** (y compris le dossier affiché lui-même).
+- **Actions sur un dossier** (dossier sélectionné, ou dossier affiché quand rien n'est sélectionné) : **>_ PowerShell** et **>_ Admin** (console ouverte dans ce dossier ; administrateur via UAC), **📋 Chemin**, **📁 Nouveau dossier**, **📥 Coller dans ce dossier**, **Propriétés**, renommer, **🗑 Supprimer** (y compris le dossier affiché lui-même).
 
 ### Fichiers : sélection et actions
 - **Sélection multiple** : **Ctrl+clic**, **Maj+clic** (ou **Maj+↑/↓**), ou **clic maintenu** puis un clic par élément. Un seul type à la fois (dossiers ou fichiers).
 - **Renommer** : **F2**, bouton ou clic droit, directement dans la liste ; l'extension n'est pas sélectionnée, les noms interdits par Windows sont refusés et un élément existant n'est jamais écrasé.
-- **Supprimer** : **Suppr** ou bouton, **toujours vers la corbeille** (récupérable). « Supprimer » devient « Confirmer » à la même place ; au clavier Suppr puis Entrée, Échap annule.
+- **Supprimer** : **Suppr**, bouton ou clic droit, **vers la corbeille** (récupérable). « Supprimer » devient « Confirmer » à la même place ; au clavier Suppr puis Entrée, Échap annule. Sur un partage réseau ou un disque amovible, Windows n'a pas de corbeille : la confirmation l'indique, et Windows demande lui-même son accord avant de supprimer définitivement.
 - **Copier** (clic droit, bouton, **Ctrl+C**) : les fichiers vont dans le presse-papiers de Windows, à coller dans l'Explorateur, sur le Bureau ou ailleurs. **Copier le chemin** : le chemin complet en texte.
-- **Coller** (**Ctrl+V**, clic droit « 📥 Coller dans ce dossier », bouton « 📥 Coller ici ») : copie, en arrière-plan, les fichiers du presse-papiers (d'ExPLIA ou de l'Explorateur) dans le dossier. **Jamais d'écrasement** : la copie prend le nom « nom - Copie », « nom - Copie (2) »…
-- **Glisser-déposer** : appuyez sur une ligne ou une tuile et faites glisser vers le Bureau ou l'Explorateur (copie) ; à l'inverse, déposez dans ExPLIA des fichiers venus de l'Explorateur : ils sont copiés dans le dossier affiché, avec les mêmes règles que Coller.
+- **Couper** (clic droit, bouton, **Ctrl+X**) : les éléments apparaissent en grisé ; le prochain collage les **déplace** (dans ExPLIA comme dans l'Explorateur).
+- **Coller** (**Ctrl+V**, clic droit « 📥 Coller dans ce dossier », bouton du volet de détail) : copie ou déplace, en arrière-plan, les fichiers du presse-papiers (d'ExPLIA ou de l'Explorateur) dans le dossier. **Jamais d'écrasement** : l'élément arrivé prend le nom « nom - Copie », « nom - Copie (2) »… Entre deux lecteurs, un déplacement copie d'abord tout, et l'original n'est retiré qu'après une copie complète et sans erreur.
+- **Nouveau dossier** (**Ctrl+Maj+N**, bouton du volet de détail, clic droit sur un dossier) : crée « Nouveau dossier » (ou « Nouveau dossier (2) »…) et le passe aussitôt en renommage.
+- **Propriétés** (**Alt+Entrée**, clic droit, bouton) : la fenêtre « Propriétés » de Windows.
+- **Menus contextuels** : seules les commandes pertinentes s'affichent (fichier, dossier, exécutable, multi-sélection) et celles que la source permet.
+- **Glisser-déposer**, comme dans l'Explorateur : appuyez sur une ligne (fichier ou dossier, ou toute la sélection) et faites glisser.
+  - **Sur un dossier** de la liste ou de la vue en colonnes, sur un lecteur, un dossier de Home ou un favori de la barre latérale, ou sur l'autre volet (affichage fractionné) : la cible est encadrée et une étiquette dit ce qui va se passer. Sur le même lecteur, les éléments sont **déplacés** ; vers un autre lecteur, **copiés** ; **Ctrl** force la copie, **Maj** le déplacement. Jamais d'écrasement.
+  - **Hors de la fenêtre** : le glisser continue vers le Bureau, l'Explorateur ou une autre application, qui choisit comme pour l'Explorateur : **déplacer** (même lecteur, ou Maj), **copier** (autre lecteur, ou Ctrl), **raccourci** (Alt). Le dossier est relu ensuite.
+  - **Depuis l'Explorateur ou le Bureau** : lâchez des fichiers ou dossiers **sur un dossier** d'ExPLIA (ligne, colonne, lecteur, favori, autre volet), ou ailleurs dans la fenêtre pour le dossier affiché ; ils y sont déplacés ou copiés selon les mêmes règles, avec la même étiquette. Jamais d'écrasement.
 - **Ouvrir** : double-clic (application par défaut). Clic droit sur un exécutable : « Exécuter » ou « Exécuter en tant qu'administrateur » (UAC).
 
-### Nettoyage : dossiers vides, doublons et gros fichiers
-Filtre **⏷ Sélection**, à droite de la barre de recherche, selon l'option **Récursive** :
-- **📂 Dossiers vides** : liste et **sélectionne** les dossiers sans aucun fichier (des sous-dossiers vides ne comptent pas). Il ne reste qu'à cliquer sur « Supprimer ».
-- **📑 Doublons > [50] Mo** : liste les fichiers de **même contenu** (même taille, puis même empreinte du contenu) au-dessus du seuil, réglable, **du plus gros au plus petit**. Les copies sont groupées (`#1`, `#2`…) avec leur dossier d'origine ; **« Sélectionner les copies »** garde le premier fichier de chaque groupe et sélectionne les autres.
+### Nettoyage : doublons et gros fichiers
+Menu **⏷ Sélection**, à droite de la barre de recherche :
+- **☑ Récursive** : la recherche, les doublons et les gros fichiers parcourent aussi les sous-dossiers (sinon, le dossier affiché seulement).
+- **📑 Doublons** : liste les fichiers de **même contenu** (même taille, puis même empreinte du contenu), **quelle que soit leur taille** (les fichiers vides sont ignorés), **du plus gros au plus petit**. Les copies sont groupées (`#1`, `#2`…) avec leur dossier d'origine ; **« Sélectionner les copies »** garde le premier fichier de chaque groupe et sélectionne les autres.
 - **📦 Fichiers > [50] Mo** : liste les fichiers plus gros que le seuil (réglable), **du plus gros au plus petit**, avec leur taille totale. Rien n'est sélectionné d'office.
 - Pour un résultat, le volet de détail montre son **emplacement** : chaque dossier parent avec **↗ Ouvrir** (pour y aller, puis remonter) et **🗑** (supprimer ce dossier entier, corbeille avec confirmation). Idéal pour éliminer d'un coup un dossier rempli de doublons.
 
 ### Personnalisation et réglages
 - **Afficher > Disposition** : intercalaires et volet de détail à gauche ou à droite.
 - **Option** : « Pas de calcul de taille de dossier » (gros disques), « Occupation des disques » (barres de l'intercalaire *Ce PC*).
-- Tout est mémorisé automatiquement dans `%APPDATA%\ExPLIA\settings.txt` (format `clé=valeur`, modifiable à la main) : taille de la fenêtre, tri, affichage, colonnes, éléments cachés, disposition, échange des volets, options, récursivité, seuils des doublons et des gros fichiers, favoris et applications.
+- Tout est mémorisé automatiquement dans `%APPDATA%\ExPLIA\settings.txt` (format `clé=valeur`, modifiable à la main) : taille de la fenêtre, tri, affichage, colonnes, éléments cachés, disposition, échange des volets, affichage fractionné, options, récursivité, seuil des gros fichiers, favoris et applications.
 
 ## Raccourcis clavier
 
@@ -132,10 +142,15 @@ Filtre **⏷ Sélection**, à droite de la barre de recherche, selon l'option **
 | **Entrée** | Ouvre (grilles) ; confirme une suppression |
 | **F2** | Renomme l'élément sélectionné |
 | **Suppr**, puis **Entrée** | Supprime vers la corbeille ; **Échap** annule |
-| **Ctrl+C** / **Ctrl+V** | Copie la sélection / colle les fichiers du presse-papiers (sans écraser) |
+| **Ctrl+C** / **Ctrl+X** / **Ctrl+V** | Copie / coupe la sélection ; colle les fichiers du presse-papiers (sans écraser) |
+| **Ctrl+Maj+N** | Nouveau dossier dans le dossier affiché |
+| **Alt+Entrée** | Propriétés de l'élément sélectionné (ou du dossier affiché) |
 | **Ctrl+F** | Va dans la recherche |
 | **Ctrl+T** / **Ctrl+W** | Nouvel onglet / ferme l'onglet |
+| **F5** / **F6** (fractionné) | Copie / déplace la sélection vers l'autre volet |
+| **Tab** (fractionné) | Donne la main à l'autre volet |
 | **Espace** | Lecture / pause du lecteur intégré |
+| **← / →**, **↑ / ↓**, **M** (vidéo en plein écran) | -10 s / +10 s, volume, son coupé |
 | **Échap** | Annule une saisie, une confirmation, la multi-sélection, le plein écran |
 | **Ctrl+clic**, **Maj+clic**, **clic maintenu** | Sélection multiple |
 | **Double-clic** | Ouvre un dossier ; lit un audio / une vidéo ; ouvre un fichier ; plein écran sur la vidéo |
@@ -145,9 +160,11 @@ Filtre **⏷ Sélection**, à droite de la barre de recherche, selon l'option **
 - **Aucune télémétrie, aucune connexion réseau, aucun compte.**
 - ExPLIA ne touche à vos fichiers que sur une action explicite de votre part :
   - **renommer**, dans le même dossier, sans jamais écraser ;
-  - **copier** (Coller, dépôt dans la fenêtre), sans jamais écraser, sans suivre les liens ni copier un dossier dans lui-même ; **jamais de déplacement** ;
+  - **copier** (Coller, dépôt dans la fenêtre), sans jamais écraser, sans suivre les liens ni copier un dossier dans lui-même ;
+  - **déplacer** (Couper puis Coller), sans jamais écraser ni déplacer un dossier dans lui-même ; entre deux lecteurs, l'original n'est retiré qu'après une copie complète ;
+  - **créer un dossier**, sous un nom libre ;
   - **supprimer**, toujours **vers la corbeille** et après confirmation ; jamais de suppression définitive de sa propre initiative.
-- Les recherches, dossiers vides, doublons et gros fichiers sont en **lecture seule**.
+- Les recherches, doublons et gros fichiers sont en **lecture seule**.
 - Il lance une application ou PowerShell uniquement sur votre geste ; en administrateur, c'est Windows qui demande la confirmation (UAC).
 - Le seul fichier qu'il écrit de lui-même est `%APPDATA%\ExPLIA\settings.txt`.
 
@@ -165,8 +182,8 @@ ExPLIA n'embarque aucun lecteur. Pour lire les vidéos et les sons **dans ExPLIA
 - Préversion (0.1.0), testée sur Windows 11 uniquement ; exécutable non signé.
 - Lecture intégrée vérifiée avec une vidéo AVI ; MP4, MKV et le son restent à valider plus largement.
 - Pas de miniatures pour les vidéos (icône) ; pas de barre de progression pour Coller (bilan à la fin).
-- Glisser vers l'extérieur : des éléments d'un même dossier à la fois, en copie seulement.
-- Pas encore disponible : couper / déplacer, créer un dossier ou un fichier, historique précédent / suivant, onglets mémorisés d'une session à l'autre, navigation dans les partages réseau.
+- Glisser vers l'extérieur : des éléments d'un même dossier à la fois. Les raccourcis (Alt) ne se créent que vers une autre application, pas dans ExPLIA.
+- Pas encore disponible : créer un fichier, historique précédent / suivant, onglets mémorisés d'une session à l'autre, navigation dans les partages réseau, connecteurs SharePoint et OneDrive (Microsoft Graph : architecture prête, connexion reportée).
 
 ## Contribuer
 
@@ -184,7 +201,7 @@ ExPLIA est distribué sous [licence MIT](LICENSE) : vous pouvez l'utiliser, le m
 - 🔎 Name search with wildcards (`*.exe`), optionally **recursive** through subfolders.
 - 👁 List view with sortable headers, Mac-style **column view**, **image and video grids**.
 - 🎬 Built-in previews (images, text, ZIP) and audio/video playback through an installed VLC, with full screen.
-- 🧹 **Empty-folder and duplicate finder** (same content, configurable size threshold), one click to send them to the Recycle Bin.
+- 🧹 **Duplicate and large-file finder** (same content, any size; files over a configurable size), one click to send them to the Recycle Bin.
 - 📋 Copy, paste and drag-and-drop with File Explorer and the Desktop — **never overwrites** an existing file.
 - `>_` Open **PowerShell** (or an admin PowerShell) right in the folder; tabs; full keyboard navigation.
 - 🔒 No telemetry, no network access; deletions always go to the Recycle Bin after confirmation.
@@ -222,16 +239,26 @@ cargo clippy -- -D warnings
 | Fichier | Rôle |
 | --- | --- |
 | `src/main.rs` | Point d'entrée, fenêtre `eframe`. |
-| `src/app.rs` | Interface : barre de menus, barre latérale, onglets, vues liste / colonnes / grilles, volet de détail, résultats, clavier. |
+| `src/app/mod.rs` | Logique de l'application : navigation (dossiers lus en arrière-plan), onglets, parcours, aperçus, lecteur, réglages. |
+| `src/app/state.rs` | État regroupé par domaine : navigation, barre latérale, recherche et parcours, lecture, aperçus. |
+| `src/app/split.rs` | Affichage fractionné : second volet, échange entre volets, routage des résultats de fond, transferts et glisser d'un volet à l'autre. |
+| `src/app/event_manager.rs` | Réception centralisée des événements egui (clics, double-clics, clic maintenu, glisser, clavier, dépôt) et déclaration de tous les raccourcis. |
+| `src/app/action_manager.rs` | Catalogue des commandes (définies une fois : libellé, raccourci, action) et exécution des actions. |
+| `src/app/context_menu_manager.rs` | Menus contextuels construits selon la sélection et les capacités de la source. |
+| `src/app/ui/` | Dessin seulement : barres, barre latérale, liste, colonnes, grilles, volet de détail, éléments réutilisables. |
+| `src/selection_manager.rs` | Sélection, multi-sélection (un seul type à la fois), ancre Maj+clic, éléments visés. |
+| `src/storage_manager/` | Interface commune des sources (`Connector`), identifiants d'éléments (`ItemId`), capacités, erreurs ; connecteur local (disques et partages SMB). |
+| `src/clipboard_manager.rs` | Copier / Couper (références) et lecture du contenu à coller. |
 | `src/fs_nav.rs` | Entrées de dossier (nom, taille, dates, caché), listage, fil d'Ariane (Home), niveaux de colonnes, taille d'un dossier. |
-| `src/view.rs` | Tri, recherche par motifs (`*`, `?`), colonnes, modes d'affichage, sélection d'une plage, défilement. |
-| `src/scan.rs` | Parcours en lecture seule : recherche récursive, dossiers vides, doublons (empreintes), gros fichiers. |
-| `src/copy.rs` | Copie de fichiers et dossiers sans écrasement (Coller, dépôt). |
+| `src/view.rs` | Tri, recherche par motifs (`*`, `?`), colonnes, modes d'affichage, défilement. |
+| `src/scan.rs` | Parcours en lecture seule : recherche récursive, doublons (empreintes), gros fichiers. |
+| `src/copy.rs` | Copie et déplacement de fichiers et dossiers sans écrasement (Coller, dépôt, Couper). |
 | `src/clipboard.rs` | Presse-papiers de Windows : liste de fichiers (`CF_HDROP`), lecture et écriture. |
-| `src/dragdrop.rs` | Glisser vers une autre application (OLE `DoDragDrop`, copie seulement). |
-| `src/fileops.rs` | Renommage : validation du nom Windows, refus d'écraser. |
+| `src/dragdrop.rs` | Glisser vers une autre application (OLE `DoDragDrop` : copie, déplacement ou raccourci au choix de la destination). |
+| `src/droptarget.rs` | Cible de dépôt Windows (`IDropTarget`) : fichiers lâchés sur un dossier d'ExPLIA, position et touches (code `unsafe` isolé ici). |
+| `src/fileops.rs` | Renommage (validation du nom Windows, refus d'écraser) et création de dossier. |
 | `src/trash.rs` | Envoi à la corbeille (`SHFileOperationW` avec `FOF_ALLOWUNDO`). |
-| `src/launch.rs` | Ouverture d'un fichier, lancement d'un exécutable ou de PowerShell (`ShellExecuteW`, UAC). |
+| `src/launch.rs` | Ouverture d'un fichier, lancement d'un exécutable ou de PowerShell (`ShellExecuteW`, UAC), fenêtre Propriétés. |
 | `src/places.rs` | Lecteurs logiques, capacité, occupation, nom et format des volumes, dossier de l'utilisateur. |
 | `src/preview.rs` | Aperçus : images, texte, archives ZIP, miniatures. |
 | `src/media.rs` | En-têtes multimédia : dimensions, résolution, durée. |

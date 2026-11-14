@@ -1,11 +1,14 @@
-//! Copie de fichiers et de dossiers dans un dossier, sur demande explicite de l'utilisateur
-//! (Coller, ou dépôt d'éléments glissés dans la fenêtre).
+//! Copie et déplacement de fichiers et de dossiers dans un dossier, sur demande explicite de
+//! l'utilisateur (Coller, dépôt d'éléments glissés dans la fenêtre, Couper puis Coller).
 //!
 //! Règles : un élément existant n'est **jamais écrasé** (le nouveau prend un nom libre,
-//! « nom - Copie », « nom - Copie (2) »…), un dossier n'est jamais copié dans lui-même ni dans
-//! un de ses sous-dossiers, les liens et jonctions ne sont pas suivis, rien n'est déplacé.
+//! « nom - Copie », « nom - Copie (2) »…), un dossier n'est jamais copié ni déplacé dans
+//! lui-même ou un de ses sous-dossiers, les liens et jonctions ne sont pas suivis. Un
+//! déplacement entre deux lecteurs copie d'abord tout ; l'original n'est retiré qu'après une
+//! copie complète et sans erreur.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// Bilan d'une copie.
@@ -97,6 +100,115 @@ pub fn copy_into(sources: &[PathBuf], dest_dir: &Path) -> CopyReport {
     report
 }
 
+/// Déplace `sources` dans `dest_dir` (Couper puis Coller). Chaque élément garde son nom, ou
+/// prend un nom libre ; `CopyReport::copied` liste les éléments arrivés.
+pub fn move_into(sources: &[PathBuf], dest_dir: &Path) -> CopyReport {
+    let mut report = CopyReport::default();
+    if !dest_dir.is_dir() {
+        report
+            .errors
+            .push(format!("Destination introuvable : {}", dest_dir.display()));
+        return report;
+    }
+    for source in sources {
+        let Some(name) = source.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            report
+                .errors
+                .push(format!("Élément ignoré : {}", source.display()));
+            continue;
+        };
+        let Ok(meta) = fs::symlink_metadata(source) else {
+            report
+                .errors
+                .push(format!("Introuvable : {}", source.display()));
+            continue;
+        };
+        if source.parent() == Some(dest_dir) {
+            report
+                .errors
+                .push(format!("Déjà dans ce dossier : {}", source.display()));
+            continue;
+        }
+        if meta.is_dir() && dest_dir.starts_with(source) {
+            report.errors.push(format!(
+                "Un dossier ne peut pas être déplacé dans lui-même : {}",
+                source.display()
+            ));
+            continue;
+        }
+        let target = free_destination(dest_dir, &name, meta.is_dir(), &|p| p.exists());
+        // Même lecteur : simple changement de chemin, aucune donnée n'est recopiée.
+        let renamed = if target.exists() {
+            Err(io::Error::from(io::ErrorKind::AlreadyExists))
+        } else {
+            fs::rename(source, &target)
+        };
+        match renamed {
+            Ok(()) => report.copied.push(target),
+            Err(err) if crosses_devices(&err) => {
+                move_across(source, &target, &meta, &mut report);
+            }
+            Err(err) => report.errors.push(format!(
+                "Déplacement impossible de {} : {err}",
+                source.display()
+            )),
+        }
+    }
+    report
+}
+
+/// Le renommage a échoué parce que la destination est sur un autre lecteur.
+fn crosses_devices(err: &io::Error) -> bool {
+    // ERROR_NOT_SAME_DEVICE (17).
+    err.kind() == io::ErrorKind::CrossesDevices || err.raw_os_error() == Some(17)
+}
+
+/// Déplacement entre deux lecteurs : copie complète, puis retrait de l'original. Au moindre
+/// problème pendant la copie, l'original reste en place.
+fn move_across(source: &Path, target: &Path, meta: &fs::Metadata, report: &mut CopyReport) {
+    if crate::fs_nav::is_link(meta) {
+        report.errors.push(format!(
+            "Lien non déplacé vers un autre lecteur : {}",
+            source.display()
+        ));
+        return;
+    }
+    let mut errors = Vec::new();
+    let copied = if meta.is_dir() {
+        copy_dir(source, target, &mut errors)
+    } else {
+        copy_file(source, target)
+    };
+    match copied {
+        Ok(()) if errors.is_empty() => {
+            let removed = if meta.is_dir() {
+                fs::remove_dir_all(source)
+            } else {
+                fs::remove_file(source)
+            };
+            report.copied.push(target.to_path_buf());
+            if let Err(err) = removed {
+                report.errors.push(format!(
+                    "Copié, mais l'original n'a pas pu être retiré : {} ({err})",
+                    source.display()
+                ));
+            }
+        }
+        Ok(()) => {
+            report.errors.extend(errors);
+            report.errors.push(format!(
+                "Déplacement incomplet : {} reste en place (copie partielle dans {})",
+                source.display(),
+                target.display()
+            ));
+        }
+        Err(message) => {
+            report.errors.push(message);
+            report.errors.extend(errors);
+        }
+    }
+}
+
 /// Copie un fichier vers un chemin qui n'existe pas encore.
 fn copy_file(source: &Path, target: &Path) -> Result<(), String> {
     if target.exists() {
@@ -164,6 +276,37 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn moving_takes_items_out_of_their_folder_without_overwriting() {
+        let tree = TempTree::new("move");
+        let a = tree.file("src/a.txt", "nouveau");
+        tree.file("src/dossier/b.txt", "b");
+        tree.file("dest/a.txt", "ancien");
+        let dest = tree.0.join("dest");
+        let report = move_into(&[a.clone(), tree.0.join("src/dossier")], &dest);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(!a.exists() && !tree.0.join("src/dossier").exists());
+        // L'élément existant n'est pas écrasé : le nouveau prend un nom libre.
+        assert_eq!(fs::read_to_string(dest.join("a.txt")).unwrap(), "ancien");
+        assert_eq!(
+            fs::read_to_string(dest.join("a - Copie.txt")).unwrap(),
+            "nouveau"
+        );
+        assert!(dest.join("dossier/b.txt").is_file());
+    }
+
+    #[test]
+    fn a_folder_is_never_moved_into_itself_or_where_it_already_is() {
+        let tree = TempTree::new("move-self");
+        tree.file("d/sub/x.txt", "x");
+        let d = tree.0.join("d");
+        let report = move_into(std::slice::from_ref(&d), &d.join("sub"));
+        assert!(report.copied.is_empty() && report.errors.len() == 1);
+        let report = move_into(&[d.join("sub")], &d);
+        assert!(report.copied.is_empty() && report.errors.len() == 1);
+        assert!(d.join("sub/x.txt").is_file());
     }
 
     #[test]

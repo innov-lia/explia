@@ -2,8 +2,10 @@
 //! ensuite dans l'Explorateur, sur le Bureau ou dans une autre application (Ctrl+V).
 //!
 //! ExPLIA n'écrit aucun fichier : il dépose seulement la liste des chemins dans le
-//! presse-papiers (format `CF_HDROP`, comme l'Explorateur) ; c'est l'application où l'on colle
-//! qui fait la copie. Le code `unsafe` de l'API Windows reste dans ce module.
+//! presse-papiers (format `CF_HDROP`, comme l'Explorateur), avec l'effet voulu (copier ou
+//! déplacer, format « Preferred DropEffect ») ; c'est l'application où l'on colle qui écrit.
+//! Le code `unsafe` de l'API Windows reste dans ce module ; la logique Copier / Couper est
+//! dans `clipboard_manager`.
 
 use std::path::PathBuf;
 
@@ -45,12 +47,29 @@ pub fn paste_keys_down() -> bool {
     imp::paste_keys_down()
 }
 
-/// Place des fichiers et dossiers dans le presse-papiers de Windows, prêts à être collés.
-pub fn copy_files(paths: &[PathBuf]) -> Result<(), String> {
+/// `DROPEFFECT_COPY` : le collage copie.
+pub const DROPEFFECT_COPY: u32 = 1;
+/// `DROPEFFECT_MOVE` : le collage déplace (éléments coupés).
+pub const DROPEFFECT_MOVE: u32 = 2;
+
+/// Place des fichiers et dossiers dans le presse-papiers de Windows, prêts à être collés ;
+/// `effect` : `DROPEFFECT_COPY` ou `DROPEFFECT_MOVE`.
+pub fn put_files(paths: &[PathBuf], effect: u32) -> Result<(), String> {
     if paths.is_empty() {
-        return Err("Aucun élément à copier.".to_string());
+        return Err("Aucun élément sélectionné.".to_string());
     }
-    imp::set_clipboard(&hdrop_payload(paths))
+    imp::set_clipboard(&hdrop_payload(paths), effect)
+}
+
+/// Effet demandé par l'application qui a rempli le presse-papiers (`None` : non précisé,
+/// c'est-à-dire copier).
+pub fn drop_effect() -> Option<u32> {
+    imp::read_effect()
+}
+
+/// Vide le presse-papiers (après un déplacement : les éléments coupés n'y sont plus).
+pub fn clear() -> Result<(), String> {
+    imp::clear()
 }
 
 #[cfg(windows)]
@@ -62,7 +81,7 @@ mod imp {
         OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
     };
     use windows_sys::Win32::System::Memory::{
-        GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
+        GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetActiveWindow, GetAsyncKeyState, VK_CONTROL, VK_V,
@@ -71,8 +90,16 @@ mod imp {
 
     /// Format standard d'une liste de fichiers (`CF_HDROP`).
     const CF_HDROP: u32 = 15;
-    /// `DROPEFFECT_COPY` : le collage copie (ne déplace pas).
-    const DROPEFFECT_COPY: u32 = 1;
+
+    /// Format « Preferred DropEffect » (enregistré par l'Explorateur) ; 0 si indisponible.
+    fn effect_format() -> u32 {
+        let name: Vec<u16> = "Preferred DropEffect"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        // SAFETY : `name` est terminée par un zéro et vit pendant l'appel.
+        unsafe { RegisterClipboardFormatW(name.as_ptr()) }
+    }
 
     /// Copie `bytes` dans un bloc de mémoire globale remis au presse-papiers sous `format`.
     ///
@@ -140,14 +167,51 @@ mod imp {
         }
     }
 
-    pub fn set_clipboard(hdrop: &[u8]) -> Result<(), String> {
-        let effect_name: Vec<u16> = "Preferred DropEffect"
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
+    pub fn read_effect() -> Option<u32> {
+        let format = effect_format();
+        // SAFETY : presse-papiers ouvert puis toujours refermé ; la poignée reste au système ;
+        // le bloc verrouillé fait au moins 4 octets avant d'être lu, puis est déverrouillé.
+        unsafe {
+            if format == 0 || IsClipboardFormatAvailable(format) == 0 {
+                return None;
+            }
+            if OpenClipboard(GetActiveWindow()) == 0 {
+                return None;
+            }
+            let handle = GetClipboardData(format);
+            let mut effect = None;
+            if !handle.is_null() && GlobalSize(handle) >= 4 {
+                let data = GlobalLock(handle);
+                if !data.is_null() {
+                    effect = Some(u32::from_le_bytes(*data.cast::<[u8; 4]>()));
+                    GlobalUnlock(handle);
+                }
+            }
+            CloseClipboard();
+            effect
+        }
+    }
+
+    pub fn clear() -> Result<(), String> {
+        // SAFETY : presse-papiers ouvert pour la fenêtre active, puis toujours refermé.
+        unsafe {
+            if OpenClipboard(GetActiveWindow()) == 0 {
+                return Err("Presse-papiers occupé par une autre application.".to_string());
+            }
+            let emptied = EmptyClipboard() != 0;
+            CloseClipboard();
+            if emptied {
+                Ok(())
+            } else {
+                Err("Impossible de vider le presse-papiers.".to_string())
+            }
+        }
+    }
+
+    pub fn set_clipboard(hdrop: &[u8], effect: u32) -> Result<(), String> {
         // SAFETY : le presse-papiers est ouvert pour la fenêtre active d'ExPLIA (une fenêtre est
         // nécessaire : sans propriétaire, Windows refuse `SetClipboardData`), puis toujours
-        // refermé ; `effect_name` est terminé par un zéro.
+        // refermé.
         unsafe {
             if OpenClipboard(GetActiveWindow()) == 0 {
                 return Err("Presse-papiers occupé par une autre application.".to_string());
@@ -156,11 +220,11 @@ mod imp {
                 Err("Impossible de vider le presse-papiers.".to_string())
             } else {
                 put(CF_HDROP, hdrop).and_then(|()| {
-                    let format = RegisterClipboardFormatW(effect_name.as_ptr());
+                    let format = effect_format();
                     if format == 0 {
                         Ok(())
                     } else {
-                        put(format, &DROPEFFECT_COPY.to_le_bytes())
+                        put(format, &effect.to_le_bytes())
                     }
                 })
             };
@@ -174,8 +238,16 @@ mod imp {
 mod imp {
     use std::path::PathBuf;
 
-    pub fn set_clipboard(_hdrop: &[u8]) -> Result<(), String> {
+    pub fn set_clipboard(_hdrop: &[u8], _effect: u32) -> Result<(), String> {
         Err("Copie de fichiers disponible uniquement sous Windows.".to_string())
+    }
+
+    pub fn read_effect() -> Option<u32> {
+        None
+    }
+
+    pub fn clear() -> Result<(), String> {
+        Ok(())
     }
 
     pub fn has_files() -> bool {
@@ -215,6 +287,6 @@ mod tests {
 
     #[test]
     fn nothing_to_copy_is_an_error() {
-        assert!(copy_files(&[]).is_err());
+        assert!(put_files(&[], DROPEFFECT_COPY).is_err());
     }
 }

@@ -19,11 +19,11 @@ pub struct Settings {
     pub show_preview: bool,
     /// Volet de détail au centre, navigation dans le volet latéral (triangle d'échange).
     pub detail_central: bool,
+    /// Affichage fractionné (deux volets) à l'ouverture.
+    pub split_view: bool,
     pub skip_folder_sizes: bool,
-    /// Option « Récursive » : recherche, dossiers vides et doublons parcourent les sous-dossiers.
+    /// Option « Récursive » : recherche, doublons et gros fichiers parcourent les sous-dossiers.
     pub recursive: bool,
-    /// Taille minimale (en Mo) des fichiers examinés par la recherche de doublons.
-    pub duplicate_min_mb: u32,
     /// Taille minimale (en Mo) des fichiers listés par « Fichiers > N Mo ».
     pub large_min_mb: u32,
     /// Barre d'occupation (et pourcentage) des lecteurs dans la barre latérale.
@@ -48,9 +48,9 @@ impl Default for Settings {
             sort_order: SortOrder::Ascending,
             show_preview: true,
             detail_central: false,
+            split_view: false,
             skip_folder_sizes: false,
             recursive: true,
-            duplicate_min_mb: 50,
             large_min_mb: 50,
             show_drive_usage: true,
             view_mode: ViewMode::List,
@@ -103,15 +103,9 @@ impl Settings {
                 }
                 "show_preview" => settings.show_preview = value != "false",
                 "detail_central" => settings.detail_central = value == "true",
+                "split_view" => settings.split_view = value == "true",
                 "skip_folder_sizes" => settings.skip_folder_sizes = value == "true",
                 "recursive" => settings.recursive = value != "false",
-                "duplicate_min_mb" => {
-                    if let Ok(mb) = value.parse::<u32>()
-                        && (1..=1_000_000).contains(&mb)
-                    {
-                        settings.duplicate_min_mb = mb;
-                    }
-                }
                 "large_min_mb" => {
                     if let Ok(mb) = value.parse::<u32>()
                         && (1..=1_000_000).contains(&mb)
@@ -161,10 +155,10 @@ impl Settings {
         text += &format!("sort_order={}\n", self.sort_order.id());
         text += &format!("show_preview={}\n", self.show_preview);
         text += &format!("detail_central={}\n", self.detail_central);
+        text += &format!("split_view={}\n", self.split_view);
         text += &format!("skip_folder_sizes={}\n", self.skip_folder_sizes);
         text += &format!("show_drive_usage={}\n", self.show_drive_usage);
         text += &format!("recursive={}\n", self.recursive);
-        text += &format!("duplicate_min_mb={}\n", self.duplicate_min_mb);
         text += &format!("large_min_mb={}\n", self.large_min_mb);
         text += &format!("view_mode={}\n", self.view_mode.id());
         text += &format!("show_hidden={}\n", self.show_hidden);
@@ -219,10 +213,10 @@ mod tests {
             sort_order: SortOrder::Descending,
             show_preview: false,
             detail_central: true,
+            split_view: true,
             skip_folder_sizes: true,
             show_drive_usage: false,
             recursive: false,
-            duplicate_min_mb: 120,
             large_min_mb: 300,
             view_mode: ViewMode::Videos,
             show_hidden: true,
