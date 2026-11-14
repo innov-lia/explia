@@ -29,6 +29,8 @@ pub(super) struct EntryMenuContext<'a> {
     pub allow_rename: bool,
     pub in_favorites: bool,
     pub in_applications: bool,
+    /// Affichage fractionné ouvert : transferts vers l'autre volet.
+    pub split: bool,
 }
 
 /// Menu d'un fichier ou d'un dossier de la liste.
@@ -40,6 +42,7 @@ pub(super) fn entry_items(context: &EntryMenuContext) -> Vec<MenuItem> {
         allow_rename,
         in_favorites,
         in_applications,
+        split,
     } = *context;
     let single = count == 1;
     let is_dir = item.kind == ItemKind::Folder;
@@ -65,6 +68,8 @@ pub(super) fn entry_items(context: &EntryMenuContext) -> Vec<MenuItem> {
             items.push(MenuItem::Command(command));
         }
     };
+    add(split && caps.copy_into, Command::CopyToOtherPane);
+    add(split && caps.move_items, Command::MoveToOtherPane);
     add(true, Command::Copy);
     add(caps.move_items, Command::Cut);
     add(single && is_dir && caps.copy_into, Command::Paste);
@@ -197,6 +202,7 @@ impl ExpliaApp {
             allow_rename,
             in_favorites: self.favorites.contains(&entry.path),
             in_applications: self.applications.contains(&entry.path),
+            split: self.split.is_some(),
         });
         show(ui, entry, &items, &targets)
     }
@@ -267,6 +273,7 @@ mod tests {
             allow_rename: true,
             in_favorites: false,
             in_applications: false,
+            split: false,
         })
     }
 

@@ -19,6 +19,8 @@ pub struct Settings {
     pub show_preview: bool,
     /// Volet de détail au centre, navigation dans le volet latéral (triangle d'échange).
     pub detail_central: bool,
+    /// Affichage fractionné (deux volets) à l'ouverture.
+    pub split_view: bool,
     pub skip_folder_sizes: bool,
     /// Option « Récursive » : recherche, doublons et gros fichiers parcourent les sous-dossiers.
     pub recursive: bool,
@@ -46,6 +48,7 @@ impl Default for Settings {
             sort_order: SortOrder::Ascending,
             show_preview: true,
             detail_central: false,
+            split_view: false,
             skip_folder_sizes: false,
             recursive: true,
             large_min_mb: 50,
@@ -100,6 +103,7 @@ impl Settings {
                 }
                 "show_preview" => settings.show_preview = value != "false",
                 "detail_central" => settings.detail_central = value == "true",
+                "split_view" => settings.split_view = value == "true",
                 "skip_folder_sizes" => settings.skip_folder_sizes = value == "true",
                 "recursive" => settings.recursive = value != "false",
                 "large_min_mb" => {
@@ -151,6 +155,7 @@ impl Settings {
         text += &format!("sort_order={}\n", self.sort_order.id());
         text += &format!("show_preview={}\n", self.show_preview);
         text += &format!("detail_central={}\n", self.detail_central);
+        text += &format!("split_view={}\n", self.split_view);
         text += &format!("skip_folder_sizes={}\n", self.skip_folder_sizes);
         text += &format!("show_drive_usage={}\n", self.show_drive_usage);
         text += &format!("recursive={}\n", self.recursive);
@@ -208,6 +213,7 @@ mod tests {
             sort_order: SortOrder::Descending,
             show_preview: false,
             detail_central: true,
+            split_view: true,
             skip_folder_sizes: true,
             show_drive_usage: false,
             recursive: false,

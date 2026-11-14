@@ -6,8 +6,8 @@ use super::widgets::*;
 impl ExpliaApp {
     /// Mode « grille » : hors de Home, des zones côte à côte — les lecteurs (sauf si l'onglet « Ce PC »
     /// de la barre latérale les montre déjà), une colonne de navigation (`..` et sous-dossiers),
-    /// puis la grille. Dans Home, la grille seule (avec les
-    /// dossiers en tuiles pour pouvoir y entrer).
+    /// puis la grille. Dans Home, la grille seule (on change de dossier par la barre latérale).
+    /// La grille ne contient que des images, ou que des vidéos : jamais de dossier.
     pub(in crate::app) fn gallery_layout(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         if !self.grid_side_columns() {
             return self.gallery_view(ui);

@@ -83,6 +83,9 @@ impl ExpliaApp {
 
     /// Navigation dans les dossiers : barre d'adresse et recherche, résultats, contenu.
     pub(in crate::app) fn navigation_area(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        if self.split.is_some() {
+            return self.split_area(ui);
+        }
         let mut action = self.location_bar(ui);
         action = self.results_banner(ui).or(action);
         ui.add_space(4.0);

@@ -90,8 +90,9 @@ La barre latérale, à gauche, montre la liste de l'intercalaire choisi ; les in
 - **Liste** (par défaut) : nom, taille (celle des dossiers est calculée en arrière-plan), date de modification. Le menu **Afficher** ajoute la date de création, les **dimensions** des images, la **résolution** et la **durée** des vidéos et des sons (lues dans les en-têtes : MP4/MOV/M4A, MKV/WebM, AVI, WAV, MP3, FLAC, OGG/Opus).
 - **Tri d'un clic sur un en-tête** (Nom, Créé le, Modifié le, Taille) ; un second clic inverse l'ordre, une flèche ▲ / ▼ marque le tri actif.
 - **▥ Colonnes « style Mac »** : une colonne de largeur fixe par niveau du chemin (un nom trop long se termine par « … »), la dernière avec taille, dates et en-têtes triables. Dans Home, les colonnes commencent sous votre dossier (l'intercalaire Home en tient lieu). Ctrl+clic / Maj+clic fonctionnent dans toutes les colonnes, renommer (F2) et clic droit aussi.
-- **🖼 Images** et **🎬 Vidéos** : une grille avec seulement les images (miniatures décodées au fil de l'eau) ou seulement les vidéos du dossier. Hors de Home, une colonne des lecteurs (si l'intercalaire *Ce PC* ne les montre pas déjà) et une colonne de navigation (`..` et sous-dossiers) l'accompagnent ; dans Home, la grille prend toute la place et les sous-dossiers y sont des tuiles.
-- Un second clic sur ▥, 🖼 ou 🎬 revient à la liste. **Afficher** gère aussi les **dossiers et fichiers cachés** (attribut « caché » de Windows, et noms commençant par un point comme `.git`), masqués par défaut.
+- **🖼 Images** et **🎬 Vidéos** : une grille avec seulement les images (miniatures décodées au fil de l'eau) ou seulement les vidéos du dossier. Hors de Home, une colonne des lecteurs (si l'intercalaire *Ce PC* ne les montre pas déjà) et une colonne de navigation (`..` et sous-dossiers) l'accompagnent ; dans Home, la grille prend toute la place. La grille ne montre jamais de dossier : seulement les images, ou seulement les vidéos.
+- **↔ Fractionné** (à gauche de ▥) : **deux volets côte à côte**, chacun avec sa barre d'adresse, sa recherche et sa liste, pour transférer de l'un à l'autre (comme WinSCP). Le volet actif est encadré ; un clic dans l'autre volet ou **Tab** lui donne la main, et la barre latérale, le clavier et le volet de détail agissent sur le volet actif. **Glisser** des éléments d'un volet à l'autre les **copie** (avec **Maj** : les **déplace**) ; en sortant de la fenêtre, le glisser part vers le Bureau ou l'Explorateur. **F5** copie et **F6** déplace la sélection vers l'autre volet (aussi au clic droit). Jamais d'écrasement, comme pour Coller. Mémorisé d'une session à l'autre.
+- Un second clic sur ▥, 🖼, 🎬 ou ↔ revient à la liste. **Afficher** gère aussi les **dossiers et fichiers cachés** (attribut « caché » de Windows, et noms commençant par un point comme `.git`), masqués par défaut.
 
 ### Volet de détail, aperçu et lecture
 - **Aperçu** des images (PNG, JPEG, BMP, GIF, WebP), du texte (`.txt`, `.md`, `.json`, `.rs`, `.log`…, 64 Ko au plus) et du **contenu des archives ZIP** (rien n'est extrait). Pour les autres types : type, taille et bouton « Ouvrir ».
@@ -123,7 +124,7 @@ Menu **⏷ Sélection**, à droite de la barre de recherche :
 ### Personnalisation et réglages
 - **Afficher > Disposition** : intercalaires et volet de détail à gauche ou à droite.
 - **Option** : « Pas de calcul de taille de dossier » (gros disques), « Occupation des disques » (barres de l'intercalaire *Ce PC*).
-- Tout est mémorisé automatiquement dans `%APPDATA%\ExPLIA\settings.txt` (format `clé=valeur`, modifiable à la main) : taille de la fenêtre, tri, affichage, colonnes, éléments cachés, disposition, échange des volets, options, récursivité, seuil des gros fichiers, favoris et applications.
+- Tout est mémorisé automatiquement dans `%APPDATA%\ExPLIA\settings.txt` (format `clé=valeur`, modifiable à la main) : taille de la fenêtre, tri, affichage, colonnes, éléments cachés, disposition, échange des volets, affichage fractionné, options, récursivité, seuil des gros fichiers, favoris et applications.
 
 ## Raccourcis clavier
 
@@ -142,6 +143,8 @@ Menu **⏷ Sélection**, à droite de la barre de recherche :
 | **Alt+Entrée** | Propriétés de l'élément sélectionné (ou du dossier affiché) |
 | **Ctrl+F** | Va dans la recherche |
 | **Ctrl+T** / **Ctrl+W** | Nouvel onglet / ferme l'onglet |
+| **F5** / **F6** (fractionné) | Copie / déplace la sélection vers l'autre volet |
+| **Tab** (fractionné) | Donne la main à l'autre volet |
 | **Espace** | Lecture / pause du lecteur intégré |
 | **Échap** | Annule une saisie, une confirmation, la multi-sélection, le plein écran |
 | **Ctrl+clic**, **Maj+clic**, **clic maintenu** | Sélection multiple |
@@ -233,6 +236,7 @@ cargo clippy -- -D warnings
 | `src/main.rs` | Point d'entrée, fenêtre `eframe`. |
 | `src/app/mod.rs` | Logique de l'application : navigation (dossiers lus en arrière-plan), onglets, parcours, aperçus, lecteur, réglages. |
 | `src/app/state.rs` | État regroupé par domaine : navigation, barre latérale, recherche et parcours, lecture, aperçus. |
+| `src/app/split.rs` | Affichage fractionné : second volet, échange entre volets, routage des résultats de fond, transferts et glisser d'un volet à l'autre. |
 | `src/app/event_manager.rs` | Réception centralisée des événements egui (clics, double-clics, clic maintenu, glisser, clavier, dépôt) et déclaration de tous les raccourcis. |
 | `src/app/action_manager.rs` | Catalogue des commandes (définies une fois : libellé, raccourci, action) et exécution des actions. |
 | `src/app/context_menu_manager.rs` | Menus contextuels construits selon la sélection et les capacités de la source. |

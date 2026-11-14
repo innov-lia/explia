@@ -18,8 +18,6 @@ pub(in crate::app) struct Navigation {
     pub(in crate::app) active_tab: usize,
     /// Lecture de dossier en cours (ouverture ou relecture).
     pub(in crate::app) pending_listing: Option<PendingListing>,
-    /// Identifie la dernière lecture demandée.
-    pub(in crate::app) listing_generation: u64,
     /// Dernière ligne atteinte (clic ou flèches) : point de départ des flèches.
     pub(in crate::app) cursor: Option<PathBuf>,
     /// Ligne à rendre visible au prochain dessin de la liste (navigation au clavier).
@@ -44,7 +42,6 @@ impl Navigation {
             tabs: Vec::new(),
             active_tab: 0,
             pending_listing: None,
-            listing_generation: 0,
             cursor: None,
             scroll_to_index: None,
             last_scroll: (0.0, 0.0),
@@ -109,6 +106,10 @@ pub(in crate::app) struct ScanState {
 
 impl ScanState {
     pub(in crate::app) fn new(settings: &Settings) -> Self {
+        Self::with_options(settings.recursive, settings.large_min_mb)
+    }
+
+    pub(in crate::app) fn with_options(recursive: bool, large_min_mb: u32) -> Self {
         Self {
             results: None,
             result_entries: Vec::new(),
@@ -116,8 +117,8 @@ impl ScanState {
             generation: Arc::new(AtomicU64::new(0)),
             search: String::new(),
             focus_search: false,
-            recursive: settings.recursive,
-            large_min_mb: settings.large_min_mb,
+            recursive,
+            large_min_mb,
         }
     }
 }

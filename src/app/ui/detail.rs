@@ -269,6 +269,7 @@ impl ExpliaApp {
         let padding = ui.spacing().button_padding.x * 2.0;
         let gap = ui.spacing().item_spacing.x;
         let labels = [
+            OPTION_SPLIT_LABEL,
             OPTION_COLUMNS_LABEL,
             OPTION_IMAGES_LABEL,
             OPTION_VIDEOS_LABEL,
@@ -294,6 +295,17 @@ impl ExpliaApp {
         let mut action = None;
         ui.add_space(4.0);
         ui.horizontal(|ui| {
+            // Affichage fractionné : deux volets côte à côte, pour transférer de l'un à l'autre.
+            if ui
+                .add(egui::Button::new(OPTION_SPLIT_LABEL).selected(self.split.is_some()))
+                .on_hover_text(
+                    "Deux volets côte à côte : glissez d'un volet à l'autre pour copier (Maj : \
+                     déplacer), F5 copie et F6 déplace vers l'autre volet, Tab change de volet",
+                )
+                .clicked()
+            {
+                action = Some(Action::ToggleSplit);
+            }
             for (mode, label, hint) in [
                 (
                     ViewMode::Columns,
@@ -311,7 +323,7 @@ impl ExpliaApp {
                     "Visionnage de vidéos : les vidéos du dossier en grille",
                 ),
             ] {
-                let active = self.view_mode == mode;
+                let active = self.split.is_none() && self.view_mode == mode;
                 if ui
                     .add(egui::Button::new(label).selected(active))
                     .on_hover_text(hint)

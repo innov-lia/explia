@@ -41,6 +41,10 @@ pub(super) enum Command {
     RemoveApplication,
     PowerShell,
     PowerShellAdmin,
+    /// Affichage fractionné : copie vers le dossier de l'autre volet.
+    CopyToOtherPane,
+    /// Affichage fractionné : déplacement vers le dossier de l'autre volet.
+    MoveToOtherPane,
 }
 
 impl Command {
@@ -78,6 +82,8 @@ impl Command {
             Command::RemoveApplication => "Retirer des applications",
             Command::PowerShell => ">_ PowerShell ici",
             Command::PowerShellAdmin => ">_ PowerShell ici (administrateur)",
+            Command::CopyToOtherPane => "Copier vers l'autre volet",
+            Command::MoveToOtherPane => "Déplacer vers l'autre volet",
         };
         match self.shortcut() {
             Some(shortcut) => format!("{text}  ({shortcut})"),
@@ -93,6 +99,8 @@ impl Command {
             Command::Rename => Shortcut::Rename,
             Command::ShowProperties => Shortcut::Properties,
             Command::Delete => Shortcut::Delete,
+            Command::CopyToOtherPane => Shortcut::CopyToOther,
+            Command::MoveToOtherPane => Shortcut::MoveToOther,
             _ => return None,
         };
         Some(shortcut.label())
@@ -148,6 +156,14 @@ impl Command {
             Command::PowerShellAdmin => Action::OpenPowerShell {
                 dir: path,
                 admin: true,
+            },
+            Command::CopyToOtherPane => Action::TransferEntries {
+                sources: paths(),
+                mode: ClipMode::Copy,
+            },
+            Command::MoveToOtherPane => Action::TransferEntries {
+                sources: paths(),
+                mode: ClipMode::Cut,
             },
         }
     }
@@ -222,6 +238,21 @@ pub(super) enum Action {
     },
     /// Ouvre la fenêtre « Propriétés » de Windows.
     ShowProperties(PathBuf),
+    /// Ouvre ou ferme l'affichage fractionné (deux volets).
+    ToggleSplit,
+    /// Donne la main à l'autre volet.
+    SwitchPane,
+    /// Copie ou déplace la sélection vers le dossier de l'autre volet.
+    TransferToOther {
+        mode: ClipMode,
+    },
+    /// Copie ou déplace ces éléments vers le dossier de l'autre volet.
+    TransferEntries {
+        sources: Vec<PathBuf>,
+        mode: ClipMode,
+    },
+    /// Commence à glisser ces éléments d'un volet à l'autre.
+    PaneDragStart(Vec<PathBuf>),
     /// Colle dans `dest` les fichiers et dossiers du presse-papiers : copie, ou déplacement
     /// s'ils ont été coupés (jamais d'écrasement).
     Paste {
@@ -507,7 +538,27 @@ impl ExpliaApp {
             Action::EnterFolder(path) => {
                 self.open_location(Location::Dir(path), AfterListing::SelectFirst, None);
             }
+            Action::ToggleSplit => self.toggle_split(),
+            Action::SwitchPane => self.activate_other(),
+            Action::TransferToOther { mode } => {
+                let sources: Vec<PathBuf> =
+                    self.delete_targets().into_iter().map(|e| e.path).collect();
+                if sources.is_empty() {
+                    self.notice = Some("Sélectionnez d'abord des éléments.".to_string());
+                } else {
+                    self.transfer_to_other(sources, mode);
+                }
+            }
+            Action::TransferEntries { sources, mode } => self.transfer_to_other(sources, mode),
+            Action::PaneDragStart(paths) => {
+                self.drag_out_done = true;
+                if let Some(split) = self.split.as_mut() {
+                    split.drag = Some(paths);
+                }
+            }
             Action::SetViewMode(mode) => {
+                // Colonnes, images et vidéos remplacent l'affichage fractionné.
+                self.split = None;
                 self.view_mode = mode;
                 self.nav.scroll_to_index = self.cursor_index();
             }

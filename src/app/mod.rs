@@ -30,11 +30,13 @@ use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
 mod action_manager;
 mod context_menu_manager;
 mod event_manager;
+mod split;
 mod state;
 mod ui;
 
 use action_manager::{Action, Command};
 use event_manager::ItemView;
+use split::SplitView;
 use state::{Navigation, Playback, PreviewData, ScanState, SidebarState};
 
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
@@ -78,8 +80,9 @@ const DRIVE_BAR_HEIGHT: f32 = 16.0;
 /// Largeur de la barre de recherche, en haut de la zone centrale.
 const SEARCH_WIDTH: f32 = 300.0;
 /// Libellé du filtre « Sélection », à droite de la barre de recherche (mesuré pour sa place).
-const SELECTION_MENU_LABEL: &str = "⏷ Sélection";
+const SELECTION_MENU_LABEL: &str = "🔽 Sélection";
 /// Libellés des boutons de la barre du volet de détail (mesurés pour sa largeur minimale).
+const OPTION_SPLIT_LABEL: &str = "↔ Fractionné";
 const OPTION_COLUMNS_LABEL: &str = "▥ Colonnes";
 const OPTION_IMAGES_LABEL: &str = "🖼 Images";
 const OPTION_VIDEOS_LABEL: &str = "🎬 Vidéos";
@@ -386,6 +389,12 @@ pub struct ExpliaApp {
     storage: StorageManager,
     /// Copier / Couper : références placées dans le presse-papiers de Windows.
     clipboard: ClipboardManager,
+    /// Affichage fractionné (deux volets), s'il est ouvert.
+    split: Option<SplitView>,
+    /// Dernier numéro de lecture de dossier attribué (tous volets confondus).
+    listing_serial: u64,
+    /// Nombre de volets secondaires créés (distingue leurs compteurs).
+    pane_serial: u64,
     /// Attente de confirmation de la suppression de la multi-sélection.
     confirm_delete: bool,
     /// Un clic maintenu vient d'être traité : le relâchement ne doit pas compter comme un clic.
@@ -445,6 +454,9 @@ impl ExpliaApp {
             selection: Selection::default(),
             storage: StorageManager::default(),
             clipboard: ClipboardManager::default(),
+            split: None,
+            listing_serial: 0,
+            pane_serial: 0,
             confirm_delete: false,
             long_press_done: false,
             drag_out_done: false,
@@ -471,7 +483,10 @@ impl ExpliaApp {
             SidebarTab::Pc
         };
         if let Some(start) = start {
-            app.navigate(Location::Dir(start));
+            app.navigate(Location::Dir(start.clone()));
+            if app.saved_settings.split_view {
+                app.open_split(Some(start));
+            }
         }
         app
     }
@@ -702,23 +717,17 @@ impl ExpliaApp {
         });
     }
 
-    /// Fin d'une copie ou d'un déplacement : bilan dans la barre d'état, dossier relu.
+    /// Fin d'une copie ou d'un déplacement : bilan dans la barre d'état, dossiers relus (dans
+    /// les deux volets de l'affichage fractionné).
     fn on_copy_done(&mut self, dest: &Path, report: TransferReport, mode: ClipMode) {
         self.copying = false;
         if mode == ClipMode::Cut && !report.arrived.is_empty() && report.errors.is_empty() {
             self.clipboard.moved();
         }
-        if self.nav.location == Location::Dir(dest.to_path_buf()) {
-            // Le premier élément arrivé est sélectionné, une fois le dossier relu.
-            let then = report
-                .arrived
-                .first()
-                .cloned()
-                .map_or(AfterListing::None, AfterListing::Select);
-            self.refresh_listing(then);
-        } else if mode == ClipMode::Cut {
-            // Après un déplacement, des éléments ont quitté le dossier affiché.
-            self.refresh_listing(AfterListing::None);
+        let first = report.arrived.first().cloned();
+        self.refresh_after_transfer(dest, first.clone(), mode);
+        if self.split.is_some() {
+            self.with_other(|app| app.refresh_after_transfer(dest, first, mode));
         }
         let done = format!(
             "{} élément(s) {}",
@@ -739,6 +748,17 @@ impl ExpliaApp {
             } else {
                 format!("{done} ; {first}")
             });
+        }
+    }
+
+    /// Relit le dossier affiché s'il a reçu les éléments (le premier arrivé est alors
+    /// sélectionné) ou si des éléments en sont peut-être partis (déplacement).
+    fn refresh_after_transfer(&mut self, dest: &Path, first: Option<ItemId>, mode: ClipMode) {
+        if self.nav.location == Location::Dir(dest.to_path_buf()) {
+            let then = first.map_or(AfterListing::None, AfterListing::Select);
+            self.refresh_listing(then);
+        } else if mode == ClipMode::Cut {
+            self.refresh_listing(AfterListing::None);
         }
     }
 
@@ -1057,8 +1077,9 @@ impl ExpliaApp {
     /// Lit `path` en arrière-plan ; le résultat arrive par `Event::Listing`. Une demande
     /// plus récente remplace la précédente (son résultat sera ignoré).
     fn request_listing(&mut self, path: PathBuf, kind: ListingKind, then: AfterListing) {
-        self.nav.listing_generation += 1;
-        let generation = self.nav.listing_generation;
+        // Numéro unique pour toute l'application : chaque volet retrouve ses résultats.
+        self.listing_serial += 1;
+        let generation = self.listing_serial;
         self.nav.pending_listing = Some(PendingListing {
             generation,
             path: path.clone(),
@@ -1073,11 +1094,6 @@ impl ExpliaApp {
             let _ = tx.send(Event::Listing { generation, result });
             ctx.request_repaint();
         });
-    }
-
-    /// Un dossier est en cours de lecture.
-    fn listing_pending(&self) -> bool {
-        self.nav.pending_listing.is_some()
     }
 
     /// Fin d'une lecture de dossier demandée par `request_listing`.
@@ -1618,121 +1634,136 @@ impl ExpliaApp {
         self.selection.select_one(entry);
     }
 
-    /// Traite les résultats des threads de travail.
+    /// Traite les résultats des threads de travail ; ceux de l'autre volet (affichage
+    /// fractionné) lui sont livrés.
     fn poll_events(&mut self, ctx: &egui::Context) {
-        let mut sizes_changed = false;
-        let mut results_changed = false;
+        let mut changed = false;
         while let Ok(event) = self.event_rx.try_recv() {
-            match event {
-                Event::Listing { generation, result } => self.on_listing(generation, result),
-                Event::ColumnListing {
-                    generation,
-                    path,
-                    entries,
-                } => {
-                    if generation == self.nav.column_generation {
-                        self.nav.column_requests.remove(&path);
-                        let processed = self.filtered_and_sorted(&entries, false);
-                        self.nav.column_cache.insert(path, processed);
+            if self.event_for_other(&event) {
+                self.with_other(|app| {
+                    if app.handle_event(ctx, event) {
+                        app.recompute_visible();
                     }
+                });
+            } else {
+                changed |= self.handle_event(ctx, event);
+            }
+        }
+        if changed {
+            self.recompute_visible();
+        }
+    }
+
+    /// Applique un résultat de fond ; `true` si la liste affichée doit être recalculée.
+    fn handle_event(&mut self, ctx: &egui::Context, event: Event) -> bool {
+        let mut changed = false;
+        match event {
+            Event::Listing { generation, result } => self.on_listing(generation, result),
+            Event::ColumnListing {
+                generation,
+                path,
+                entries,
+            } => {
+                if generation == self.nav.column_generation {
+                    self.nav.column_requests.remove(&path);
+                    let processed = self.filtered_and_sorted(&entries, false);
+                    self.nav.column_cache.insert(path, processed);
                 }
-                Event::Preview(path, result) => self.on_preview(ctx, path, result),
-                Event::DriveInfo(path, info) => {
-                    self.sidebar.drive_infos.insert(path, info);
+            }
+            Event::Preview(path, result) => self.on_preview(ctx, path, result),
+            Event::DriveInfo(path, info) => {
+                self.sidebar.drive_infos.insert(path, info);
+            }
+            Event::FolderSize {
+                generation,
+                path,
+                size,
+            } => {
+                // Ignore les résultats d'un listing déjà quitté.
+                if generation != self.folder_generation.load(Ordering::SeqCst) {
+                    return false;
                 }
-                Event::FolderSize {
-                    generation,
-                    path,
-                    size,
-                } => {
-                    // Ignore les résultats d'un listing déjà quitté.
-                    if generation != self.folder_generation.load(Ordering::SeqCst) {
-                        continue;
-                    }
-                    if let Some(entry) = self.entries.iter_mut().find(|e| e.path == path) {
-                        entry.size = Some(size);
-                        sizes_changed = true;
-                    }
+                if let Some(entry) = self.entries.iter_mut().find(|e| e.path == path) {
+                    entry.size = Some(size);
+                    changed = true;
                 }
-                Event::Media {
-                    generation,
-                    path,
-                    info,
-                } => {
-                    if generation == self.preview.media_generation.load(Ordering::SeqCst) {
-                        self.preview.media.insert(path, info);
-                    }
+            }
+            Event::Media {
+                generation,
+                path,
+                info,
+            } => {
+                if generation == self.preview.media_generation.load(Ordering::SeqCst) {
+                    self.preview.media.insert(path, info);
                 }
-                Event::PlayerReady(path, result) => self.on_player_ready(path, result),
-                Event::ScanBatch {
-                    generation,
-                    entries,
-                } => {
-                    if generation == self.scan.generation.load(Ordering::SeqCst)
-                        && self.scan.results.is_some()
-                    {
-                        self.scan.result_entries.extend(entries);
-                        results_changed = true;
-                    }
+            }
+            Event::PlayerReady(path, result) => self.on_player_ready(path, result),
+            Event::ScanBatch {
+                generation,
+                entries,
+            } => {
+                if generation == self.scan.generation.load(Ordering::SeqCst)
+                    && self.scan.results.is_some()
+                {
+                    self.scan.result_entries.extend(entries);
+                    changed = true;
                 }
-                Event::ScanGroups { generation, groups } => {
-                    if generation == self.scan.generation.load(Ordering::SeqCst)
-                        && self.scan.results.is_some()
-                    {
-                        self.scan.duplicate_groups.clear();
-                        self.scan.result_entries.clear();
-                        for (index, group) in groups.into_iter().enumerate() {
-                            for entry in group {
-                                self.scan
-                                    .duplicate_groups
-                                    .insert(entry.path.clone(), index + 1);
-                                self.scan.result_entries.push(entry);
-                            }
+            }
+            Event::ScanGroups { generation, groups } => {
+                if generation == self.scan.generation.load(Ordering::SeqCst)
+                    && self.scan.results.is_some()
+                {
+                    self.scan.duplicate_groups.clear();
+                    self.scan.result_entries.clear();
+                    for (index, group) in groups.into_iter().enumerate() {
+                        for entry in group {
+                            self.scan
+                                .duplicate_groups
+                                .insert(entry.path.clone(), index + 1);
+                            self.scan.result_entries.push(entry);
                         }
-                        results_changed = true;
                     }
+                    changed = true;
                 }
-                Event::CopyDone { dest, report, mode } => self.on_copy_done(&dest, report, mode),
-                Event::ScanProgress { generation, text } => {
-                    if generation == self.scan.generation.load(Ordering::SeqCst)
-                        && let Some(results) = &mut self.scan.results
-                    {
-                        results.progress = Some(text);
-                    }
+            }
+            Event::CopyDone { dest, report, mode } => self.on_copy_done(&dest, report, mode),
+            Event::ScanProgress { generation, text } => {
+                if generation == self.scan.generation.load(Ordering::SeqCst)
+                    && let Some(results) = &mut self.scan.results
+                {
+                    results.progress = Some(text);
                 }
-                Event::ScanDone {
-                    generation,
-                    truncated,
-                } => {
-                    if generation == self.scan.generation.load(Ordering::SeqCst)
-                        && let Some(results) = &mut self.scan.results
-                    {
-                        results.running = false;
-                        results.truncated = truncated;
-                        results.progress = None;
-                        results_changed = true;
-                    }
+            }
+            Event::ScanDone {
+                generation,
+                truncated,
+            } => {
+                if generation == self.scan.generation.load(Ordering::SeqCst)
+                    && let Some(results) = &mut self.scan.results
+                {
+                    results.running = false;
+                    results.truncated = truncated;
+                    results.progress = None;
+                    changed = true;
                 }
-                Event::Thumb(path, thumb) => {
-                    self.preview.thumbs_in_flight = self.preview.thumbs_in_flight.saturating_sub(1);
-                    // Une miniature en échec reste dans `thumbs_requested` : on ne la redemande pas.
-                    if let Some(img) = thumb
-                        && self.preview.thumbs_requested.contains(&path)
-                    {
-                        let color = egui::ColorImage::from_rgba_unmultiplied(img.size, &img.rgba);
-                        let texture = ctx.load_texture(
-                            format!("thumb:{}", path.to_string_lossy()),
-                            color,
-                            egui::TextureOptions::LINEAR,
-                        );
-                        self.preview.thumbs.insert(path, texture);
-                    }
+            }
+            Event::Thumb(path, thumb) => {
+                self.preview.thumbs_in_flight = self.preview.thumbs_in_flight.saturating_sub(1);
+                // Une miniature en échec reste dans `thumbs_requested` : on ne la redemande pas.
+                if let Some(img) = thumb
+                    && self.preview.thumbs_requested.contains(&path)
+                {
+                    let color = egui::ColorImage::from_rgba_unmultiplied(img.size, &img.rgba);
+                    let texture = ctx.load_texture(
+                        format!("thumb:{}", path.to_string_lossy()),
+                        color,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.preview.thumbs.insert(path, texture);
                 }
             }
         }
-        if sizes_changed || results_changed {
-            self.recompute_visible();
-        }
+        changed
     }
 
     fn on_preview(
@@ -1779,6 +1810,7 @@ impl ExpliaApp {
             sort_order: self.sort_order,
             show_preview: self.show_preview,
             detail_central: self.detail_central,
+            split_view: self.split.is_some(),
             skip_folder_sizes: self.skip_folder_sizes,
             show_drive_usage: self.show_drive_usage,
             recursive: self.scan.recursive,
@@ -1850,16 +1882,13 @@ impl ExpliaApp {
         !self.in_home()
     }
 
-    /// Le fichier figure dans la grille : les images en mode « Images », les vidéos en mode
-    /// « Vidéos ». Hors grille, tout est affiché (les dossiers sont dans la colonne de navigation).
+    /// Le fichier figure dans la grille : seulement les images en mode « Images », seulement
+    /// les vidéos en mode « Vidéos », jamais de dossier (ils sont dans la colonne de navigation
+    /// ou, dans Home, dans la barre latérale). Hors grille, tout est affiché.
     fn in_grid(&self, entry: &Entry) -> bool {
-        // Sans colonne de navigation (dossier de Home), les dossiers sont des tuiles de la grille.
-        let folder = entry.is_dir && !self.grid_side_columns();
         match self.view_mode {
-            ViewMode::Gallery => {
-                folder || (!entry.is_dir && preview::is_supported_image(&entry.path))
-            }
-            ViewMode::Videos => folder || (!entry.is_dir && preview::is_video(&entry.path)),
+            ViewMode::Gallery => !entry.is_dir && preview::is_supported_image(&entry.path),
+            ViewMode::Videos => !entry.is_dir && preview::is_video(&entry.path),
             ViewMode::List | ViewMode::Columns => true,
         }
     }
@@ -2275,6 +2304,79 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.starts_with("Impossible d'ouvrir"))
         );
+    }
+
+    /// Dossier affiché par l'autre volet.
+    fn other_location(app: &mut ExpliaApp) -> Location {
+        app.with_other(|other| other.nav.location.clone())
+    }
+
+    #[test]
+    fn the_split_view_shows_two_independent_panes() {
+        let tree = TempTree::new("split");
+        tree.dir("a");
+        tree.dir("b");
+        let (mut app, ctx) = app_in(&tree);
+        app.apply(&ctx, Action::ToggleSplit);
+        settle(&mut app, &ctx);
+        // L'autre volet s'ouvre sur le même dossier.
+        assert_eq!(other_location(&mut app), Location::Dir(tree.0.clone()));
+        // Chaque volet navigue de son côté ; les lectures de fond retrouvent leur volet.
+        app.navigate(Location::Dir(tree.0.join("a")));
+        app.with_other(|other| other.navigate(Location::Dir(tree.0.join("b"))));
+        settle(&mut app, &ctx);
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("a")));
+        assert_eq!(other_location(&mut app), Location::Dir(tree.0.join("b")));
+        // Tab (ou un clic) donne la main à l'autre volet.
+        app.apply(&ctx, Action::SwitchPane);
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("b")));
+        assert_eq!(other_location(&mut app), Location::Dir(tree.0.join("a")));
+        // Colonnes, images et vidéos ferment l'affichage fractionné.
+        app.apply(&ctx, Action::SetViewMode(ViewMode::Columns));
+        assert!(app.split.is_none());
+        assert_eq!(app.nav.location, Location::Dir(tree.0.join("b")));
+    }
+
+    #[test]
+    fn f5_copies_and_f6_moves_to_the_other_pane() {
+        let tree = TempTree::new("split-transfer");
+        tree.file("gauche/photo.jpg", b"img");
+        tree.file("gauche/doc.txt", b"doc");
+        tree.dir("droite");
+        let left = tree.0.join("gauche");
+        let right = tree.0.join("droite");
+        let (mut app, ctx) = app_in(&tree);
+        app.navigate(Location::Dir(left.clone()));
+        settle(&mut app, &ctx);
+        app.apply(&ctx, Action::ToggleSplit);
+        app.with_other(|other| other.navigate(Location::Dir(right.clone())));
+        settle(&mut app, &ctx);
+        // Copie de la sélection (F5) : l'autre volet est relu et montre l'élément arrivé.
+        let photo = app.visible.iter().find(|e| e.name == "photo.jpg").cloned();
+        app.apply(&ctx, Action::Select(photo.unwrap()));
+        app.apply(
+            &ctx,
+            Action::TransferToOther {
+                mode: ClipMode::Copy,
+            },
+        );
+        settle(&mut app, &ctx);
+        assert!(left.join("photo.jpg").is_file() && right.join("photo.jpg").is_file());
+        let other_names = app.with_other(|other| names(other));
+        assert_eq!(other_names, ["photo.jpg"]);
+        // Déplacement (F6, ou glisser avec Maj) : l'élément quitte ce volet.
+        app.apply(
+            &ctx,
+            Action::TransferEntries {
+                sources: vec![left.join("doc.txt")],
+                mode: ClipMode::Cut,
+            },
+        );
+        settle(&mut app, &ctx);
+        assert!(!left.join("doc.txt").exists() && right.join("doc.txt").is_file());
+        assert_eq!(names(&app), ["photo.jpg"]);
+        let other_names = app.with_other(|other| names(other));
+        assert_eq!(other_names, ["doc.txt", "photo.jpg"]);
     }
 
     #[test]

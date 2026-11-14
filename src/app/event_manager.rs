@@ -31,6 +31,12 @@ pub(super) enum Shortcut {
     Cancel,
     /// Lecture / pause du lecteur intégré.
     PlayPause,
+    /// Affichage fractionné : copie la sélection vers l'autre volet.
+    CopyToOther,
+    /// Affichage fractionné : déplace la sélection vers l'autre volet.
+    MoveToOther,
+    /// Affichage fractionné : donne la main à l'autre volet.
+    SwitchPane,
 }
 
 impl Shortcut {
@@ -50,6 +56,9 @@ impl Shortcut {
             Shortcut::Confirm => "Entrée",
             Shortcut::Cancel => "Échap",
             Shortcut::PlayPause => "Espace",
+            Shortcut::CopyToOther => "F5",
+            Shortcut::MoveToOther => "F6",
+            Shortcut::SwitchPane => "Tab",
         }
     }
 
@@ -72,7 +81,16 @@ impl Shortcut {
             Shortcut::Confirm => (egui::Key::Enter, none),
             Shortcut::Cancel => (egui::Key::Escape, none),
             Shortcut::PlayPause => (egui::Key::Space, none),
+            Shortcut::CopyToOther => (egui::Key::F5, none),
+            Shortcut::MoveToOther => (egui::Key::F6, none),
+            Shortcut::SwitchPane => (egui::Key::Tab, none),
         }
+    }
+
+    /// Comme `pressed`, mais retire la touche des événements (egui ne la voit plus).
+    fn consume(self, input: &mut egui::InputState) -> bool {
+        let (key, modifiers) = self.binding();
+        input.consume_key(modifiers, key)
     }
 
     /// Le raccourci vient d'être pressé. Ctrl+C arrive d'egui comme un événement « Copier ».
@@ -264,9 +282,17 @@ impl ExpliaApp {
             toggle_mode: self.selection.toggle_mode && !self.selection.multi.is_empty(),
             long_press_done: self.long_press_done,
         };
-        translate(pointer, entry, view, state, || {
+        let action = translate(pointer, entry, view, state, || {
             self.selection.paths_from(entry)
-        })
+        });
+        // Affichage fractionné : on glisse d'abord vers l'autre volet ; hors de la fenêtre, le
+        // glisser repart vers les autres applications (voir `pane_drag_events`).
+        match action {
+            Some(Action::DragOut(paths)) if self.split.is_some() => {
+                Some(Action::PaneDragStart(paths))
+            }
+            other => other,
+        }
     }
 
     /// Bouton maintenu sur l'élément depuis `LONG_PRESS_SECONDS`, sans bouger plus que la
@@ -357,6 +383,9 @@ impl ExpliaApp {
         if let Some(drop) = self.dropped_files(ctx) {
             action = Some(drop);
         }
+        if let Some(drag) = self.pane_drag_events(ctx) {
+            action = Some(drag);
+        }
         // Raccourcis sur la sélection (jamais pendant une saisie) : F2 renomme ; Suppr demande
         // la suppression, puis Entrée la confirme (Échap l'annule).
         if !ctx.egui_wants_keyboard_input() && self.renaming.is_none() && !self.nav.address_editing
@@ -396,6 +425,19 @@ impl ExpliaApp {
                 action = Some(Action::CopyFiles(paths()));
             } else if pressed(Shortcut::Cut) && !targets.is_empty() {
                 action = Some(Action::CutFiles(paths()));
+            } else if self.split.is_some() && pressed(Shortcut::CopyToOther) {
+                action = Some(Action::TransferToOther {
+                    mode: ClipMode::Copy,
+                });
+            } else if self.split.is_some() && pressed(Shortcut::MoveToOther) {
+                action = Some(Action::TransferToOther {
+                    mode: ClipMode::Cut,
+                });
+            } else if self.split.is_some()
+                // Tab est retiré des événements : egui ne s'en sert pas pour changer de champ.
+                && ctx.input_mut(|i| Shortcut::SwitchPane.consume(i))
+            {
+                action = Some(Action::SwitchPane);
             } else if pressed(Shortcut::Delete) && !targets.is_empty() {
                 action = Some(Action::AskDelete);
             } else if !self.confirm_delete {
@@ -687,6 +729,9 @@ mod tests {
             Shortcut::Confirm,
             Shortcut::Cancel,
             Shortcut::PlayPause,
+            Shortcut::CopyToOther,
+            Shortcut::MoveToOther,
+            Shortcut::SwitchPane,
         ] {
             assert!(!shortcut.label().is_empty());
         }

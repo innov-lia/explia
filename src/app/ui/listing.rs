@@ -21,6 +21,127 @@ impl ExpliaApp {
         }
     }
 
+    /// Affichage fractionné : les deux volets côte à côte, chacun avec sa barre d'adresse et
+    /// sa liste. Le volet qui a la main est encadré ; un clic dans l'autre lui donne la main.
+    pub(in crate::app) fn split_area(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let active = self.split.as_ref()?.active;
+        let mut action = None;
+        let gap = ui.spacing().item_spacing.x * 2.0 + 1.0;
+        let half = ((ui.available_width() - gap) / 2.0).max(120.0);
+        let height = ui.available_height();
+        let mut rects = [egui::Rect::NOTHING; 2];
+        ui.horizontal_top(|ui| {
+            for side in [Side::Left, Side::Right] {
+                let is_active = side == active;
+                let stroke = if is_active {
+                    ui.visuals().selection.stroke
+                } else {
+                    ui.visuals().widgets.noninteractive.bg_stroke
+                };
+                let response = ui
+                    .vertical(|ui| {
+                        ui.set_width(half);
+                        ui.set_height(height);
+                        egui::Frame::group(ui.style())
+                            .stroke(stroke)
+                            .inner_margin(4.0)
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.set_height(ui.available_height());
+                                let pane_action = if is_active {
+                                    self.pane_contents(ui)
+                                } else {
+                                    self.with_other(|app| app.pane_contents(ui))
+                                };
+                                if pane_action.is_some() {
+                                    action = pane_action;
+                                }
+                            });
+                    })
+                    .response;
+                rects[split::side_index(side)] = response.rect;
+                if side == Side::Left {
+                    ui.separator();
+                }
+            }
+        });
+        // Un clic (ou un clic droit) dans l'autre volet lui donne la main ; son action
+        // éventuelle s'applique ensuite à lui.
+        let other_rect = rects[split::side_index(split::opposite(active))];
+        let pressed_in_other = ui.input(|i| {
+            (i.pointer.primary_pressed() || i.pointer.secondary_pressed())
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|p| other_rect.contains(p))
+        });
+        if let Some(split) = self.split.as_mut() {
+            split.rects = rects;
+        }
+        if pressed_in_other {
+            self.activate_other();
+        }
+        self.pane_drag_hint(ui.ctx());
+        action
+    }
+
+    /// Contenu d'un volet : barre d'adresse, bandeau des résultats, liste.
+    fn pane_contents(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = self.location_bar(ui);
+        action = self.results_banner(ui).or(action);
+        ui.add_space(4.0);
+        if matches!(self.nav.location, Location::Dir(_)) {
+            self.listing_view(ui).or(action)
+        } else {
+            ui.label("Choisissez un dossier ou un lecteur dans la barre latérale.");
+            action
+        }
+    }
+
+    /// Pendant un glisser d'un volet à l'autre : l'autre volet s'illumine et une étiquette
+    /// suit le pointeur.
+    fn pane_drag_hint(&self, ctx: &egui::Context) {
+        let Some(split) = &self.split else {
+            return;
+        };
+        let Some(paths) = &split.drag else {
+            return;
+        };
+        let Some(pointer) = ctx.input(|i| i.pointer.latest_pos()) else {
+            return;
+        };
+        let target = split.rects[split::side_index(split::opposite(split.active))];
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::unique("pane-drag"),
+        ));
+        let over_target = target.contains(pointer);
+        if over_target {
+            let color = ctx
+                .global_style()
+                .visuals
+                .selection
+                .bg_fill
+                .gamma_multiply(0.25);
+            painter.rect_filled(target, 4.0, color);
+        }
+        let shift = ctx.input(|i| i.modifiers.shift);
+        let what = if shift { "Déplacer" } else { "Copier" };
+        let text = format!("📄 {} élément(s) — {what} (Maj : déplacer)", paths.len());
+        let galley =
+            painter.layout_no_wrap(text, egui::FontId::proportional(14.0), egui::Color32::WHITE);
+        let rect = egui::Rect::from_min_size(
+            pointer + egui::vec2(14.0, 10.0),
+            galley.size() + egui::vec2(12.0, 8.0),
+        );
+        painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(200));
+        painter.galley(
+            rect.min + egui::vec2(6.0, 4.0),
+            galley,
+            egui::Color32::WHITE,
+        );
+        ctx.request_repaint();
+    }
+
     pub(in crate::app) fn listing_view(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         // Première ligne : « .. » revient au dossier précédent (le parent).
