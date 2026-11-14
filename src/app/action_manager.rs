@@ -26,6 +26,8 @@ pub(super) enum Command {
     Paste,
     CopyPath,
     Rename,
+    /// Supprime (corbeille, après confirmation).
+    Delete,
     AddFavorite,
     RemoveFavorite,
     AddApplication,
@@ -56,6 +58,7 @@ impl Command {
             Command::Paste => "📥 Coller dans ce dossier",
             Command::CopyPath => "Copier le chemin",
             Command::Rename => "Renommer",
+            Command::Delete => "🗑 Supprimer",
             Command::AddFavorite => "Ajouter aux favoris",
             Command::RemoveFavorite => "Retirer des favoris",
             Command::AddApplication => "Ajouter aux applications",
@@ -74,6 +77,7 @@ impl Command {
         match self {
             Command::Copy => Some("Ctrl+C"),
             Command::Rename => Some("F2"),
+            Command::Delete => Some("Suppr"),
             _ => None,
         }
     }
@@ -89,7 +93,8 @@ impl Command {
     }
 
     /// Action déclenchée sur `target` ; `targets` : tous les éléments visés (multi-sélection).
-    pub(super) fn action(self, target: &Entry, targets: Vec<PathBuf>) -> Action {
+    pub(super) fn action(self, target: &Entry, targets: Vec<Entry>) -> Action {
+        let paths = || targets.iter().map(|e| e.path.clone()).collect();
         let path = target.path.clone();
         match self {
             Command::Open if target.is_dir => Action::Go(Location::Dir(path)),
@@ -104,10 +109,11 @@ impl Command {
                 },
                 None => Action::Go(Location::Dir(path)),
             },
-            Command::Copy => Action::CopyFiles(targets),
+            Command::Copy => Action::CopyFiles(paths()),
             Command::Paste => Action::Paste { dest: path },
             Command::CopyPath => Action::CopyPath(path),
             Command::Rename => Action::StartRename(target.clone()),
+            Command::Delete => Action::AskDeleteEntries(targets),
             Command::AddFavorite => Action::AddFavorite(path),
             Command::RemoveFavorite => Action::RemoveFavorite(path),
             Command::AddApplication => Action::AddApplication(path),
@@ -156,6 +162,8 @@ pub(super) enum Action {
     ClearMulti,
     /// Demande confirmation avant de supprimer la sélection.
     AskDelete,
+    /// Sélectionne ces éléments, puis demande confirmation avant de les supprimer (menu).
+    AskDeleteEntries(Vec<Entry>),
     CancelDelete,
     /// Envoie la sélection à la corbeille.
     ConfirmDelete,
@@ -315,6 +323,22 @@ impl ExpliaApp {
             Action::SelectRange(entry) => self.select_range(entry),
             Action::ClearMulti => self.clear_multi(),
             Action::AskDelete => {
+                self.confirm_delete = !self.delete_targets().is_empty();
+                self.delete_asked_at = Some(ctx.input(|i| i.time));
+            }
+            Action::AskDeleteEntries(entries) => {
+                if entries != self.delete_targets() {
+                    self.clear_multi();
+                    self.selection.single = None;
+                    self.preview = PreviewState::None;
+                    match <[Entry; 1]>::try_from(entries) {
+                        Ok([entry]) => self.selection.select_one(entry),
+                        Err(entries) => {
+                            self.selection.anchor = entries.first().map(|e| e.path.clone());
+                            self.selection.multi = entries;
+                        }
+                    }
+                }
                 self.confirm_delete = !self.delete_targets().is_empty();
                 self.delete_asked_at = Some(ctx.input(|i| i.time));
             }

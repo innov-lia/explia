@@ -84,11 +84,6 @@ pub struct Selection {
 }
 
 impl Selection {
-    /// Rien n'est sélectionné.
-    pub fn is_empty(&self) -> bool {
-        self.single.is_none() && self.multi.is_empty()
-    }
-
     /// Clic simple : `entry` devient le seul élément sélectionné.
     pub fn select_one(&mut self, entry: Entry) {
         self.clear_multi();
@@ -100,13 +95,6 @@ impl Selection {
     pub fn clear_multi(&mut self) {
         self.multi.clear();
         self.toggle_mode = false;
-    }
-
-    /// Ne sélectionne plus rien.
-    pub fn clear(&mut self) {
-        self.clear_multi();
-        self.single = None;
-        self.anchor = None;
     }
 
     /// `path` fait partie de la multi-sélection.
@@ -192,14 +180,6 @@ impl Selection {
         self.targets_from(entry)
             .into_iter()
             .map(|e| e.path)
-            .collect()
-    }
-
-    /// Références (nature, source) des éléments visés depuis `entry`.
-    pub fn items_from(&self, entry: &Entry) -> Vec<ItemRef> {
-        self.targets_from(entry)
-            .iter()
-            .map(ItemRef::from_entry)
             .collect()
     }
 }
@@ -308,7 +288,7 @@ mod tests {
         let mut selection = Selection::default();
         selection.select_one(file("a"));
         assert_eq!(selection.toggle(file("a")), Ok(Toggle::Deselected));
-        assert!(selection.is_empty());
+        assert!(selection.single.is_none() && selection.multi.is_empty());
     }
 
     #[test]
@@ -359,7 +339,6 @@ mod tests {
         assert_eq!(names(&selection.targets()), ["a", "b"]);
         assert_eq!(names(&selection.targets_from(&file("b"))), ["a", "b"]);
         assert_eq!(names(&selection.targets_from(&file("z"))), ["z"]);
-        let items = selection.items_from(&file("a"));
-        assert!(items.iter().all(|i| i.kind == ItemKind::File));
+        assert_eq!(ItemKind::of(&dir("d")), ItemKind::Folder);
     }
 }

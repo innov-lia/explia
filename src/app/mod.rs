@@ -28,8 +28,9 @@ use crate::storage_manager::StorageManager;
 use crate::view::{self, Columns, Side, SortKey, SortOrder, ViewMode};
 
 mod action_manager;
+mod context_menu_manager;
 
-use action_manager::{Action, Command};
+use action_manager::Action;
 
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
 pub const WINDOW_SCREEN_RATIO: f32 = 0.8;
@@ -2187,7 +2188,8 @@ impl ExpliaApp {
 
     /// Le volet de détail est affiché (option « Volet d'aperçu », ou multi-sélection en cours).
     fn detail_shown(&self) -> bool {
-        self.show_preview || !self.selection.multi.is_empty()
+        // La demande de suppression s'affiche dans le détail : il apparaît pour elle.
+        self.show_preview || !self.selection.multi.is_empty() || self.confirm_delete
     }
 
     /// Volet latéral (à gauche ou à droite selon la disposition) : le volet de détail, ou la
@@ -2479,16 +2481,7 @@ impl ExpliaApp {
                 action = Some(Action::Open(path.clone()));
             }
             response.context_menu(|ui| {
-                let mut commands = vec![
-                    Some(Command::Open),
-                    Some(Command::RunAsAdmin),
-                    Some(Command::ShowInFolder),
-                ];
-                if removable {
-                    commands.push(Some(Command::RemoveApplication));
-                }
-                let entry = Entry::file_at(path);
-                if let Some(chosen) = show_commands(ui, &entry, &commands, vec![path.clone()]) {
+                if let Some(chosen) = self.application_menu(ui, path, removable) {
                     action = Some(chosen);
                 }
             });
@@ -2514,9 +2507,7 @@ impl ExpliaApp {
                 action = Some(Action::SidebarGo(path.clone()));
             }
             response.context_menu(|ui| {
-                let entry = Entry::folder_at(path);
-                let commands = [Some(Command::RemoveFavorite)];
-                if let Some(chosen) = show_commands(ui, &entry, &commands, vec![path.clone()]) {
+                if let Some(chosen) = self.favorite_menu(ui, path) {
                     action = Some(chosen);
                 }
             });
@@ -3202,46 +3193,6 @@ impl ExpliaApp {
         action
     }
 
-    /// Menu contextuel d'une ligne (liste, colonnes, colonne de navigation) : renommer
-    /// (si `allow_rename`), favoris pour un dossier, ouvrir / lire / exécuter pour un fichier.
-    fn entry_menu(&self, ui: &mut egui::Ui, entry: &Entry, allow_rename: bool) -> Option<Action> {
-        let mut commands: Vec<Option<Command>> = Vec::new();
-        if allow_rename {
-            commands.extend([Some(Command::Rename), None]);
-        }
-        commands.extend([Some(Command::Copy), Some(Command::CopyPath)]);
-        if entry.is_dir {
-            commands.push(Some(Command::OpenInNewTab));
-            commands.push(Some(Command::Paste));
-            commands.extend([Some(Command::PowerShell), Some(Command::PowerShellAdmin)]);
-        }
-        commands.push(None);
-        if entry.is_dir {
-            commands.push(Some(if self.favorites.contains(&entry.path) {
-                Command::RemoveFavorite
-            } else {
-                Command::AddFavorite
-            }));
-        } else {
-            let executable = launch::is_executable(&entry.path);
-            commands.push(Some(Command::Open));
-            if executable {
-                commands.push(Some(if self.applications.contains(&entry.path) {
-                    Command::RemoveApplication
-                } else {
-                    Command::AddApplication
-                }));
-            }
-            if is_playable(&entry.path) {
-                commands.push(Some(Command::OpenExternally));
-            }
-            if executable {
-                commands.push(Some(Command::RunAsAdmin));
-            }
-        }
-        show_commands(ui, entry, &commands, self.selection.paths_from(entry))
-    }
-
     /// Navigation aux flèches :
     /// - haut / bas : ligne précédente / suivante (avec Maj : étend la sélection) ;
     /// - gauche : dossier parent (le dossier quitté est resélectionné) ;
@@ -3403,13 +3354,24 @@ impl ExpliaApp {
             }
         });
         // Ligne d'information sous les boutons : n'en change pas la position.
+        let recycle_bin = self
+            .delete_targets()
+            .first()
+            .is_none_or(|e| self.storage.capabilities(&e.path).recycle_bin);
         if self.confirm_delete {
+            let question = if recycle_bin {
+                format!("Envoyer {what} à la corbeille ?")
+            } else {
+                format!("Pas de corbeille ici : supprimer {what} définitivement ?")
+            };
             ui.colored_label(
                 ui.visuals().warn_fg_color,
-                format!("Envoyer {what} à la corbeille ?  (Entrée : confirmer, Échap : annuler)"),
+                format!("{question}  (Entrée : confirmer, Échap : annuler)"),
             );
-        } else {
+        } else if recycle_bin {
             ui.weak("Suppression : vers la corbeille de Windows.");
+        } else {
+            ui.weak("Suppression définitive : pas de corbeille sur ce lecteur.");
         }
         action
     }
@@ -4343,34 +4305,6 @@ fn open_action(path: &Path) -> Action {
     } else {
         Action::Open(path.to_path_buf())
     }
-}
-
-/// Boutons d'un menu de commandes (`None` : séparateur) pour `entry` ; `targets` : tous les
-/// éléments visés. Renvoie l'action de la commande choisie.
-fn show_commands(
-    ui: &mut egui::Ui,
-    entry: &Entry,
-    commands: &[Option<Command>],
-    targets: Vec<PathBuf>,
-) -> Option<Action> {
-    let mut action = None;
-    for command in commands {
-        let Some(command) = *command else {
-            ui.separator();
-            continue;
-        };
-        let enabled = command != Command::Paste || clipboard::has_files();
-        let label = command.label(&entry.path, entry.is_dir, targets.len());
-        let mut response = ui.add_enabled(enabled, egui::Button::new(label));
-        if let Some(hint) = command.hint() {
-            response = response.on_hover_text(hint);
-        }
-        if response.clicked() {
-            action = Some(command.action(entry, targets.clone()));
-            ui.close();
-        }
-    }
-    action
 }
 
 fn favorite_name(path: &Path) -> String {
