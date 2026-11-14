@@ -169,6 +169,23 @@ impl Command {
     }
 }
 
+/// Commande du lecteur intégré (barre de commandes, clavier en plein écran).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum PlayerCommand {
+    TogglePause,
+    /// Saut en avant (secondes positives) ou en arrière.
+    SeekBy(i64),
+    /// Va à cette position.
+    SeekTo(std::time::Duration),
+    /// Volume de 0 à 100.
+    SetVolume(i32),
+    /// Monte ou baisse le volume.
+    VolumeBy(i32),
+    ToggleMute,
+    /// Vitesse de lecture (1.0 : normale).
+    SetRate(f32),
+}
+
 /// Action demandée par l'interface pendant une frame, puis exécutée par `ExpliaApp::apply`.
 /// Les gestes (clics, touches) sont traduits en actions ; les commandes de l'utilisateur
 /// (`Command`) aussi.
@@ -213,6 +230,8 @@ pub(super) enum Action {
     Play(PathBuf),
     /// Arrête la lecture intégrée.
     StopPlayer,
+    /// Commande le lecteur intégré.
+    Player(PlayerCommand),
     /// Change la façon d'afficher le dossier (liste, colonnes, grille d'images).
     SetViewMode(ViewMode),
     /// Lance la recherche des doublons, quelle que soit leur taille (selon l'option
@@ -366,6 +385,33 @@ impl ExpliaApp {
             }
             Action::Play(path) => self.start_player(path),
             Action::StopPlayer => self.stop_player(),
+            Action::Player(command) => {
+                self.player.activity_at = ctx.input(|i| i.time);
+                if let PlayerSlot::Ready(active) = &self.player.slot {
+                    let player = &active.player;
+                    match command {
+                        PlayerCommand::TogglePause => player.toggle_pause(),
+                        PlayerCommand::SeekBy(secs) => {
+                            player.set_time(player::seek_target(
+                                player.time(),
+                                player.length(),
+                                secs,
+                            ));
+                        }
+                        PlayerCommand::SeekTo(time) => player.set_time(time),
+                        PlayerCommand::SetVolume(volume) => {
+                            player.set_volume(volume);
+                            player.set_muted(false);
+                        }
+                        PlayerCommand::VolumeBy(delta) => {
+                            player.set_volume(player.volume() + delta);
+                            player.set_muted(false);
+                        }
+                        PlayerCommand::ToggleMute => player.set_muted(!player.is_muted()),
+                        PlayerCommand::SetRate(rate) => player.set_rate(rate),
+                    }
+                }
+            }
             Action::OpenAsAdmin(path) => {
                 let result = self
                     .storage

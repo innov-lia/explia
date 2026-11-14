@@ -391,58 +391,128 @@ impl ExpliaApp {
                 ui.label(egui::RichText::new("🎵").size(48.0));
             }
         }
-        Self::player_bar(ui, active).or(action)
+        Self::player_bar(ui, active, false).or(action)
     }
 
-    /// Commandes du lecteur : lecture / pause, arrêt, position, volume.
-    pub(in crate::app) fn player_bar(ui: &mut egui::Ui, active: &ActivePlayer) -> Option<Action> {
+    /// Barre de commandes du lecteur, comme celle de VLC : temps écoulé, barre de progression
+    /// (clic ou glisser pour s'y rendre), temps restant ; puis -10 s, lecture / pause, +10 s,
+    /// arrêt, vitesse, son et plein écran. `fullscreen` : barre affichée sur la vidéo en plein
+    /// écran.
+    pub(in crate::app) fn player_bar(
+        ui: &mut egui::Ui,
+        active: &ActivePlayer,
+        fullscreen: bool,
+    ) -> Option<Action> {
         let mut action = None;
         let player = &active.player;
         let state = player.state();
         let length = player.length();
+        let time = player.time();
+        let small = egui::TextStyle::Small.resolve(ui.style());
+        // Ligne 1 : 00:35 ━━━━━━━○──────── -02:35
         ui.horizontal(|ui| {
-            let label = match state {
+            ui.label(egui::RichText::new(dates::format_duration(time)).font(small.clone()));
+            let remaining = match length {
+                Some(length) => format!("-{}", dates::format_duration(length.saturating_sub(time))),
+                None => "--:--".to_string(),
+            };
+            let remaining_width = ui
+                .painter()
+                .layout_no_wrap(remaining.clone(), small.clone(), egui::Color32::WHITE)
+                .size()
+                .x;
+            let width =
+                (ui.available_width() - remaining_width - ui.spacing().item_spacing.x).max(40.0);
+            if let Some(seek) = seek_bar(ui, width, time, length) {
+                action = Some(Action::Player(PlayerCommand::SeekTo(seek)));
+            }
+            ui.label(egui::RichText::new(remaining).font(small));
+        });
+        // Ligne 2 : commandes.
+        ui.horizontal(|ui| {
+            let mut command = |ui: &mut egui::Ui, label: &str, hint: &str, cmd: PlayerCommand| {
+                if ui.button(label).on_hover_text(hint).clicked() {
+                    action = Some(Action::Player(cmd));
+                }
+            };
+            command(
+                ui,
+                "⏪ 10 s",
+                "Reculer de 10 secondes (← en plein écran)",
+                PlayerCommand::SeekBy(-10),
+            );
+            let play = match state {
                 PlayerState::Playing => "⏸",
                 PlayerState::Ended => "⟲",
                 _ => "▶",
             };
-            if ui
-                .button(label)
-                .on_hover_text("Lecture / pause (Espace)")
-                .clicked()
-            {
-                player.toggle_pause();
-            }
+            command(
+                ui,
+                play,
+                "Lecture / pause (Espace)",
+                PlayerCommand::TogglePause,
+            );
+            command(
+                ui,
+                "10 s ⏩",
+                "Avancer de 10 secondes (→ en plein écran)",
+                PlayerCommand::SeekBy(10),
+            );
             if ui.button("⏹").on_hover_text("Arrêter").clicked() {
                 action = Some(Action::StopPlayer);
             }
-            let total = length.map_or("--:--".to_string(), dates::format_duration);
-            ui.label(format!(
-                "{} / {total}",
-                dates::format_duration(player.time())
-            ));
+            ui.separator();
+            // Vitesse de lecture.
+            let rate = player.rate();
+            let rate_label = format!("{}×", format_rate(rate));
+            menu(ui, &rate_label, |ui| {
+                ui.weak("Vitesse de lecture");
+                for choice in player::RATES {
+                    let current = (choice - rate).abs() < 0.01;
+                    if ui
+                        .selectable_label(current, format!("{}×", format_rate(choice)))
+                        .clicked()
+                    {
+                        action = Some(Action::Player(PlayerCommand::SetRate(choice)));
+                        ui.close();
+                    }
+                }
+            });
+            ui.separator();
+            // Son : coupé / rétabli, puis volume.
+            let muted = player.is_muted();
+            let speaker = if muted { "🔇" } else { "🔊" };
+            if ui
+                .button(speaker)
+                .on_hover_text("Couper / rétablir le son (M en plein écran)")
+                .clicked()
+            {
+                action = Some(Action::Player(PlayerCommand::ToggleMute));
+            }
+            let mut volume = player.volume();
+            ui.spacing_mut().slider_width = 90.0;
+            let slider = egui::Slider::new(&mut volume, 0..=100).show_value(false);
+            if ui
+                .add(slider)
+                .on_hover_text(format!("Volume : {volume} % (↑ / ↓ en plein écran)"))
+                .changed()
+            {
+                action = Some(Action::Player(PlayerCommand::SetVolume(volume)));
+            }
             if state == PlayerState::Error {
                 ui.colored_label(ui.visuals().error_fg_color, "Erreur de lecture");
             }
-        });
-        // Les curseurs occupent toute la largeur du volet.
-        ui.spacing_mut().slider_width = (ui.available_width() - 12.0).max(60.0);
-        if let Some(length) = length {
-            let total = length.as_secs_f32().max(0.1);
-            let mut position = player.time().as_secs_f32().min(total);
-            let slider = egui::Slider::new(&mut position, 0.0..=total).show_value(false);
-            if ui.add(slider).changed() {
-                player.set_time(std::time::Duration::from_secs_f32(position));
-            }
-        }
-        ui.horizontal(|ui| {
-            ui.label("🔊");
-            ui.spacing_mut().slider_width = (ui.available_width() - 12.0).max(40.0);
-            let mut volume = player.volume();
-            let slider = egui::Slider::new(&mut volume, 0..=100).show_value(false);
-            if ui.add(slider).changed() {
-                player.set_volume(volume);
-            }
+            // Plein écran, à droite.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (label, hint) = if fullscreen {
+                    ("⛶ Quitter", "Quitter le plein écran (Échap ou double-clic)")
+                } else {
+                    ("⛶", "Plein écran (ou double-clic sur la vidéo)")
+                };
+                if ui.button(label).on_hover_text(hint).clicked() {
+                    action = Some(Action::ToggleVideoFullscreen);
+                }
+            });
         });
         action
     }
@@ -689,8 +759,9 @@ impl ExpliaApp {
         }
     }
 
-    /// Plein écran : la vidéo occupe toute la fenêtre, les commandes en bas. Double-clic ou
-    /// Échap en sort. Renvoie `false` s'il n'y a plus de vidéo à montrer (plein écran quitté).
+    /// Vidéo en plein écran : elle seule occupe la fenêtre. La barre de commandes se pose sur
+    /// la vidéo quand la souris bouge (ou à la pause) et disparaît, avec le pointeur, après
+    /// quelques secondes sans mouvement. Renvoie `false` si le plein écran n'a plus lieu d'être.
     pub(in crate::app) fn fullscreen_video(&mut self, ui: &mut egui::Ui) -> bool {
         let ctx = ui.ctx().clone();
         let PlayerSlot::Ready(active) = &self.player.slot else {
@@ -701,13 +772,15 @@ impl ExpliaApp {
             self.set_video_fullscreen(&ctx, false);
             return false;
         };
+        let now = ctx.input(|i| i.time);
+        let moved = ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO || i.pointer.any_down());
+        if moved {
+            self.player.activity_at = now;
+        }
+        let paused = active.player.state() != PlayerState::Playing;
+        let idle = now - self.player.activity_at;
+        let show_bar = paused || idle < FULLSCREEN_BAR_SECONDS;
         let mut action = None;
-        let mut exit = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        egui::Panel::bottom("fullscreen-controls").show(ui, |ui| {
-            ui.add_space(4.0);
-            action = Self::player_bar(ui, active);
-            ui.add_space(4.0);
-        });
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::BLACK))
             .show(ui, |ui| {
@@ -722,15 +795,38 @@ impl ExpliaApp {
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
-                if response
-                    .on_hover_text("Double-clic ou Échap : quitter le plein écran")
-                    .double_clicked()
-                {
-                    exit = true;
+                if response.double_clicked() {
+                    action = Some(Action::ToggleVideoFullscreen);
                 }
             });
-        if exit {
-            self.set_video_fullscreen(&ctx, false);
+        if show_bar {
+            let screen = ctx.content_rect();
+            let width = (screen.width() - 48.0).max(200.0);
+            egui::Area::new(egui::Id::unique("fullscreen-bar"))
+                .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -16.0))
+                .order(egui::Order::Foreground)
+                .show(&ctx, |ui| {
+                    // Barre sombre sur la vidéo, quel que soit le thème de la fenêtre.
+                    ui.set_visuals(egui::Visuals::dark());
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_black_alpha(190))
+                        .corner_radius(8.0)
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .show(ui, |ui| {
+                            ui.set_width(width - 28.0);
+                            if let Some(bar_action) = Self::player_bar(ui, active, true) {
+                                action = Some(bar_action);
+                            }
+                        });
+                });
+            // Réveille l'interface pour masquer la barre à l'heure dite.
+            if !paused {
+                let left = (FULLSCREEN_BAR_SECONDS - idle).max(0.05);
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+            }
+        } else {
+            // Barre masquée : le pointeur aussi, comme dans un lecteur vidéo.
+            ctx.set_cursor_icon(egui::CursorIcon::None);
         }
         if let Some(action) = action {
             if matches!(action, Action::StopPlayer) {

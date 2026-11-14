@@ -521,3 +521,68 @@ pub(in crate::app) fn drive_icon(kind: DriveKind) -> &'static str {
         DriveKind::Other => "💽",
     }
 }
+
+/// Barre de progression du lecteur, sur `width` points : partie lue en couleur, curseur rond.
+/// Un clic ou un glisser renvoie la position visée ; le survol affiche le temps sous le
+/// pointeur.
+pub(in crate::app) fn seek_bar(
+    ui: &mut egui::Ui,
+    width: f32,
+    time: std::time::Duration,
+    length: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    let height = ui.spacing().interact_size.y;
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+    // Durée inconnue (flux, début de lecture) : barre vide.
+    let length = length.filter(|l| !l.is_zero())?;
+    let total = length.as_secs_f32();
+    let fraction = (time.as_secs_f32() / total).clamp(0.0, 1.0);
+    let track = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 6.0));
+    let painter = ui.painter();
+    let visuals = ui.visuals();
+    painter.rect_filled(track, 3.0, visuals.widgets.inactive.bg_fill);
+    let mut played = track;
+    played.set_width(track.width() * fraction);
+    painter.rect_filled(played, 3.0, visuals.selection.bg_fill);
+    let knob = egui::pos2(track.left() + track.width() * fraction, track.center().y);
+    let radius = if response.hovered() || response.dragged() {
+        7.0
+    } else {
+        5.0
+    };
+    painter.circle_filled(knob, radius, visuals.selection.bg_fill);
+    let at = |x: f32| {
+        let ratio = ((x - track.left()) / track.width()).clamp(0.0, 1.0);
+        std::time::Duration::from_secs_f32(total * ratio)
+    };
+    if let Some(pointer) = response.hover_pos() {
+        response
+            .clone()
+            .on_hover_text_at_pointer(crate::dates::format_duration(at(pointer.x)));
+    }
+    if response.clicked() || response.dragged() {
+        return response.interact_pointer_pos().map(|p| at(p.x));
+    }
+    None
+}
+
+/// Vitesse lisible : « 1 », « 1,25 », « 0,5 ».
+pub(in crate::app) fn format_rate(rate: f32) -> String {
+    let text = format!("{rate:.2}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    text.replace('.', ",")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rates_read_like_a_player() {
+        assert_eq!(format_rate(1.0), "1");
+        assert_eq!(format_rate(1.25), "1,25");
+        assert_eq!(format_rate(0.5), "0,5");
+        assert_eq!(format_rate(2.0), "2");
+    }
+}

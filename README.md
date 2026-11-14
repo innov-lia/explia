@@ -97,8 +97,8 @@ La barre latérale, à gauche, montre la liste de l'intercalaire choisi ; les in
 
 ### Volet de détail, aperçu et lecture
 - **Aperçu** des images (PNG, JPEG, BMP, GIF, WebP), du texte (`.txt`, `.md`, `.json`, `.rs`, `.log`…, 64 Ko au plus) et du **contenu des archives ZIP** (rien n'est extrait). Pour les autres types : type, taille et bouton « Ouvrir ».
-- **Lecture audio et vidéo intégrée** (VLC, voir plus bas) : « ▶ Lire », double-clic ou Entrée ; lecture / pause (bouton ou **Espace**), arrêt, position, volume ; « ↗ Lecteur externe » pour l'application par défaut.
-- **Vidéo en plein écran** : double-clic sur la vidéo ; commandes en bas, double-clic ou **Échap** pour revenir.
+- **Lecture audio et vidéo intégrée** (VLC, voir plus bas) : « ▶ Lire », double-clic ou Entrée ; « ↗ Lecteur externe » pour l'application par défaut. Barre de commandes comme celle de VLC : **temps écoulé**, **barre de progression** (clic ou glisser pour s'y rendre, le temps visé s'affiche au survol), **temps restant** ; **⏪ 10 s** / **10 s ⏩** (reculer / avancer de 10 secondes), lecture / pause (**Espace**), arrêt, **vitesse** (0,5× à 2×), **son coupé** et volume, **⛶ plein écran**.
+- **Vidéo en plein écran** : double-clic sur la vidéo ou ⛶. La barre se pose sur la vidéo quand la souris bouge (ou à la pause) et disparaît, avec le pointeur, après 2,5 secondes d'immobilité. Clavier : **Espace** lecture / pause, **← / →** -10 s / +10 s, **↑ / ↓** volume, **M** son coupé, **Échap** (ou double-clic) pour revenir.
 - **◀ Triangle d'échange** (en bas du volet latéral) : le volet de détail passe au centre, en grand, et la navigation sur le côté ; un clic sur le triangle les remet en place.
 - **Actions sur un dossier** (dossier sélectionné, ou dossier affiché quand rien n'est sélectionné) : **>_ PowerShell** et **>_ Admin** (console ouverte dans ce dossier ; administrateur via UAC), **📋 Chemin**, **📁 Nouveau dossier**, **📥 Coller dans ce dossier**, **Propriétés**, renommer, **🗑 Supprimer** (y compris le dossier affiché lui-même).
 
@@ -150,6 +150,7 @@ Menu **⏷ Sélection**, à droite de la barre de recherche :
 | **F5** / **F6** (fractionné) | Copie / déplace la sélection vers l'autre volet |
 | **Tab** (fractionné) | Donne la main à l'autre volet |
 | **Espace** | Lecture / pause du lecteur intégré |
+| **← / →**, **↑ / ↓**, **M** (vidéo en plein écran) | -10 s / +10 s, volume, son coupé |
 | **Échap** | Annule une saisie, une confirmation, la multi-sélection, le plein écran |
 | **Ctrl+clic**, **Maj+clic**, **clic maintenu** | Sélection multiple |
 | **Double-clic** | Ouvre un dossier ; lit un audio / une vidéo ; ouvre un fichier ; plein écran sur la vidéo |

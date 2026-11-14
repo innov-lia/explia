@@ -37,6 +37,16 @@ pub(super) enum Shortcut {
     MoveToOther,
     /// Affichage fractionné : donne la main à l'autre volet.
     SwitchPane,
+    /// Vidéo en plein écran : recule de 10 secondes.
+    SeekBack,
+    /// Vidéo en plein écran : avance de 10 secondes.
+    SeekForward,
+    /// Vidéo en plein écran : monte le son.
+    VolumeUp,
+    /// Vidéo en plein écran : baisse le son.
+    VolumeDown,
+    /// Vidéo en plein écran : coupe ou rétablit le son.
+    Mute,
 }
 
 impl Shortcut {
@@ -59,6 +69,11 @@ impl Shortcut {
             Shortcut::CopyToOther => "F5",
             Shortcut::MoveToOther => "F6",
             Shortcut::SwitchPane => "Tab",
+            Shortcut::SeekBack => "←",
+            Shortcut::SeekForward => "→",
+            Shortcut::VolumeUp => "↑",
+            Shortcut::VolumeDown => "↓",
+            Shortcut::Mute => "M",
         }
     }
 
@@ -84,6 +99,11 @@ impl Shortcut {
             Shortcut::CopyToOther => (egui::Key::F5, none),
             Shortcut::MoveToOther => (egui::Key::F6, none),
             Shortcut::SwitchPane => (egui::Key::Tab, none),
+            Shortcut::SeekBack => (egui::Key::ArrowLeft, none),
+            Shortcut::SeekForward => (egui::Key::ArrowRight, none),
+            Shortcut::VolumeUp => (egui::Key::ArrowUp, none),
+            Shortcut::VolumeDown => (egui::Key::ArrowDown, none),
+            Shortcut::Mute => (egui::Key::M, none),
         }
     }
 
@@ -424,6 +444,10 @@ impl ExpliaApp {
             self.drag_out_done = false;
         }
         let pressed = |shortcut: Shortcut| ctx.input(|i| shortcut.pressed(i));
+        // Vidéo en plein écran : le clavier commande le lecteur.
+        if self.player.fullscreen {
+            return Self::video_keys(&pressed);
+        }
         // Échap annule la confirmation de suppression, sinon quitte la multi-sélection
         // (sauf pendant la saisie d'un chemin).
         if !self.nav.address_editing && !self.player.fullscreen && pressed(Shortcut::Cancel) {
@@ -480,10 +504,8 @@ impl ExpliaApp {
         // la suppression, puis Entrée la confirme (Échap l'annule).
         if !ctx.egui_wants_keyboard_input() && self.renaming.is_none() && !self.nav.address_editing
         {
-            if pressed(Shortcut::PlayPause)
-                && let PlayerSlot::Ready(active) = &self.player.slot
-            {
-                active.player.toggle_pause();
+            if pressed(Shortcut::PlayPause) && matches!(self.player.slot, PlayerSlot::Ready(_)) {
+                action = Some(Action::Player(PlayerCommand::TogglePause));
             }
             let single = match self.selection.multi.len() {
                 0 => self.selection.single.as_ref(),
@@ -810,6 +832,29 @@ impl ExpliaApp {
         }
     }
 
+    /// Clavier de la vidéo en plein écran : Espace lecture / pause, ← / → ±10 s, ↑ / ↓ volume,
+    /// M son coupé, Échap quitte le plein écran.
+    fn video_keys(pressed: &dyn Fn(Shortcut) -> bool) -> Option<Action> {
+        let player = |command| Some(Action::Player(command));
+        if pressed(Shortcut::Cancel) {
+            Some(Action::ToggleVideoFullscreen)
+        } else if pressed(Shortcut::PlayPause) {
+            player(PlayerCommand::TogglePause)
+        } else if pressed(Shortcut::SeekBack) {
+            player(PlayerCommand::SeekBy(-10))
+        } else if pressed(Shortcut::SeekForward) {
+            player(PlayerCommand::SeekBy(10))
+        } else if pressed(Shortcut::VolumeUp) {
+            player(PlayerCommand::VolumeBy(5))
+        } else if pressed(Shortcut::VolumeDown) {
+            player(PlayerCommand::VolumeBy(-5))
+        } else if pressed(Shortcut::Mute) {
+            player(PlayerCommand::ToggleMute)
+        } else {
+            None
+        }
+    }
+
     /// Éléments glissés depuis l'Explorateur (ou le Bureau) et déposés dans la fenêtre : ils
     /// seront copiés dans le dossier affiché. Un dépôt juste après un glisser lancé depuis
     /// ExPLIA est ignoré (bouton relâché dans sa propre fenêtre).
@@ -1048,6 +1093,29 @@ mod tests {
     }
 
     #[test]
+    fn in_full_screen_the_keyboard_drives_the_player() {
+        let only = |wanted: Shortcut| move |shortcut: Shortcut| shortcut == wanted;
+        let key = |wanted| ExpliaApp::video_keys(&only(wanted));
+        assert!(matches!(
+            key(Shortcut::SeekBack),
+            Some(Action::Player(PlayerCommand::SeekBy(-10)))
+        ));
+        assert!(matches!(
+            key(Shortcut::SeekForward),
+            Some(Action::Player(PlayerCommand::SeekBy(10)))
+        ));
+        assert!(matches!(
+            key(Shortcut::Mute),
+            Some(Action::Player(PlayerCommand::ToggleMute))
+        ));
+        assert!(matches!(
+            key(Shortcut::Cancel),
+            Some(Action::ToggleVideoFullscreen)
+        ));
+        assert!(ExpliaApp::video_keys(&|_| false).is_none());
+    }
+
+    #[test]
     fn every_shortcut_has_a_label() {
         for shortcut in [
             Shortcut::Find,
@@ -1066,6 +1134,11 @@ mod tests {
             Shortcut::CopyToOther,
             Shortcut::MoveToOther,
             Shortcut::SwitchPane,
+            Shortcut::SeekBack,
+            Shortcut::SeekForward,
+            Shortcut::VolumeUp,
+            Shortcut::VolumeDown,
+            Shortcut::Mute,
         ] {
             assert!(!shortcut.label().is_empty());
         }

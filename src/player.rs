@@ -44,6 +44,23 @@ pub enum PlayerState {
     Error,
 }
 
+/// Vitesses de lecture proposées.
+pub const RATES: [f32; 6] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+
+/// Position après un saut de `delta_secs` secondes (en arrière si négatif), bornée au début
+/// et, si elle est connue, à la fin du média.
+pub fn seek_target(time: Duration, length: Option<Duration>, delta_secs: i64) -> Duration {
+    let target = if delta_secs < 0 {
+        time.saturating_sub(Duration::from_secs(delta_secs.unsigned_abs()))
+    } else {
+        time + Duration::from_secs(delta_secs.unsigned_abs())
+    };
+    match length {
+        Some(length) => target.min(length),
+        None => target,
+    }
+}
+
 /// Dossiers où chercher VLC, dans l'ordre de préférence.
 pub fn candidate_dirs(
     get_env: impl Fn(&str) -> Option<OsString>,
@@ -128,6 +145,24 @@ impl Player {
         self.inner.set_volume(volume.clamp(0, 100));
     }
 
+    /// Son coupé.
+    pub fn is_muted(&self) -> bool {
+        self.inner.is_muted()
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.inner.set_muted(muted);
+    }
+
+    /// Vitesse de lecture (1.0 : normale).
+    pub fn rate(&self) -> f32 {
+        self.inner.rate()
+    }
+
+    pub fn set_rate(&self, rate: f32) {
+        self.inner.set_rate(rate.clamp(0.25, 4.0));
+    }
+
     /// Dernière image décodée, si elle est plus récente que `last_version`.
     pub fn frame_newer_than(&self, last_version: u64) -> Option<Frame> {
         self.inner.frame_newer_than(last_version)
@@ -205,6 +240,10 @@ mod imp {
         player_get_length: unsafe extern "C" fn(MediaPlayer) -> i64,
         audio_get_volume: unsafe extern "C" fn(MediaPlayer) -> c_int,
         audio_set_volume: unsafe extern "C" fn(MediaPlayer, c_int) -> c_int,
+        audio_get_mute: unsafe extern "C" fn(MediaPlayer) -> c_int,
+        audio_set_mute: unsafe extern "C" fn(MediaPlayer, c_int),
+        player_get_rate: unsafe extern "C" fn(MediaPlayer) -> f32,
+        player_set_rate: unsafe extern "C" fn(MediaPlayer, f32) -> c_int,
         video_set_callbacks:
             unsafe extern "C" fn(MediaPlayer, LockCb, UnlockCb, DisplayCb, *mut c_void),
         video_set_format_callbacks: unsafe extern "C" fn(MediaPlayer, SetupCb, CleanupCb),
@@ -295,6 +334,10 @@ mod imp {
             player_get_length: symbol!("libvlc_media_player_get_length"),
             audio_get_volume: symbol!("libvlc_audio_get_volume"),
             audio_set_volume: symbol!("libvlc_audio_set_volume"),
+            audio_get_mute: symbol!("libvlc_audio_get_mute"),
+            audio_set_mute: symbol!("libvlc_audio_set_mute"),
+            player_get_rate: symbol!("libvlc_media_player_get_rate"),
+            player_set_rate: symbol!("libvlc_media_player_set_rate"),
             video_set_callbacks: symbol!("libvlc_video_set_callbacks"),
             video_set_format_callbacks: symbol!("libvlc_video_set_format_callbacks"),
         }))
@@ -492,6 +535,27 @@ mod imp {
             unsafe { (self.api.audio_set_volume)(self.player, volume) };
         }
 
+        pub fn is_muted(&self) -> bool {
+            // SAFETY: `self.player` est valide ; -1 : état inconnu (pas encore de sortie son).
+            unsafe { (self.api.audio_get_mute)(self.player) == 1 }
+        }
+
+        pub fn set_muted(&self, muted: bool) {
+            // SAFETY: `self.player` est valide.
+            unsafe { (self.api.audio_set_mute)(self.player, c_int::from(muted)) };
+        }
+
+        pub fn rate(&self) -> f32 {
+            // SAFETY: `self.player` est valide.
+            let rate = unsafe { (self.api.player_get_rate)(self.player) };
+            if rate > 0.0 { rate } else { 1.0 }
+        }
+
+        pub fn set_rate(&self, rate: f32) {
+            // SAFETY: `self.player` est valide.
+            unsafe { (self.api.player_set_rate)(self.player, rate) };
+        }
+
         pub fn frame_newer_than(&self, last_version: u64) -> Option<Frame> {
             self.shared.frame.newer_than(last_version)
         }
@@ -538,6 +602,14 @@ mod imp {
             0
         }
         pub fn set_volume(&self, _volume: i32) {}
+        pub fn is_muted(&self) -> bool {
+            false
+        }
+        pub fn set_muted(&self, _muted: bool) {}
+        pub fn rate(&self) -> f32 {
+            1.0
+        }
+        pub fn set_rate(&self, _rate: f32) {}
         pub fn frame_newer_than(&self, _last_version: u64) -> Option<Frame> {
             None
         }
@@ -547,6 +619,18 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeking_stays_within_the_media() {
+        let secs = Duration::from_secs;
+        assert_eq!(seek_target(secs(35), Some(secs(190)), 10), secs(45));
+        assert_eq!(seek_target(secs(35), Some(secs(190)), -10), secs(25));
+        // Jamais avant le début, ni après la fin.
+        assert_eq!(seek_target(secs(5), Some(secs(190)), -10), secs(0));
+        assert_eq!(seek_target(secs(185), Some(secs(190)), 10), secs(190));
+        // Durée inconnue : seul le début borne.
+        assert_eq!(seek_target(secs(185), None, 10), secs(195));
+    }
 
     fn env(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
         move |name| {

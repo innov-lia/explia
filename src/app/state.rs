@@ -129,6 +129,9 @@ pub(in crate::app) struct Playback {
     pub(in crate::app) slot: PlayerSlot,
     /// Vidéo en plein écran (double-clic sur la vidéo du volet de détail).
     pub(in crate::app) fullscreen: bool,
+    /// Instant (s) du dernier mouvement de souris ou de la dernière commande : en plein
+    /// écran, la barre de commandes reste visible un moment après.
+    pub(in crate::app) activity_at: f64,
 }
 
 impl Default for Playback {
@@ -136,6 +139,7 @@ impl Default for Playback {
         Self {
             slot: PlayerSlot::None,
             fullscreen: false,
+            activity_at: 0.0,
         }
     }
 }

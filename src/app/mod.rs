@@ -35,7 +35,7 @@ mod split;
 mod state;
 mod ui;
 
-use action_manager::{Action, Command};
+use action_manager::{Action, Command, PlayerCommand};
 use event_manager::ItemView;
 use split::SplitView;
 use state::{Navigation, Playback, PreviewData, ScanState, SidebarState};
@@ -89,6 +89,9 @@ const OPTION_IMAGES_LABEL: &str = "🖼 Images";
 const OPTION_VIDEOS_LABEL: &str = "🎬 Vidéos";
 const GALLERY_DRIVES_WIDTH: f32 = 170.0;
 const GALLERY_NAV_WIDTH: f32 = 210.0;
+/// En plein écran, durée (s) pendant laquelle la barre du lecteur reste visible après le dernier
+/// mouvement de souris.
+const FULLSCREEN_BAR_SECONDS: f64 = 2.5;
 /// Agrandissement du texte et des boutons des barres du haut, en points.
 const TOOLBAR_TEXT_BOOST: f32 = 2.0;
 

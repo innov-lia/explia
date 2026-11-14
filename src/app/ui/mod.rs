@@ -29,6 +29,10 @@ impl eframe::App for ExpliaApp {
 
         // Vidéo en plein écran : elle seule occupe la fenêtre.
         if self.player.fullscreen && self.fullscreen_video(ui) {
+            // Le clavier commande le lecteur en plein écran (voir `input_events`).
+            if let Some(action) = action.take() {
+                self.apply(&ctx, action);
+            }
             self.track_window_size(&ctx);
             self.save_settings_if_changed();
             return;
