@@ -69,6 +69,7 @@ Facultatif : installez [VLC](https://www.videolan.org) (3.x, 64 bits) pour **lir
 - **Barre d'adresse** (en haut de la zone centrale) : fil d'Ariane cliquable (`Ce PC > D: > Projets > …`) dont chaque mot s'illumine au survol. Dans votre dossier utilisateur, le chemin commence par `Home` (`Ce PC > Home > Vidéos`) plutôt que `C: > Users > nom`. Un clic sur l'espace libre permet de saisir un chemin (`C:\Users`, `D:`, `Ce PC`) ; Entrée valide, Échap annule.
 - **Ligne `..`** en tête de liste pour remonter ; **Retour arrière** ou **←** aussi (le dossier quitté est resélectionné). Double-clic ou **→** pour entrer dans un dossier.
 - **Onglets** : clic droit sur un dossier « 🗂 Ouvrir dans un nouvel onglet », ou **Ctrl+T** pour le dossier affiché. Les onglets s'affichent dans la barre de menus après **Option** ; un clic en change, « × » ou **Ctrl+W** le ferme.
+- Les dossiers sont **lus en arrière-plan** : la fenêtre reste réactive sur un lecteur réseau lent (un indicateur tourne dans la barre d'état) ; le dossier s'affiche dès qu'il est lu, et en cas d'erreur on reste sur le dossier précédent.
 - La zone centrale n'affiche jamais la liste des lecteurs : « Ce PC » (bouton de la barre de menus, fil d'Ariane, ou **←** au plus haut d'un lecteur) ouvre l'intercalaire *Ce PC* de la barre latérale.
 
 ### Barre latérale en « classeur »
@@ -230,13 +231,14 @@ cargo clippy -- -D warnings
 | Fichier | Rôle |
 | --- | --- |
 | `src/main.rs` | Point d'entrée, fenêtre `eframe`. |
-| `src/app/mod.rs` | État de l'application : navigation, onglets, parcours, aperçus, lecteur, réglages. |
+| `src/app/mod.rs` | Logique de l'application : navigation (dossiers lus en arrière-plan), onglets, parcours, aperçus, lecteur, réglages. |
+| `src/app/state.rs` | État regroupé par domaine : navigation, barre latérale, recherche et parcours, lecture, aperçus. |
 | `src/app/event_manager.rs` | Réception centralisée des événements egui (clics, double-clics, clic maintenu, glisser, clavier, dépôt) et déclaration de tous les raccourcis. |
 | `src/app/action_manager.rs` | Catalogue des commandes (définies une fois : libellé, raccourci, action) et exécution des actions. |
 | `src/app/context_menu_manager.rs` | Menus contextuels construits selon la sélection et les capacités de la source. |
 | `src/app/ui/` | Dessin seulement : barres, barre latérale, liste, colonnes, grilles, volet de détail, éléments réutilisables. |
 | `src/selection_manager.rs` | Sélection, multi-sélection (un seul type à la fois), ancre Maj+clic, éléments visés. |
-| `src/storage_manager/` | Interface commune des sources (`Connector`), capacités, erreurs ; connecteur local (disques et partages SMB). |
+| `src/storage_manager/` | Interface commune des sources (`Connector`), identifiants d'éléments (`ItemId`), capacités, erreurs ; connecteur local (disques et partages SMB). |
 | `src/clipboard_manager.rs` | Copier / Couper (références) et lecture du contenu à coller. |
 | `src/fs_nav.rs` | Entrées de dossier (nom, taille, dates, caché), listage, fil d'Ariane (Home), niveaux de colonnes, taille d'un dossier. |
 | `src/view.rs` | Tri, recherche par motifs (`*`, `?`), colonnes, modes d'affichage, défilement. |
