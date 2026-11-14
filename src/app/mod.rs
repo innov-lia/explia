@@ -10,6 +10,7 @@ use eframe::egui::containers::menu::{MenuButton, MenuConfig};
 use eframe::egui::{self, PopupCloseBehavior};
 
 use crate::clipboard;
+use crate::clipboard_manager::{ClipMode, ClipboardManager};
 use crate::copy::CopyReport;
 use crate::dates;
 use crate::dragdrop;
@@ -31,7 +32,7 @@ mod action_manager;
 mod context_menu_manager;
 mod event_manager;
 
-use action_manager::Action;
+use action_manager::{Action, Command};
 use event_manager::ItemView;
 
 /// Part de l'écran occupée par la fenêtre à la première ouverture.
@@ -219,10 +220,11 @@ enum Event {
         generation: u64,
         text: String,
     },
-    /// Fin d'une copie (Coller, dépôt) dans le dossier `dest`.
+    /// Fin d'une copie (Coller, dépôt) ou d'un déplacement (Couper, Coller) vers `dest`.
     CopyDone {
         dest: PathBuf,
         report: CopyReport,
+        mode: ClipMode,
     },
     /// Fin d'un parcours ; `truncated` : résultats limités.
     ScanDone {
@@ -380,6 +382,8 @@ pub struct ExpliaApp {
     selection: Selection,
     /// Sources de stockage : toutes les opérations sur les fichiers passent par elles.
     storage: StorageManager,
+    /// Copier / Couper : références placées dans le presse-papiers de Windows.
+    clipboard: ClipboardManager,
     /// Attente de confirmation de la suppression de la multi-sélection.
     confirm_delete: bool,
     /// Un clic maintenu vient d'être traité : le relâchement ne doit pas compter comme un clic.
@@ -476,6 +480,7 @@ impl ExpliaApp {
             saved_settings: settings,
             selection: Selection::default(),
             storage: StorageManager::default(),
+            clipboard: ClipboardManager::default(),
             confirm_delete: false,
             long_press_done: false,
             drag_out_done: false,
@@ -669,8 +674,9 @@ impl ExpliaApp {
         self.visible = self.filtered_and_sorted(&self.entries, true);
     }
 
-    /// Copie des éléments dans `dest`, en arrière-plan (jamais d'écrasement, voir `copy`).
-    fn start_copy(&mut self, sources: Vec<PathBuf>, dest: PathBuf) {
+    /// Copie (ou déplace, `ClipMode::Cut`) des éléments dans `dest`, en arrière-plan, par le
+    /// stockage (jamais d'écrasement).
+    fn start_transfer(&mut self, sources: Vec<PathBuf>, dest: PathBuf, mode: ClipMode) {
         if sources.is_empty() {
             return;
         }
@@ -678,10 +684,18 @@ impl ExpliaApp {
             self.error = Some("Une copie est déjà en cours.".to_string());
             return;
         }
+        // Un fichier en cours de lecture est verrouillé : on libère VLC avant de le déplacer.
+        if mode == ClipMode::Cut {
+            self.stop_player();
+        }
         self.copying = true;
         self.error = None;
+        let what = match mode {
+            ClipMode::Copy => "Copie",
+            ClipMode::Cut => "Déplacement",
+        };
         self.notice = Some(format!(
-            "Copie de {} élément(s) vers « {} »…",
+            "{what} de {} élément(s) vers « {} »…",
             sources.len(),
             dest.display()
         ));
@@ -689,17 +703,26 @@ impl ExpliaApp {
         let ctx = self.ctx.clone();
         let storage = self.storage.clone();
         std::thread::spawn(move || {
-            let report = storage.copy_into(&sources, &dest);
-            let _ = tx.send(Event::CopyDone { dest, report });
+            let report = match mode {
+                ClipMode::Copy => storage.copy_into(&sources, &dest),
+                ClipMode::Cut => storage.move_into(&sources, &dest),
+            };
+            let _ = tx.send(Event::CopyDone { dest, report, mode });
             ctx.request_repaint();
         });
     }
 
-    /// Fin d'une copie : bilan dans la barre d'état et dossier relu s'il est affiché.
-    fn on_copy_done(&mut self, dest: &Path, report: CopyReport) {
+    /// Fin d'une copie ou d'un déplacement : bilan dans la barre d'état, dossier relu.
+    fn on_copy_done(&mut self, dest: &Path, report: CopyReport, mode: ClipMode) {
         self.copying = false;
-        if self.location == Location::Dir(dest.to_path_buf()) {
+        if mode == ClipMode::Cut && !report.copied.is_empty() && report.errors.is_empty() {
+            self.clipboard.moved();
+        }
+        // Après un déplacement, des éléments ont quitté le dossier affiché.
+        if mode == ClipMode::Cut || self.location == Location::Dir(dest.to_path_buf()) {
             self.refresh_listing();
+        }
+        if self.location == Location::Dir(dest.to_path_buf()) {
             // Les éléments copiés sont sélectionnés (un seul type à la fois).
             if let Some(first) = report.copied.first()
                 && let Some(entry) = self.visible.iter().find(|e| e.path == *first).cloned()
@@ -708,20 +731,24 @@ impl ExpliaApp {
                 self.select(&ctx, entry);
             }
         }
-        let copied = report.copied.len();
+        let done = format!(
+            "{} élément(s) {}",
+            report.copied.len(),
+            match mode {
+                ClipMode::Copy => "copié(s)",
+                ClipMode::Cut => "déplacé(s)",
+            }
+        );
         if report.errors.is_empty() {
             self.error = None;
-            self.notice = Some(format!(
-                "{copied} élément(s) copié(s) dans « {} ».",
-                dest.display()
-            ));
+            self.notice = Some(format!("{done} dans « {} ».", dest.display()));
         } else {
             let first = &report.errors[0];
             let more = report.errors.len() - 1;
             self.error = Some(if more > 0 {
-                format!("{copied} élément(s) copié(s) ; {first} (et {more} autre(s) problème(s))")
+                format!("{done} ; {first} (et {more} autre(s) problème(s))")
             } else {
-                format!("{copied} élément(s) copié(s) ; {first}")
+                format!("{done} ; {first}")
             });
         }
     }
@@ -1265,6 +1292,33 @@ impl ExpliaApp {
         self.refresh_listing();
     }
 
+    /// Crée un dossier dans `parent` (qui devient le dossier affiché), le sélectionne et le
+    /// passe en renommage, comme l'Explorateur.
+    fn create_folder(&mut self, ctx: &egui::Context, parent: PathBuf) {
+        if self.location != Location::Dir(parent.clone()) {
+            self.navigate(Location::Dir(parent.clone()));
+            if self.location != Location::Dir(parent.clone()) {
+                return;
+            }
+        }
+        if self.results.is_some() {
+            self.close_results();
+        }
+        match self.storage.create_folder(&parent) {
+            Ok(path) => {
+                self.refresh_listing();
+                self.error = None;
+                self.notice = Some(format!("Dossier créé : « {} ».", favorite_name(&path)));
+                if let Some(entry) = self.visible.iter().find(|e| e.path == path).cloned() {
+                    self.select(ctx, entry.clone());
+                    self.scroll_to_index = self.cursor_index();
+                    self.start_rename(&entry);
+                }
+            }
+            Err(err) => self.error = Some(err.to_string()),
+        }
+    }
+
     /// Démarre le renommage de `entry` directement dans la liste.
     fn start_rename(&mut self, entry: &Entry) {
         // Seul un élément de la liste affichée se renomme (pas le dossier courant lui-même).
@@ -1564,7 +1618,7 @@ impl ExpliaApp {
                         results_changed = true;
                     }
                 }
-                Event::CopyDone { dest, report } => self.on_copy_done(&dest, report),
+                Event::CopyDone { dest, report, mode } => self.on_copy_done(&dest, report, mode),
                 Event::ScanProgress { generation, text } => {
                     if generation == self.scan_generation.load(Ordering::SeqCst)
                         && let Some(results) = &mut self.results
@@ -2661,7 +2715,7 @@ impl ExpliaApp {
                                         let response = table_row(
                                             ui,
                                             highlighted,
-                                            entry.hidden,
+                                            entry.hidden || self.clipboard.is_cut(&entry.path),
                                             &format!("{icon} {}", entry.name),
                                             row_columns,
                                             &cells,
@@ -3075,7 +3129,7 @@ impl ExpliaApp {
                 let response = table_row(
                     ui,
                     is_selected,
-                    entry.hidden,
+                    entry.hidden || self.clipboard.is_cut(&entry.path),
                     &self.row_label(icon, entry),
                     &columns,
                     &cells,
@@ -3265,6 +3319,24 @@ impl ExpliaApp {
                 action = Some(Action::CopyPath(dir.to_path_buf()));
             }
         });
+        // Nouveau dossier, Coller ici, Propriétés : selon ce que la source permet.
+        let caps = self.storage.capabilities(dir);
+        let folder = Entry::folder_at(dir);
+        let targets = std::slice::from_ref(&folder);
+        ui.horizontal_wrapped(|ui| {
+            for (allowed, command) in [
+                (caps.create_folder, Command::CreateFolder),
+                (caps.copy_into, Command::Paste),
+                (caps.properties, Command::ShowProperties),
+            ] {
+                if allowed
+                    && let Some(chosen) =
+                        context_menu_manager::command_button(ui, command, &folder, targets)
+                {
+                    action = Some(chosen);
+                }
+            }
+        });
         ui.add_space(4.0);
         action
     }
@@ -3281,18 +3353,22 @@ impl ExpliaApp {
         ui.weak("Clic maintenu ou clic sur une ligne pour ajouter ou retirer.");
         ui.add_space(6.0);
         let mut copy_action = None;
-        if ui
-            .button("📋 Copier  (Ctrl+C)")
-            .on_hover_text("À coller dans l'Explorateur, sur le Bureau ou ailleurs (Ctrl+V)")
-            .clicked()
-        {
-            copy_action = Some(Action::CopyFiles(
-                self.selection
-                    .multi
-                    .iter()
-                    .map(|e| e.path.clone())
-                    .collect(),
-            ));
+        if let Some(first) = self.selection.multi.first() {
+            let caps = self.storage.capabilities(&first.path);
+            ui.horizontal_wrapped(|ui| {
+                for (allowed, command) in [(true, Command::Copy), (caps.move_items, Command::Cut)] {
+                    if allowed
+                        && let Some(chosen) = context_menu_manager::command_button(
+                            ui,
+                            command,
+                            first,
+                            &self.selection.multi,
+                        )
+                    {
+                        copy_action = Some(chosen);
+                    }
+                }
+            });
         }
         let action = self
             .edit_controls(ui, &format!("{count} {kind}"), None, true)
@@ -3509,13 +3585,6 @@ impl ExpliaApp {
                 ui.label("Dossier courant");
                 ui.add_space(6.0);
                 let tools = self.folder_tools(ui, path);
-                if ui
-                    .add_enabled(clipboard::has_files(), egui::Button::new("📥 Coller ici"))
-                    .on_hover_text("Copie ici les fichiers du presse-papiers (Ctrl+V)")
-                    .clicked()
-                {
-                    return Some(Action::Paste { dest: path.clone() });
-                }
                 if ui
                     .button("🗑 Supprimer ce dossier")
                     .on_hover_text("Envoie le dossier affiché à la corbeille (après confirmation)")
@@ -4584,6 +4653,66 @@ mod tests {
             app.selection.single.as_ref().map(|e| e.name.clone()),
             Some("photo - Copie.jpg".to_string())
         );
+    }
+
+    #[test]
+    fn cut_items_are_moved_without_overwriting_and_leave_the_folder() {
+        let tree = TempTree::new("cut");
+        tree.file("ici/a.txt", b"nouveau");
+        tree.file("ici/garder.txt", b"g");
+        tree.file("dest/a.txt", b"ancien");
+        let here = tree.0.join("ici");
+        let dest = tree.0.join("dest");
+        let (mut app, ctx) = app_in(&tree);
+        app.navigate(Location::Dir(here.clone()));
+        app.start_transfer(vec![here.join("a.txt")], dest.clone(), ClipMode::Cut);
+        let start = Instant::now();
+        while app.copying {
+            app.poll_events(&ctx);
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Le dossier affiché est relu : l'élément déplacé n'y est plus.
+        assert_eq!(names(&app), ["garder.txt"]);
+        assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"ancien");
+        assert_eq!(
+            std::fs::read(dest.join("a - Copie.txt")).unwrap(),
+            b"nouveau"
+        );
+        assert!(app.notice.as_deref().unwrap_or("").contains("déplacé"));
+    }
+
+    #[test]
+    fn a_new_folder_is_created_selected_and_renamed_in_place() {
+        let tree = TempTree::new("new-folder");
+        tree.dir("existant");
+        let (mut app, ctx) = app_in(&tree);
+        app.apply(
+            &ctx,
+            Action::CreateFolder {
+                parent: tree.0.clone(),
+            },
+        );
+        assert!(tree.0.join("Nouveau dossier").is_dir());
+        assert_eq!(names(&app), ["Nouveau dossier", "existant"]);
+        assert_eq!(
+            app.selection.single.as_ref().map(|e| e.name.clone()),
+            Some("Nouveau dossier".to_string())
+        );
+        assert_eq!(
+            app.renaming.as_ref().map(|r| r.path.clone()),
+            Some(tree.0.join("Nouveau dossier"))
+        );
+        // Dans un sous-dossier (menu « Nouveau dossier » d'un dossier) : on y entre d'abord.
+        app.renaming = None;
+        app.apply(
+            &ctx,
+            Action::CreateFolder {
+                parent: tree.0.join("existant"),
+            },
+        );
+        assert_eq!(app.location, Location::Dir(tree.0.join("existant")));
+        assert!(tree.0.join("existant/Nouveau dossier").is_dir());
     }
 
     #[test]

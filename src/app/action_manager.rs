@@ -21,10 +21,16 @@ pub(super) enum Command {
     OpenInNewTab,
     /// Ouvre le dossier qui contient l'élément et l'y sélectionne.
     ShowInFolder,
-    /// Place les éléments dans le presse-papiers de Windows.
+    /// Place les éléments dans le presse-papiers de Windows (copie au collage).
     Copy,
+    /// Place les éléments dans le presse-papiers de Windows (déplacement au collage).
+    Cut,
     /// Colle le presse-papiers dans le dossier.
     Paste,
+    /// Crée un dossier (« Nouveau dossier ») dans le dossier visé.
+    CreateFolder,
+    /// Fenêtre « Propriétés » de Windows.
+    ShowProperties,
     CopyPath,
     Rename,
     /// Supprime (corbeille, après confirmation).
@@ -56,7 +62,13 @@ impl Command {
                 return format!("📋 Copier ({count} éléments)  ({})", Shortcut::Copy.label());
             }
             Command::Copy => "📋 Copier",
+            Command::Cut if count > 1 => {
+                return format!("✂ Couper ({count} éléments)  ({})", Shortcut::Cut.label());
+            }
+            Command::Cut => "✂ Couper",
             Command::Paste => "📥 Coller dans ce dossier",
+            Command::CreateFolder => "📁 Nouveau dossier",
+            Command::ShowProperties => "Propriétés",
             Command::CopyPath => "Copier le chemin",
             Command::Rename => "Renommer",
             Command::Delete => "🗑 Supprimer",
@@ -77,7 +89,9 @@ impl Command {
     pub(super) fn shortcut(self) -> Option<&'static str> {
         let shortcut = match self {
             Command::Copy => Shortcut::Copy,
+            Command::Cut => Shortcut::Cut,
             Command::Rename => Shortcut::Rename,
+            Command::ShowProperties => Shortcut::Properties,
             Command::Delete => Shortcut::Delete,
             _ => return None,
         };
@@ -90,6 +104,10 @@ impl Command {
             Command::Copy => {
                 Some("À coller dans l'Explorateur, sur le Bureau ou ailleurs (Ctrl+V)")
             }
+            Command::Cut => {
+                Some("À coller dans un autre dossier (Ctrl+V) : les éléments y sont déplacés")
+            }
+            Command::CreateFolder => Some("Crée un dossier vide, puis le renomme (Ctrl+Maj+N)"),
             _ => None,
         }
     }
@@ -112,6 +130,9 @@ impl Command {
                 None => Action::Go(Location::Dir(path)),
             },
             Command::Copy => Action::CopyFiles(paths()),
+            Command::Cut => Action::CutFiles(paths()),
+            Command::CreateFolder => Action::CreateFolder { parent: path },
+            Command::ShowProperties => Action::ShowProperties(path),
             Command::Paste => Action::Paste { dest: path },
             Command::CopyPath => Action::CopyPath(path),
             Command::Rename => Action::StartRename(target.clone()),
@@ -194,7 +215,16 @@ pub(super) enum Action {
     CopyPath(PathBuf),
     /// Copie des fichiers ou dossiers dans le presse-papiers de Windows (à coller ailleurs).
     CopyFiles(Vec<PathBuf>),
-    /// Colle dans `dest` les fichiers et dossiers du presse-papiers (copie, sans écrasement).
+    /// Coupe des fichiers ou dossiers : le prochain collage les déplacera.
+    CutFiles(Vec<PathBuf>),
+    /// Crée un dossier dans `parent` (affiché au besoin), puis le passe en renommage.
+    CreateFolder {
+        parent: PathBuf,
+    },
+    /// Ouvre la fenêtre « Propriétés » de Windows.
+    ShowProperties(PathBuf),
+    /// Colle dans `dest` les fichiers et dossiers du presse-papiers : copie, ou déplacement
+    /// s'ils ont été coupés (jamais d'écrasement).
     Paste {
         dest: PathBuf,
     },
@@ -351,7 +381,7 @@ impl ExpliaApp {
                 self.error = None;
                 self.notice = Some(format!("Chemin copié : {text}"));
             }
-            Action::CopyFiles(paths) => match clipboard::copy_files(&paths) {
+            Action::CopyFiles(paths) => match self.clipboard.copy(&paths) {
                 Ok(()) => {
                     self.error = None;
                     self.notice = Some(format!(
@@ -361,14 +391,32 @@ impl ExpliaApp {
                 }
                 Err(message) => self.error = Some(message),
             },
-            Action::Paste { dest } => match clipboard::clipboard_files() {
-                Ok(files) if files.is_empty() => {
-                    self.notice = Some("Rien à coller : copiez d'abord des fichiers.".to_string());
+            Action::CutFiles(paths) => match self.clipboard.cut(&paths) {
+                Ok(()) => {
+                    self.error = None;
+                    self.notice = Some(format!(
+                        "{} élément(s) coupé(s) : collez-les dans un autre dossier (Ctrl+V) pour les y déplacer.",
+                        paths.len()
+                    ));
                 }
-                Ok(files) => self.start_copy(files, dest),
                 Err(message) => self.error = Some(message),
             },
-            Action::CopyInto { sources, dest } => self.start_copy(sources, dest),
+            Action::Paste { dest } => match self.clipboard.content() {
+                Ok(None) => {
+                    self.notice = Some("Rien à coller : copiez d'abord des fichiers.".to_string());
+                }
+                Ok(Some(content)) => self.start_transfer(content.paths, dest, content.mode),
+                Err(message) => self.error = Some(message),
+            },
+            Action::CopyInto { sources, dest } => {
+                self.start_transfer(sources, dest, ClipMode::Copy);
+            }
+            Action::CreateFolder { parent } => self.create_folder(ctx, parent),
+            Action::ShowProperties(path) => {
+                if let Err(err) = self.storage.show_properties(&path) {
+                    self.error = Some(err.to_string());
+                }
+            }
             Action::DragOut(paths) => {
                 self.drag_out_done = true;
                 let result = dragdrop::drag_files_out(&paths);

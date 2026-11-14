@@ -71,6 +71,12 @@ pub struct Capabilities {
     pub rename: bool,
     /// Recevoir une copie (Coller, dépôt).
     pub copy_into: bool,
+    /// Déplacer des éléments (Couper puis Coller).
+    pub move_items: bool,
+    /// Créer un dossier.
+    pub create_folder: bool,
+    /// Afficher les propriétés (fenêtre de Windows).
+    pub properties: bool,
     /// Supprimer (après confirmation dans ExPLIA).
     pub delete: bool,
     /// La suppression passe par la corbeille. Sinon (partage réseau, disque amovible),
@@ -87,6 +93,9 @@ impl Capabilities {
         open: false,
         rename: false,
         copy_into: false,
+        move_items: false,
+        create_folder: false,
+        properties: false,
         delete: false,
         recycle_bin: false,
         shell: false,
@@ -191,6 +200,24 @@ pub trait Connector: Send + Sync {
         }
     }
 
+    /// Déplace `sources` dans `dest`, sans jamais écraser.
+    fn move_into(&self, _sources: &[PathBuf], _dest: &Path) -> CopyReport {
+        CopyReport {
+            errors: vec![StorageError::Unsupported("déplacer").to_string()],
+            ..CopyReport::default()
+        }
+    }
+
+    /// Crée un dossier vide sous un nom libre dans `parent` ; renvoie son chemin.
+    fn create_folder(&self, _parent: &Path) -> Result<PathBuf, StorageError> {
+        Err(StorageError::Unsupported("créer un dossier"))
+    }
+
+    /// Affiche les propriétés de l'élément.
+    fn show_properties(&self, _path: &Path) -> Result<(), StorageError> {
+        Err(StorageError::Unsupported("propriétés"))
+    }
+
     /// Supprime (corbeille si la source en a une).
     fn delete(&self, _paths: &[PathBuf]) -> Result<(), StorageError> {
         Err(StorageError::Unsupported("supprimer"))
@@ -265,6 +292,29 @@ impl StorageManager {
         }
     }
 
+    /// Déplace vers `dest` : sources et destination doivent relever du même connecteur.
+    pub fn move_into(&self, sources: &[PathBuf], dest: &Path) -> CopyReport {
+        match self.connector_for(dest) {
+            Some(connector) if sources.iter().all(|s| connector.handles(s)) => {
+                connector.move_into(sources, dest)
+            }
+            _ => CopyReport {
+                errors: vec![
+                    StorageError::Unsupported("déplacer entre ces deux sources").to_string(),
+                ],
+                ..CopyReport::default()
+            },
+        }
+    }
+
+    pub fn create_folder(&self, parent: &Path) -> Result<PathBuf, StorageError> {
+        self.with(parent, |c| c.create_folder(parent))
+    }
+
+    pub fn show_properties(&self, path: &Path) -> Result<(), StorageError> {
+        self.with(path, |c| c.show_properties(path))
+    }
+
     /// Supprime des éléments, regroupés par connecteur.
     pub fn delete(&self, paths: &[PathBuf]) -> Result<(), StorageError> {
         let Some(first) = paths.first() else {
@@ -318,6 +368,13 @@ mod tests {
         let path = Path::new(r"R:\doc.txt");
         assert!(storage.capabilities(path).list);
         assert!(!storage.capabilities(path).rename);
+        assert!(!storage.capabilities(path).move_items);
+        assert_eq!(
+            storage.create_folder(Path::new(r"R:\")),
+            Err(StorageError::Unsupported("créer un dossier"))
+        );
+        let moved = storage.move_into(&[PathBuf::from(r"R:")], Path::new(r"R:"));
+        assert!(moved.copied.is_empty() && moved.errors.len() == 1);
         assert_eq!(
             storage.rename(path, "x.txt"),
             Err(StorageError::Unsupported("renommer"))

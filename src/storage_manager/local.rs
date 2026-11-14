@@ -32,6 +32,9 @@ impl Connector for LocalConnector {
             open: true,
             rename: true,
             copy_into: true,
+            move_items: true,
+            create_folder: true,
+            properties: true,
             delete: true,
             recycle_bin,
             shell: true,
@@ -56,6 +59,18 @@ impl Connector for LocalConnector {
 
     fn copy_into(&self, sources: &[PathBuf], dest: &Path) -> CopyReport {
         copy::copy_into(sources, dest)
+    }
+
+    fn move_into(&self, sources: &[PathBuf], dest: &Path) -> CopyReport {
+        copy::move_into(sources, dest)
+    }
+
+    fn create_folder(&self, parent: &Path) -> Result<PathBuf, StorageError> {
+        fileops::create_folder(parent).map_err(StorageError::Other)
+    }
+
+    fn show_properties(&self, path: &Path) -> Result<(), StorageError> {
+        launch::show_properties(path).map_err(StorageError::Other)
     }
 
     fn delete(&self, paths: &[PathBuf]) -> Result<(), StorageError> {
@@ -93,6 +108,10 @@ mod tests {
         let report = storage.copy_into(&[renamed], &dir.join("dest"));
         assert!(report.errors.is_empty());
         assert!(dir.join("dest").join("b.txt").is_file());
+        let folder = storage.create_folder(&dir).unwrap();
+        let report = storage.move_into(&[dir.join("b.txt")], &folder);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(folder.join("b.txt").is_file() && !dir.join("b.txt").exists());
         assert!(matches!(
             storage.list(&dir.join("absent")),
             Err(StorageError::NotFound(_))

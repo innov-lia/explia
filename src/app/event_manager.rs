@@ -19,9 +19,12 @@ pub(super) enum Shortcut {
     NewTab,
     CloseTab,
     Copy,
+    Cut,
     Paste,
     Rename,
     Delete,
+    NewFolder,
+    Properties,
     /// Confirme la suppression demandée.
     Confirm,
     /// Annule la confirmation, ou quitte la multi-sélection.
@@ -38,28 +41,37 @@ impl Shortcut {
             Shortcut::NewTab => "Ctrl+T",
             Shortcut::CloseTab => "Ctrl+W",
             Shortcut::Copy => "Ctrl+C",
+            Shortcut::Cut => "Ctrl+X",
             Shortcut::Paste => "Ctrl+V",
             Shortcut::Rename => "F2",
             Shortcut::Delete => "Suppr",
+            Shortcut::NewFolder => "Ctrl+Maj+N",
+            Shortcut::Properties => "Alt+Entrée",
             Shortcut::Confirm => "Entrée",
             Shortcut::Cancel => "Échap",
             Shortcut::PlayPause => "Espace",
         }
     }
 
-    /// Touche et besoin de Ctrl. Copier et Coller sont lus autrement (voir `pressed`).
-    fn binding(self) -> (egui::Key, bool) {
+    /// Touche et modificateurs exigés. Copier, Couper et Coller sont lus autrement (voir
+    /// `pressed`).
+    fn binding(self) -> (egui::Key, egui::Modifiers) {
+        let ctrl = egui::Modifiers::COMMAND;
+        let none = egui::Modifiers::NONE;
         match self {
-            Shortcut::Find => (egui::Key::F, true),
-            Shortcut::NewTab => (egui::Key::T, true),
-            Shortcut::CloseTab => (egui::Key::W, true),
-            Shortcut::Copy => (egui::Key::C, true),
-            Shortcut::Paste => (egui::Key::V, true),
-            Shortcut::Rename => (egui::Key::F2, false),
-            Shortcut::Delete => (egui::Key::Delete, false),
-            Shortcut::Confirm => (egui::Key::Enter, false),
-            Shortcut::Cancel => (egui::Key::Escape, false),
-            Shortcut::PlayPause => (egui::Key::Space, false),
+            Shortcut::Find => (egui::Key::F, ctrl),
+            Shortcut::NewTab => (egui::Key::T, ctrl),
+            Shortcut::CloseTab => (egui::Key::W, ctrl),
+            Shortcut::Copy => (egui::Key::C, ctrl),
+            Shortcut::Cut => (egui::Key::X, ctrl),
+            Shortcut::Paste => (egui::Key::V, ctrl),
+            Shortcut::Rename => (egui::Key::F2, none),
+            Shortcut::Delete => (egui::Key::Delete, none),
+            Shortcut::NewFolder => (egui::Key::N, ctrl | egui::Modifiers::SHIFT),
+            Shortcut::Properties => (egui::Key::Enter, egui::Modifiers::ALT),
+            Shortcut::Confirm => (egui::Key::Enter, none),
+            Shortcut::Cancel => (egui::Key::Escape, none),
+            Shortcut::PlayPause => (egui::Key::Space, none),
         }
     }
 
@@ -70,11 +82,14 @@ impl Shortcut {
     fn pressed(self, input: &egui::InputState) -> bool {
         match self {
             Shortcut::Copy => return input.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+            Shortcut::Cut => return input.events.iter().any(|e| matches!(e, egui::Event::Cut)),
             Shortcut::Paste => return input.focused && clipboard::paste_keys_down(),
             _ => {}
         }
-        let (key, ctrl) = self.binding();
-        (!ctrl || input.modifiers.command) && input.key_pressed(key)
+        let (key, modifiers) = self.binding();
+        // Les modificateurs demandés doivent être enfoncés ; Entrée seule ne vaut pas Alt+Entrée.
+        let alt_ok = modifiers.alt || !input.modifiers.alt || key != egui::Key::Enter;
+        input.modifiers.contains(modifiers) && alt_ok && input.key_pressed(key)
     }
 }
 
@@ -331,7 +346,7 @@ impl ExpliaApp {
         if paste_down
             && !self.paste_keys_were_down
             && !typing
-            && clipboard::has_files()
+            && self.clipboard.has_files()
             && let Location::Dir(current) = &self.location
         {
             action = Some(Action::Paste {
@@ -356,16 +371,30 @@ impl ExpliaApp {
                 _ => None,
             };
             let targets = self.delete_targets();
-            if pressed(Shortcut::Confirm) && self.confirm_delete {
+            let paths = || targets.iter().map(|e| e.path.clone()).collect::<Vec<_>>();
+            let current_dir = match &self.location {
+                Location::Dir(dir) => Some(dir.clone()),
+                Location::ThisPc => None,
+            };
+            if pressed(Shortcut::Properties) {
+                action = single
+                    .map(|e| e.path.clone())
+                    .or(current_dir)
+                    .map(Action::ShowProperties);
+            } else if pressed(Shortcut::Confirm) && self.confirm_delete {
                 action = Some(Action::ConfirmDelete);
+            } else if pressed(Shortcut::NewFolder)
+                && let Some(parent) = current_dir
+            {
+                action = Some(Action::CreateFolder { parent });
             } else if pressed(Shortcut::Rename)
                 && let Some(entry) = single
             {
                 action = Some(Action::StartRename(entry.clone()));
             } else if pressed(Shortcut::Copy) && !targets.is_empty() {
-                action = Some(Action::CopyFiles(
-                    targets.into_iter().map(|e| e.path).collect(),
-                ));
+                action = Some(Action::CopyFiles(paths()));
+            } else if pressed(Shortcut::Cut) && !targets.is_empty() {
+                action = Some(Action::CutFiles(paths()));
             } else if pressed(Shortcut::Delete) && !targets.is_empty() {
                 action = Some(Action::AskDelete);
             } else if !self.confirm_delete {
@@ -648,9 +677,12 @@ mod tests {
             Shortcut::NewTab,
             Shortcut::CloseTab,
             Shortcut::Copy,
+            Shortcut::Cut,
             Shortcut::Paste,
             Shortcut::Rename,
             Shortcut::Delete,
+            Shortcut::NewFolder,
+            Shortcut::Properties,
             Shortcut::Confirm,
             Shortcut::Cancel,
             Shortcut::PlayPause,

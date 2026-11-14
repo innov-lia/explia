@@ -66,9 +66,14 @@ pub(super) fn entry_items(context: &EntryMenuContext) -> Vec<MenuItem> {
         }
     };
     add(true, Command::Copy);
+    add(caps.move_items, Command::Cut);
     add(single && is_dir && caps.copy_into, Command::Paste);
     add(single && allow_rename && caps.rename, Command::Rename);
     add(caps.delete, Command::Delete);
+    add(
+        single && is_dir && caps.create_folder,
+        Command::CreateFolder,
+    );
     add(single, Command::CopyPath);
     items.push(MenuItem::Separator);
     // Raccourcis d'ExPLIA et outils.
@@ -91,6 +96,10 @@ pub(super) fn entry_items(context: &EntryMenuContext) -> Vec<MenuItem> {
     add(single && is_dir && caps.shell, Command::PowerShell);
     add(single && is_dir && caps.shell, Command::PowerShellAdmin);
     add(single && executable, application);
+    items.push(MenuItem::Separator);
+    if single && caps.properties {
+        items.push(MenuItem::Command(Command::ShowProperties));
+    }
     tidy(items)
 }
 
@@ -111,6 +120,25 @@ pub(super) fn application_items(caps: Capabilities, removable: bool) -> Vec<Menu
 /// Menu d'un favori de la barre latérale.
 pub(super) fn favorite_items() -> Vec<MenuItem> {
     vec![MenuItem::Command(Command::RemoveFavorite)]
+}
+
+/// Bouton d'une commande (menu, volet de détail) ; renvoie son action si elle est choisie.
+pub(super) fn command_button(
+    ui: &mut egui::Ui,
+    command: Command,
+    entry: &Entry,
+    targets: &[Entry],
+) -> Option<Action> {
+    // Coller n'est possible que si le presse-papiers contient des fichiers.
+    let enabled = command != Command::Paste || clipboard::has_files();
+    let label = command.label(&entry.path, entry.is_dir, targets.len());
+    let mut response = ui.add_enabled(enabled, egui::Button::new(label));
+    if let Some(hint) = command.hint() {
+        response = response.on_hover_text(hint);
+    }
+    response
+        .clicked()
+        .then(|| command.action(entry, targets.to_vec()))
 }
 
 /// Retire les séparateurs en tête, en fin et en double.
@@ -143,15 +171,8 @@ pub(super) fn show(
             ui.separator();
             continue;
         };
-        // Coller n'est possible que si le presse-papiers contient des fichiers.
-        let enabled = command != Command::Paste || clipboard::has_files();
-        let label = command.label(&entry.path, entry.is_dir, targets.len());
-        let mut response = ui.add_enabled(enabled, egui::Button::new(label));
-        if let Some(hint) = command.hint() {
-            response = response.on_hover_text(hint);
-        }
-        if response.clicked() {
-            action = Some(command.action(entry, targets.to_vec()));
+        if let Some(chosen) = command_button(ui, command, entry, targets) {
+            action = Some(chosen);
             ui.close();
         }
     }
@@ -218,6 +239,9 @@ mod tests {
             open: true,
             rename: true,
             copy_into: true,
+            move_items: true,
+            create_folder: true,
+            properties: true,
             delete: true,
             recycle_bin: true,
             shell: true,
@@ -253,11 +277,14 @@ mod tests {
             Command::Open,
             Command::OpenInNewTab,
             Command::Copy,
+            Command::Cut,
             Command::Paste,
             Command::Rename,
             Command::Delete,
+            Command::CreateFolder,
             Command::AddFavorite,
             Command::PowerShell,
+            Command::ShowProperties,
         ] {
             assert!(found.contains(&expected), "{expected:?} manque");
         }
@@ -279,7 +306,7 @@ mod tests {
     fn a_multi_selection_keeps_only_group_commands() {
         let file = item(r"C:\a.txt", ItemKind::File);
         let found = commands(&menu(&file, 3, all_caps()));
-        assert_eq!(found, [Command::Copy, Command::Delete]);
+        assert_eq!(found, [Command::Copy, Command::Cut, Command::Delete]);
     }
 
     #[test]
@@ -292,10 +319,13 @@ mod tests {
         };
         let found = commands(&menu(&folder, 1, caps));
         for hidden in [
+            Command::Cut,
             Command::Paste,
             Command::Rename,
             Command::Delete,
+            Command::CreateFolder,
             Command::PowerShell,
+            Command::ShowProperties,
         ] {
             assert!(
                 !found.contains(&hidden),

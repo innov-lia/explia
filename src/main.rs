@@ -3,6 +3,7 @@
 
 mod app;
 mod clipboard;
+mod clipboard_manager;
 mod copy;
 mod dates;
 mod dragdrop;
