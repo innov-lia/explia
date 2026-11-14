@@ -25,7 +25,7 @@ impl eframe::App for ExpliaApp {
         let mut action = self.input_events(&ctx);
         // La cible d'un glisser se repère à nouveau pendant le dessin de cette image.
         self.drop_target.replace(None);
-        self.drop_hint(&ctx);
+        self.drop_zones.borrow_mut().clear();
 
         // Vidéo en plein écran : elle seule occupe la fenêtre.
         if self.player.fullscreen && self.fullscreen_video(ui) {
@@ -70,6 +70,7 @@ impl eframe::App for ExpliaApp {
         });
 
         self.drag_hint(&ctx);
+        self.publish_drop_zones(&ctx);
         if let Some(action) = action {
             self.apply(&ctx, action);
         }

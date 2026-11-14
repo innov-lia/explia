@@ -457,15 +457,27 @@ impl ExpliaApp {
             }
             Action::DragOut(paths) => {
                 self.drag_out_done = true;
+                // Un fichier en cours de lecture est verrouillé : il ne pourrait pas être déplacé.
+                self.stop_player();
                 let result = dragdrop::drag_files_out(&paths);
-                self.drag_out_ended_at = Some(ctx.input(|i| i.time));
+                let now = ctx.input(|i| i.time);
+                self.drag_out_ended_at = Some(now);
+                let count = paths.len();
                 match result {
-                    Ok(true) => {
+                    Ok(Some(outcome)) => {
                         self.error = None;
-                        self.notice =
-                            Some(format!("{} élément(s) déposé(s) (copie).", paths.len()));
+                        self.notice = Some(match outcome {
+                            DragOutcome::Copied => format!("{count} élément(s) copié(s)."),
+                            DragOutcome::Moved => format!("{count} élément(s) déplacé(s)."),
+                            DragOutcome::Linked => format!("{count} raccourci(s) créé(s)."),
+                        });
+                        // La destination a pu déplacer les éléments : le dossier est relu tout
+                        // de suite, puis encore un peu plus tard (l'Explorateur finit en fond).
+                        self.refresh_listing(AfterListing::None);
+                        self.refresh_at = Some(now + 1.5);
+                        ctx.request_repaint_after(std::time::Duration::from_millis(1600));
                     }
-                    Ok(false) => {}
+                    Ok(None) => {}
                     Err(message) => self.error = Some(message),
                 }
             }

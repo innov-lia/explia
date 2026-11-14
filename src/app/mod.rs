@@ -12,7 +12,8 @@ use eframe::egui::{self, PopupCloseBehavior};
 use crate::clipboard;
 use crate::clipboard_manager::{ClipMode, ClipboardManager};
 use crate::dates;
-use crate::dragdrop;
+use crate::dragdrop::{self, DragOutcome};
+use crate::droptarget;
 use crate::favorites::Favorites;
 use crate::fileops;
 use crate::fs_nav::{self, Entry, Location};
@@ -183,6 +184,15 @@ impl Column {
             Column::Size => 95.0,
         }
     }
+}
+
+/// Glisser venu d'une autre application, au-dessus de la fenêtre.
+struct ExternalHover {
+    paths: Vec<PathBuf>,
+    /// Position du pointeur, en points.
+    position: egui::Pos2,
+    ctrl: bool,
+    shift: bool,
 }
 
 /// Lecture de dossier en cours (`request_listing`).
@@ -395,6 +405,18 @@ pub struct ExpliaApp {
     drag: Option<Vec<PathBuf>>,
     /// Dossier sous le pointeur qui recevra le dépôt, repéré pendant le dessin de l'image.
     drop_target: std::cell::RefCell<Option<PathBuf>>,
+    /// Zones de dépôt dessinées pendant l'image en cours.
+    drop_zones: std::cell::RefCell<Vec<(egui::Rect, PathBuf)>>,
+    /// Zones de la dernière image, lues par la cible de dépôt de Windows.
+    shared_zones: Arc<Mutex<event_manager::DropZones>>,
+    /// Survol et dépôts venus d'une autre application (cible de dépôt de Windows).
+    external_drop: Arc<Mutex<droptarget::DropEvents>>,
+    /// Glisser venu d'une autre application au-dessus de la fenêtre : éléments et position.
+    external_hover: Option<ExternalHover>,
+    /// Fenêtre de Windows d'ExPLIA, une fois connue.
+    hwnd: Option<isize>,
+    /// Relecture du dossier prévue à cet instant (après un glisser vers l'Explorateur).
+    refresh_at: Option<f64>,
     /// Dernier numéro de lecture de dossier attribué (tous volets confondus).
     listing_serial: u64,
     /// Nombre de volets secondaires créés (distingue leurs compteurs).
@@ -461,6 +483,12 @@ impl ExpliaApp {
             split: None,
             drag: None,
             drop_target: std::cell::RefCell::new(None),
+            drop_zones: std::cell::RefCell::new(Vec::new()),
+            shared_zones: Arc::new(Mutex::new(event_manager::DropZones::default())),
+            external_drop: Arc::new(Mutex::new(droptarget::DropEvents::default())),
+            external_hover: None,
+            hwnd: None,
+            refresh_at: None,
             listing_serial: 0,
             pane_serial: 0,
             confirm_delete: false,

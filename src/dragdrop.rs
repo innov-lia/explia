@@ -1,5 +1,7 @@
 //! Glisser des fichiers et dossiers d'ExPLIA vers une autre application (Bureau, Explorateur,
-//! messagerie…), en mode **copie** uniquement : c'est l'application de destination qui copie.
+//! messagerie…), comme depuis l'Explorateur : la destination choisit, selon les touches, de
+//! déplacer (même lecteur), copier (autre lecteur, ou Ctrl) ou créer un raccourci (Alt). C'est
+//! elle qui écrit ; ExPLIA ne supprime jamais rien à la fin d'un glisser.
 //!
 //! Windows fournit l'objet de données (`SHCreateDataObject`, le même que l'Explorateur) ; ExPLIA
 //! n'implémente que la « source » du glisser (`IDropSource`), qui suit le bouton de la souris
@@ -16,11 +18,21 @@ pub fn common_parent(paths: &[PathBuf]) -> Option<&Path> {
         .then_some(first)
 }
 
+/// Ce que la destination a fait des éléments glissés.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragOutcome {
+    Copied,
+    /// Déplacés (par la destination).
+    Moved,
+    /// Raccourcis créés.
+    Linked,
+}
+
 /// Lance le glisser-déposer des éléments ; la fonction rend la main quand l'utilisateur lâche
-/// le bouton (ou appuie sur Échap). Renvoie `Ok(true)` si les éléments ont été déposés.
-pub fn drag_files_out(paths: &[PathBuf]) -> Result<bool, String> {
+/// le bouton (ou appuie sur Échap). `None` : glisser abandonné.
+pub fn drag_files_out(paths: &[PathBuf]) -> Result<Option<DragOutcome>, String> {
     if paths.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     if common_parent(paths).is_none() {
         return Err("Glisser : les éléments doivent venir du même dossier.".to_string());
@@ -35,8 +47,10 @@ mod imp {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use super::DragOutcome;
     use windows_sys::Win32::System::Ole::{
-        DROPEFFECT_COPY, DoDragDrop, OleInitialize, OleUninitialize,
+        DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DoDragDrop, OleInitialize,
+        OleUninitialize,
     };
     use windows_sys::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows_sys::Win32::UI::Shell::{
@@ -158,7 +172,7 @@ mod imp {
         }
     }
 
-    pub fn drag(paths: &[PathBuf]) -> Result<bool, String> {
+    pub fn drag(paths: &[PathBuf]) -> Result<Option<DragOutcome>, String> {
         // SAFETY : appelé sur le thread de la fenêtre ; `OleInitialize` est apparié à
         // `OleUninitialize` quand il réussit (S_OK ou S_FALSE si déjà initialisé).
         let ole = unsafe { OleInitialize(std::ptr::null()) };
@@ -170,7 +184,7 @@ mod imp {
         result
     }
 
-    fn drag_inner(paths: &[PathBuf]) -> Result<bool, String> {
+    fn drag_inner(paths: &[PathBuf]) -> Result<Option<DragOutcome>, String> {
         let mut absolute = Pidls(Vec::new());
         for path in paths {
             let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -226,12 +240,13 @@ mod imp {
         };
         let mut effect: u32 = 0;
         // SAFETY : `data` est un `IDataObject` valide, `source` vit jusqu'au retour de l'appel
-        // (DoDragDrop ne le conserve pas). Copie seulement : jamais de déplacement.
+        // (DoDragDrop ne le conserve pas). La destination choisit copie, déplacement ou
+        // raccourci ; c'est elle qui écrit.
         let hr = unsafe {
             DoDragDrop(
                 data,
                 (&mut source as *mut DropSource).cast::<c_void>(),
-                DROPEFFECT_COPY,
+                DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK,
                 &mut effect,
             )
         };
@@ -243,7 +258,18 @@ mod imp {
             release(data);
         }
         drop(folder_guard);
-        Ok(hr == DRAGDROP_S_DROP && effect != 0)
+        if hr != DRAGDROP_S_DROP {
+            return Ok(None);
+        }
+        // Un déplacement « optimisé » (fait par la destination) peut être annoncé comme nul :
+        // l'appelant vérifie ce qui reste à la source.
+        Ok(Some(if effect & DROPEFFECT_MOVE != 0 {
+            DragOutcome::Moved
+        } else if effect & DROPEFFECT_LINK != 0 {
+            DragOutcome::Linked
+        } else {
+            DragOutcome::Copied
+        }))
     }
 }
 
@@ -251,7 +277,7 @@ mod imp {
 mod imp {
     use std::path::PathBuf;
 
-    pub fn drag(_paths: &[PathBuf]) -> Result<bool, String> {
+    pub fn drag(_paths: &[PathBuf]) -> Result<Option<super::DragOutcome>, String> {
         Err("Glisser disponible uniquement sous Windows.".to_string())
     }
 }

@@ -258,6 +258,48 @@ pub(super) fn translate(
     }
 }
 
+/// Zones de dépôt de la dernière image, partagées avec la cible de dépôt de Windows (qui
+/// répond pendant le survol, hors des images d'egui).
+#[derive(Debug, Default)]
+pub(super) struct DropZones {
+    /// Dossiers visibles (lignes, lecteurs, favoris, autre volet) et leur rectangle, en points.
+    pub zones: Vec<(egui::Rect, PathBuf)>,
+    /// Dossier affiché : reçoit ce qui est déposé ailleurs dans la fenêtre.
+    pub fallback: Option<PathBuf>,
+    pub pixels_per_point: f32,
+}
+
+/// Dossier qui recevrait des fichiers venus d'une autre application, et copie ou déplacement
+/// (comme l'Explorateur, dans la limite de ce que la source autorise). `None` : refusé.
+pub(super) fn resolve_drop(
+    zones: &DropZones,
+    request: &droptarget::DropRequest,
+) -> Option<(PathBuf, droptarget::DropKind)> {
+    let scale = zones.pixels_per_point.max(0.1);
+    let position = egui::pos2(request.x / scale, request.y / scale);
+    let paths = &request.paths;
+    let dest = zones
+        .zones
+        .iter()
+        .find(|(rect, dir)| rect.contains(position) && accepts_drop(paths, dir))
+        .map(|(_, dir)| dir.clone())
+        .or_else(|| {
+            zones
+                .fallback
+                .clone()
+                .filter(|dir| accepts_drop(paths, dir))
+        })?;
+    let wanted = drop_mode(paths, &dest, request.ctrl, request.shift);
+    let kind = match wanted {
+        ClipMode::Cut if request.can_move => droptarget::DropKind::Move,
+        ClipMode::Copy if request.can_copy => droptarget::DropKind::Copy,
+        _ if request.can_copy => droptarget::DropKind::Copy,
+        _ if request.can_move => droptarget::DropKind::Move,
+        _ => return None,
+    };
+    Some((dest, kind))
+}
+
 /// Un dépôt dans `dir` a un sens : ce n'est ni un élément glissé, ni l'un de ses
 /// sous-dossiers, ni le dossier d'où viennent déjà tous les éléments.
 pub(super) fn accepts_drop(sources: &[PathBuf], dir: &Path) -> bool {
@@ -410,6 +452,17 @@ impl ExpliaApp {
         self.paste_keys_were_down = paste_down;
         if let Some(drop) = self.dropped_files(ctx) {
             action = Some(drop);
+        }
+        if let Some(drop) = self.external_drops(ctx) {
+            action = Some(drop);
+        }
+        // Après un glisser vers l'Explorateur, il déplace parfois les éléments un peu plus tard.
+        if self
+            .refresh_at
+            .is_some_and(|at| ctx.input(|i| i.time) >= at)
+        {
+            self.refresh_at = None;
+            self.refresh_listing(AfterListing::None);
         }
         if let Some(drag) = self.drag_events(ctx) {
             action = Some(drag);
@@ -589,8 +642,14 @@ impl ExpliaApp {
                 i.modifiers.shift,
             )
         });
+        // Pointeur hors de la fenêtre : egui le voit sortir, et Windows le confirme (souris
+        // capturée, egui peut garder la dernière position intérieure).
         let inside_window = position.is_some_and(|p| ctx.content_rect().contains(p))
-            && ctx.input(|i| i.pointer.hover_pos().is_some());
+            && ctx.input(|i| i.pointer.hover_pos().is_some())
+            && self
+                .hwnd
+                .and_then(droptarget::cursor_inside)
+                .unwrap_or(true);
         if released {
             self.drag = None;
             let dest = self.drop_target.borrow_mut().take()?;
@@ -612,13 +671,16 @@ impl ExpliaApp {
         None
     }
 
-    /// Pendant un glisser, `response` (une ligne, un lecteur, un favori…) accepte le dépôt dans
-    /// `dir` si le pointeur est dessus : elle est encadrée et devient la cible.
+    /// `response` (une ligne, un lecteur, un favori…) reçoit ce qu'on dépose sur elle dans
+    /// `dir`. Pendant un glisser (depuis ExPLIA ou une autre application), si le pointeur est
+    /// dessus, elle est encadrée et devient la cible.
     pub(super) fn drop_zone(&self, ui: &egui::Ui, response: &egui::Response, dir: &Path) {
-        let over = self.drag.is_some()
-            && ui
-                .input(|i| i.pointer.latest_pos())
-                .is_some_and(|p| response.rect.contains(p));
+        self.drop_zones
+            .borrow_mut()
+            .push((response.rect, dir.to_path_buf()));
+        let over = self
+            .drag_pointer(ui.ctx())
+            .is_some_and(|p| response.rect.contains(p));
         if over && self.offer_drop_target(dir) {
             ui.painter().rect_stroke(
                 response.rect,
@@ -629,10 +691,29 @@ impl ExpliaApp {
         }
     }
 
+    /// Éléments en cours de glisser au-dessus de la fenêtre : ceux d'ExPLIA, sinon ceux d'une
+    /// autre application.
+    pub(super) fn dragged_paths(&self) -> Option<&[PathBuf]> {
+        self.drag.as_deref().or_else(|| {
+            self.external_hover
+                .as_ref()
+                .map(|hover| hover.paths.as_slice())
+        })
+    }
+
+    /// Position du pointeur pendant un glisser au-dessus de la fenêtre.
+    pub(super) fn drag_pointer(&self, ctx: &egui::Context) -> Option<egui::Pos2> {
+        if self.drag.is_some() {
+            ctx.input(|i| i.pointer.latest_pos())
+        } else {
+            self.external_hover.as_ref().map(|hover| hover.position)
+        }
+    }
+
     /// Propose `dir` comme cible du glisser en cours ; refusé si c'est un élément glissé (ou un
     /// de ses sous-dossiers) ou le dossier d'où viennent tous les éléments.
     pub(super) fn offer_drop_target(&self, dir: &Path) -> bool {
-        let Some(sources) = &self.drag else {
+        let Some(sources) = self.dragged_paths() else {
             return false;
         };
         if !accepts_drop(sources, dir) {
@@ -640,6 +721,84 @@ impl ExpliaApp {
         }
         *self.drop_target.borrow_mut() = Some(dir.to_path_buf());
         true
+    }
+
+    /// Glisser venu d'une autre application (Explorateur, Bureau…) : survol en cours, et dépôts
+    /// reçus par la cible de dépôt de Windows, à copier ou déplacer dans le dossier visé.
+    fn external_drops(&mut self, ctx: &egui::Context) -> Option<Action> {
+        let (hover, dropped) = {
+            let mut events = self
+                .external_drop
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (events.hover.clone(), std::mem::take(&mut events.dropped))
+        };
+        let scale = ctx.pixels_per_point().max(0.1);
+        self.external_hover = hover.map(|request| ExternalHover {
+            position: egui::pos2(request.x / scale, request.y / scale),
+            ctrl: request.ctrl,
+            shift: request.shift,
+            paths: request.paths,
+        });
+        let zones = self
+            .shared_zones
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut action = None;
+        for (request, kind) in dropped {
+            if let Some((dest, _)) = resolve_drop(&zones, &request) {
+                action = Some(Action::TransferInto {
+                    sources: request.paths,
+                    dest,
+                    mode: match kind {
+                        droptarget::DropKind::Copy => ClipMode::Copy,
+                        droptarget::DropKind::Move => ClipMode::Cut,
+                    },
+                });
+            }
+        }
+        action
+    }
+
+    /// Fin d'image : les zones de dépôt dessinées sont confiées à la cible de dépôt de Windows.
+    pub(super) fn publish_drop_zones(&self, ctx: &egui::Context) {
+        let zones = self.drop_zones.take();
+        let fallback = match &self.nav.location {
+            Location::Dir(dir) => Some(dir.clone()),
+            Location::ThisPc => None,
+        };
+        *self
+            .shared_zones
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = DropZones {
+            zones,
+            fallback,
+            pixels_per_point: ctx.pixels_per_point(),
+        };
+    }
+
+    /// Fenêtre de Windows d'ExPLIA : y enregistre la cible de dépôt (glisser depuis
+    /// l'Explorateur, le Bureau…).
+    pub fn attach_window(&mut self, hwnd: Option<isize>) {
+        let Some(hwnd) = hwnd else {
+            return;
+        };
+        self.hwnd = Some(hwnd);
+        let zones = Arc::clone(&self.shared_zones);
+        let ctx = self.ctx.clone();
+        let handlers = droptarget::Handlers {
+            decide: Box::new(move |request| {
+                let zones = zones
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                resolve_drop(&zones, request).map(|(_, kind)| kind)
+            }),
+            events: Arc::clone(&self.external_drop),
+            wake: Box::new(move || ctx.request_repaint()),
+        };
+        if let Err(message) = droptarget::register(hwnd, handlers) {
+            self.error = Some(message);
+        }
     }
 
     /// Éléments glissés depuis l'Explorateur (ou le Bureau) et déposés dans la fenêtre : ils
@@ -834,6 +993,49 @@ mod tests {
         assert!(!accepts_drop(&sources, Path::new(r"C:\Projets")));
         assert!(accepts_drop(&sources, Path::new(r"C:\Archives")));
         assert!(!accepts_drop(&[], Path::new(r"C:\Archives")));
+    }
+
+    fn request(path: &str, x: f32, y: f32) -> droptarget::DropRequest {
+        droptarget::DropRequest {
+            paths: vec![PathBuf::from(path)],
+            x,
+            y,
+            ctrl: false,
+            shift: false,
+            can_copy: true,
+            can_move: true,
+        }
+    }
+
+    #[test]
+    fn files_from_explorer_land_on_the_folder_under_the_pointer() {
+        let zones = DropZones {
+            zones: vec![(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 20.0)),
+                PathBuf::from(r"C:\Docs\Archives"),
+            )],
+            fallback: Some(PathBuf::from(r"C:\Docs")),
+            pixels_per_point: 2.0,
+        };
+        // (100, 20) pixels = (50, 10) points : sur la ligne « Archives », même lecteur.
+        let (dest, kind) = resolve_drop(&zones, &request(r"C:\Bureau\a.txt", 100.0, 20.0)).unwrap();
+        assert_eq!(dest, PathBuf::from(r"C:\Docs\Archives"));
+        assert_eq!(kind, droptarget::DropKind::Move);
+        // Ailleurs dans la fenêtre : le dossier affiché ; autre lecteur : copie.
+        let (dest, kind) = resolve_drop(&zones, &request(r"D:\a.txt", 100.0, 300.0)).unwrap();
+        assert_eq!(dest, PathBuf::from(r"C:\Docs"));
+        assert_eq!(kind, droptarget::DropKind::Copy);
+        // La source n'autorise que la copie : jamais de déplacement.
+        let copy_only = droptarget::DropRequest {
+            can_move: false,
+            ..request(r"C:\Bureau\a.txt", 100.0, 20.0)
+        };
+        assert_eq!(
+            resolve_drop(&zones, &copy_only).unwrap().1,
+            droptarget::DropKind::Copy
+        );
+        // Des fichiers déjà dans le dossier affiché, lâchés à côté : rien à faire.
+        assert!(resolve_drop(&zones, &request(r"C:\Docs\a.txt", 100.0, 300.0)).is_none());
     }
 
     #[test]

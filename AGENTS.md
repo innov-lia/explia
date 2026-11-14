@@ -117,9 +117,14 @@ fichier. **Exceptions autorisées par l'utilisateur** :
   retirée qu'après une copie complète et réussie (décision de l'utilisateur) ;
   * sur demande explicite de l'utilisateur, elle peut **créer un dossier** dans le
   dossier affiché, sous un nom libre (« Nouveau dossier », « Nouveau dossier (2) »…) ;
-  * elle peut placer des fichiers dans le presse-papiers de Windows (Copier) et les
-  faire glisser vers une autre application (Bureau, Explorateur) en mode **copie** :
-  c'est l'application de destination qui écrit.
+  * elle peut placer des fichiers dans le presse-papiers de Windows (Copier, Couper) et
+  les faire glisser vers une autre application (Bureau, Explorateur) : la destination
+  choisit copie, déplacement ou raccourci selon les touches, comme depuis l'Explorateur,
+  et c'est elle qui écrit ; ExPLIA ne supprime jamais rien de lui-même à l'issue d'un
+  glisser (décision de l'utilisateur) ;
+  * des fichiers glissés depuis une autre application (ou depuis ExPLIA) et lâchés sur
+  un dossier d'ExPLIA y sont copiés ou déplacés, comme dans l'Explorateur (même lecteur :
+  déplacement ; autre lecteur : copie ; Ctrl copie, Maj déplace), sans jamais écraser.
 Aucun autre fichier ne doit être écrit.
 * Ne jamais lancer de commande destructive ou modifier des fichiers en
 dehors du dépôt.

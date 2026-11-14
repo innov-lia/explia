@@ -1051,6 +1051,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "image",
+ "raw-window-handle",
  "windows-sys 0.61.2",
  "zip",
 ]

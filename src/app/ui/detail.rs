@@ -740,27 +740,4 @@ impl ExpliaApp {
         }
         true
     }
-
-    /// Pendant le survol de fichiers venus d'une autre application : voile et consigne.
-    pub(in crate::app) fn drop_hint(&self, ctx: &egui::Context) {
-        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
-        if hovering
-            && !self.drag_out_done
-            && let Location::Dir(current) = &self.nav.location
-        {
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::unique("drop-hint"),
-            ));
-            let screen = ctx.content_rect();
-            painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(90));
-            painter.text(
-                screen.center(),
-                egui::Align2::CENTER_CENTER,
-                format!("Déposer pour copier dans « {} »", favorite_name(current)),
-                egui::FontId::proportional(22.0),
-                egui::Color32::WHITE,
-            );
-        }
-    }
 }

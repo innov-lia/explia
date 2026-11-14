@@ -113,8 +113,8 @@ La barre latérale, à gauche, montre la liste de l'intercalaire choisi ; les in
 - **Menus contextuels** : seules les commandes pertinentes s'affichent (fichier, dossier, exécutable, multi-sélection) et celles que la source permet.
 - **Glisser-déposer**, comme dans l'Explorateur : appuyez sur une ligne (fichier ou dossier, ou toute la sélection) et faites glisser.
   - **Sur un dossier** de la liste ou de la vue en colonnes, sur un lecteur, un dossier de Home ou un favori de la barre latérale, ou sur l'autre volet (affichage fractionné) : la cible est encadrée et une étiquette dit ce qui va se passer. Sur le même lecteur, les éléments sont **déplacés** ; vers un autre lecteur, **copiés** ; **Ctrl** force la copie, **Maj** le déplacement. Jamais d'écrasement.
-  - **Hors de la fenêtre** : le glisser continue vers le Bureau ou l'Explorateur (copie).
-  - À l'inverse, déposez dans ExPLIA des fichiers venus de l'Explorateur : ils sont copiés dans le dossier affiché, avec les mêmes règles que Coller.
+  - **Hors de la fenêtre** : le glisser continue vers le Bureau, l'Explorateur ou une autre application, qui choisit comme pour l'Explorateur : **déplacer** (même lecteur, ou Maj), **copier** (autre lecteur, ou Ctrl), **raccourci** (Alt). Le dossier est relu ensuite.
+  - **Depuis l'Explorateur ou le Bureau** : lâchez des fichiers ou dossiers **sur un dossier** d'ExPLIA (ligne, colonne, lecteur, favori, autre volet), ou ailleurs dans la fenêtre pour le dossier affiché ; ils y sont déplacés ou copiés selon les mêmes règles, avec la même étiquette. Jamais d'écrasement.
 - **Ouvrir** : double-clic (application par défaut). Clic droit sur un exécutable : « Exécuter » ou « Exécuter en tant qu'administrateur » (UAC).
 
 ### Nettoyage : doublons et gros fichiers
@@ -180,7 +180,7 @@ ExPLIA n'embarque aucun lecteur. Pour lire les vidéos et les sons **dans ExPLIA
 - Préversion (0.1.0), testée sur Windows 11 uniquement ; exécutable non signé.
 - Lecture intégrée vérifiée avec une vidéo AVI ; MP4, MKV et le son restent à valider plus largement.
 - Pas de miniatures pour les vidéos (icône) ; pas de barre de progression pour Coller (bilan à la fin).
-- Glisser vers l'extérieur : des éléments d'un même dossier à la fois, en copie seulement. Un dépôt venu de l'Explorateur va dans le dossier affiché (pas sur un dossier précis de la liste).
+- Glisser vers l'extérieur : des éléments d'un même dossier à la fois. Les raccourcis (Alt) ne se créent que vers une autre application, pas dans ExPLIA.
 - Pas encore disponible : créer un fichier, historique précédent / suivant, onglets mémorisés d'une session à l'autre, navigation dans les partages réseau, connecteurs SharePoint et OneDrive (Microsoft Graph : architecture prête, connexion reportée).
 
 ## Contribuer
@@ -252,7 +252,8 @@ cargo clippy -- -D warnings
 | `src/scan.rs` | Parcours en lecture seule : recherche récursive, doublons (empreintes), gros fichiers. |
 | `src/copy.rs` | Copie et déplacement de fichiers et dossiers sans écrasement (Coller, dépôt, Couper). |
 | `src/clipboard.rs` | Presse-papiers de Windows : liste de fichiers (`CF_HDROP`), lecture et écriture. |
-| `src/dragdrop.rs` | Glisser vers une autre application (OLE `DoDragDrop`, copie seulement). |
+| `src/dragdrop.rs` | Glisser vers une autre application (OLE `DoDragDrop` : copie, déplacement ou raccourci au choix de la destination). |
+| `src/droptarget.rs` | Cible de dépôt Windows (`IDropTarget`) : fichiers lâchés sur un dossier d'ExPLIA, position et touches (code `unsafe` isolé ici). |
 | `src/fileops.rs` | Renommage (validation du nom Windows, refus d'écraser) et création de dossier. |
 | `src/trash.rs` | Envoi à la corbeille (`SHFileOperationW` avec `FOF_ALLOWUNDO`). |
 | `src/launch.rs` | Ouverture d'un fichier, lancement d'un exécutable ou de PowerShell (`ShellExecuteW`, UAC), fenêtre Propriétés. |
