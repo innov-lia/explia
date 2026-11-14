@@ -39,13 +39,19 @@ impl eframe::App for ExpliaApp {
             ui.add_space(4.0);
         });
         egui::Panel::bottom("status").show(ui, |ui| {
-            if let Some(error) = &self.error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
-            } else if let Some(notice) = &self.notice {
-                ui.label(notice);
-            } else {
-                ui.label(self.status_text());
-            }
+            ui.horizontal(|ui| {
+                // Dossier en cours de lecture (partage réseau lent, par exemple).
+                if self.listing_pending() {
+                    ui.spinner();
+                }
+                if let Some(error) = &self.error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                } else if let Some(notice) = &self.notice {
+                    ui.label(notice);
+                } else {
+                    ui.label(self.status_text());
+                }
+            });
         });
         // Barre latérale à gauche ; volet latéral (détail, ou navigation si le détail est au
         // centre) à gauche ou à droite selon la disposition ; le reste au centre.

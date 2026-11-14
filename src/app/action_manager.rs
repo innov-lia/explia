@@ -284,11 +284,7 @@ impl ExpliaApp {
             Action::Go(location) => self.navigate(location),
             Action::SidebarGo(path) => {
                 let index = self.sidebar_items().iter().position(|p| *p == path);
-                self.navigate(Location::Dir(path));
-                if index.is_some() {
-                    self.sidebar_focus = true;
-                    self.sidebar_cursor = index;
-                }
+                self.open_location(Location::Dir(path), AfterListing::None, index);
             }
             Action::SidebarTab(tab) => self.set_sidebar_tab(tab),
             Action::SortBy(key) => {
@@ -417,7 +413,7 @@ impl ExpliaApp {
             Action::CopyInto { sources, dest } => {
                 self.start_transfer(sources, dest, ClipMode::Copy);
             }
-            Action::CreateFolder { parent } => self.create_folder(ctx, parent),
+            Action::CreateFolder { parent } => self.create_folder(parent),
             Action::ShowProperties(path) => {
                 if let Err(err) = self.storage.show_properties(&ItemId::path(&path)) {
                     self.error = Some(err.to_string());
@@ -507,8 +503,7 @@ impl ExpliaApp {
             }
             Action::ConfirmDelete => self.delete_selection(),
             Action::EnterFolder(path) => {
-                self.select_first_after_nav = true;
-                self.navigate(Location::Dir(path));
+                self.open_location(Location::Dir(path), AfterListing::SelectFirst, None);
             }
             Action::SetViewMode(mode) => {
                 self.view_mode = mode;
@@ -520,8 +515,8 @@ impl ExpliaApp {
                 self.recompute_visible();
             }
             Action::GoSelect { dir, file } => {
-                self.select_path_after_nav = Some(file);
-                self.navigate(Location::Dir(dir));
+                let then = AfterListing::Select(ItemId::path(file));
+                self.open_location(Location::Dir(dir), then, None);
             }
             Action::ColumnMultiSelect {
                 dir,
@@ -529,24 +524,15 @@ impl ExpliaApp {
                 entry,
                 range,
             } => {
-                self.select_path_after_nav = anchor;
-                self.navigate(Location::Dir(dir.clone()));
-                if self.location == Location::Dir(dir) {
-                    let target = self
-                        .visible
-                        .iter()
-                        .find(|e| e.path == entry.path)
-                        .cloned()
-                        .unwrap_or(entry);
-                    if range {
-                        self.select_range(target);
-                    } else {
-                        self.toggle_multi(target);
-                    }
-                }
+                let then = AfterListing::Extend {
+                    anchor: anchor.map(ItemId::path),
+                    entry: Box::new(entry),
+                    range,
+                };
+                self.open_location(Location::Dir(dir), then, None);
             }
             Action::StartRename(entry) => self.start_rename(&entry),
-            Action::CommitRename { path, new_name } => self.commit_rename(ctx, path, &new_name),
+            Action::CommitRename { path, new_name } => self.commit_rename(path, &new_name),
             Action::CancelRename => self.renaming = None,
         }
     }

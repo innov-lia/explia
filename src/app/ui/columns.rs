@@ -14,14 +14,10 @@ impl ExpliaApp {
         // Dans Home, les colonnes commencent sous le dossier de l'utilisateur (la barre latérale
         // montre déjà son contenu) : pas de colonnes C:, Users, nom.
         let crumbs = fs_nav::column_levels(&current, self.home.as_deref());
-        // Listings des dossiers traversés (le dernier est le dossier courant : `self.visible`).
+        // Listings des dossiers traversés (le dernier est le dossier courant : `self.visible`),
+        // lus en arrière-plan : une colonne reste vide le temps de sa lecture.
         for (_, path) in crumbs.iter().take(crumbs.len().saturating_sub(1)) {
-            if !self.column_cache.contains_key(path)
-                && let Ok(list) = self.storage.list(&ItemId::path(path))
-            {
-                let processed = self.filtered_and_sorted(&list, false);
-                self.column_cache.insert(path.clone(), processed);
-            }
+            self.request_column(path);
         }
         // Toutes les colonnes ont la même largeur fixe ; la dernière porte aussi les informations
         // de la liste (taille, dates…) et, si la place le permet, occupe le reste de la largeur.
