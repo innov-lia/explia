@@ -396,7 +396,16 @@ impl ExpliaApp {
 
     /// Appui maintenu sur l'élément et pointeur déplacé : début d'un glisser vers l'extérieur.
     fn drag_out(&self, ui: &egui::Ui, response: &egui::Response) -> bool {
-        if self.drag_out_done || !response.is_pointer_button_down_on() {
+        // L'appui a commencé sur cet élément (lignes et tuiles sentent le glisser).
+        let pressed_here = response.is_pointer_button_down_on()
+            || ui
+                .input(|i| {
+                    i.pointer
+                        .press_origin()
+                        .filter(|_| i.pointer.primary_down())
+                })
+                .is_some_and(|origin| response.rect.contains(origin));
+        if self.drag_out_done || !pressed_here {
             return false;
         }
         ui.input(

@@ -2495,6 +2495,46 @@ mod tests {
     }
 
     #[test]
+    fn pressing_and_moving_on_a_row_starts_a_drag() {
+        let tree = TempTree::new("row-drag");
+        tree.file("photo.jpg", b"img");
+        let (app, ctx) = app_in(&tree);
+        let entry = app.visible[0].clone();
+        let start = egui::pos2(30.0, 10.0);
+        // Image 1 : appui sur la ligne ; image 2 : le pointeur a bougé de 40 points.
+        let frames = [
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            vec![egui::Event::PointerMoved(start + egui::vec2(40.0, 20.0))],
+        ];
+        let mut action = None;
+        for events in frames {
+            let raw = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(raw, |ui| {
+                let response = ui::table_row(ui, false, false, "📄 photo.jpg", &[], &[]);
+                if let Some(gesture) = app.item_events(ui, &response, &entry, ItemView::List) {
+                    action = Some(gesture);
+                }
+            });
+            // Pas de rendu dans les tests : les textures préparées sont simplement oubliées.
+            let mut output = output;
+            output.textures_delta.clear();
+        }
+        // La ligne se prend à la souris : le glisser commence (sans défiler la liste).
+        assert!(matches!(&action, Some(Action::DragStart(paths)) if *paths == [entry.path]));
+    }
+
+    #[test]
     fn tabs_open_switch_and_close() {
         let tree = TempTree::new("tabs");
         tree.dir("a");

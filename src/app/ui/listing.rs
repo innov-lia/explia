@@ -140,35 +140,53 @@ impl ExpliaApp {
             (None, Some(hover)) => (hover.ctrl, hover.shift),
             _ => ctx.input(|i| (i.modifiers.command, i.modifiers.shift)),
         };
-        let text = match &target {
-            Some(dest) => {
-                let verb = match event_manager::drop_mode(paths, dest, ctrl, shift) {
-                    ClipMode::Copy => "Copier",
-                    ClipMode::Cut => "Déplacer",
-                };
+        // L'élément tenu en main : son icône et son nom (et le nombre des autres).
+        let first = &paths[0];
+        let icon = if first.is_dir() { "📁" } else { "📄" };
+        let mut held = format!("{icon} {}", favorite_name(first));
+        if paths.len() > 1 {
+            held += &format!("  + {} autre(s)", paths.len() - 1);
+        }
+        let mode = target
+            .as_ref()
+            .map(|dest| event_manager::drop_mode(paths, dest, ctrl, shift));
+        let what = match (&target, mode) {
+            (Some(dest), Some(ClipMode::Copy)) => {
                 format!(
-                    "📄 {} élément(s) — {verb} vers « {} »  (Ctrl : copier, Maj : déplacer)",
-                    paths.len(),
+                    "➕ Copier vers « {} »   (Maj : déplacer)",
                     favorite_name(dest)
                 )
             }
-            None => format!(
-                "📄 {} élément(s) — déposez sur un dossier, ou hors de la fenêtre",
-                paths.len()
-            ),
+            (Some(dest), _) => {
+                format!(
+                    "➡ Déplacer vers « {} »   (Ctrl : copier)",
+                    favorite_name(dest)
+                )
+            }
+            (None, _) => "Lâchez sur un dossier, ou hors de la fenêtre".to_string(),
         };
-        let galley =
-            painter.layout_no_wrap(text, egui::FontId::proportional(14.0), egui::Color32::WHITE);
-        let rect = egui::Rect::from_min_size(
-            pointer + egui::vec2(14.0, 10.0),
-            galley.size() + egui::vec2(12.0, 8.0),
-        );
-        painter.rect_filled(rect, 4.0, egui::Color32::from_black_alpha(200));
-        painter.galley(
-            rect.min + egui::vec2(6.0, 4.0),
-            galley,
-            egui::Color32::WHITE,
-        );
+        // Curseur d'ExPLIA pendant son propre glisser (pour un glisser venu d'ailleurs, c'est
+        // Windows qui le dessine).
+        if self.drag.is_some() {
+            ctx.set_cursor_icon(match mode {
+                Some(ClipMode::Copy) => egui::CursorIcon::Copy,
+                Some(ClipMode::Cut) => egui::CursorIcon::Grabbing,
+                None => egui::CursorIcon::NoDrop,
+            });
+        }
+        let font = egui::FontId::proportional(14.0);
+        let held = painter.layout_no_wrap(held, font.clone(), egui::Color32::WHITE);
+        let what = painter.layout_no_wrap(what, font, egui::Color32::from_gray(210));
+        let size = egui::vec2(
+            held.size().x.max(what.size().x),
+            held.size().y + what.size().y + 2.0,
+        ) + egui::vec2(16.0, 10.0);
+        let rect = egui::Rect::from_min_size(pointer + egui::vec2(16.0, 12.0), size);
+        painter.rect_filled(rect, 6.0, egui::Color32::from_black_alpha(210));
+        let line = rect.min + egui::vec2(8.0, 5.0);
+        let second = line + egui::vec2(0.0, held.size().y + 2.0);
+        painter.galley(line, held, egui::Color32::WHITE);
+        painter.galley(second, what, egui::Color32::WHITE);
         ctx.request_repaint();
     }
 

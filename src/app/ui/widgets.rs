@@ -191,9 +191,11 @@ pub(in crate::app) fn table_row(
     columns: &[Column],
     cells: &[String],
 ) -> egui::Response {
+    // Clic et glisser : une ligne se prend à la souris (glisser-déposer). Avec un simple clic,
+    // egui abandonnerait la ligne dès que le pointeur bouge et la liste défilerait à la place.
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), table_row_height(ui)),
-        egui::Sense::click(),
+        egui::Sense::click_and_drag(),
     );
     if ui.is_rect_visible(rect) {
         let visuals = ui.visuals();
@@ -266,7 +268,8 @@ pub(in crate::app) fn gallery_tile(
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(GALLERY_TILE, GALLERY_TILE + GALLERY_LABEL_HEIGHT),
-        egui::Sense::click(),
+        // Clic et glisser, comme les lignes (voir `table_row`).
+        egui::Sense::click_and_drag(),
     );
     if !ui.is_rect_visible(rect) {
         return response;
