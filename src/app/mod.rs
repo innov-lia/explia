@@ -77,8 +77,6 @@ const DRIVE_BAR_HEIGHT: f32 = 16.0;
 /// Largeurs des deux colonnes à gauche de la grille d'images : lecteurs et navigation.
 /// Largeur de la barre de recherche, en haut de la zone centrale.
 const SEARCH_WIDTH: f32 = 300.0;
-/// Place réservée à la case « Récursive », à gauche de la barre de recherche.
-const RECURSIVE_WIDTH: f32 = 110.0;
 /// Libellé du filtre « Sélection », à droite de la barre de recherche (mesuré pour sa place).
 const SELECTION_MENU_LABEL: &str = "⏷ Sélection";
 /// Libellés des boutons de la barre du volet de détail (mesurés pour sa largeur minimale).
@@ -95,15 +93,13 @@ const TOOLBAR_TEXT_BOOST: f32 = 2.0;
 enum ResultKind {
     /// Recherche récursive par nom.
     Search,
-    /// Dossiers sans aucun fichier.
-    EmptyFolders,
     /// Fichiers de même contenu.
     Duplicates,
     /// Fichiers plus gros que le seuil, du plus gros au plus petit.
     LargeFiles,
 }
 
-/// Résultats d'un parcours (recherche récursive, dossiers vides, doublons), affichés dans la
+/// Résultats d'un parcours (recherche récursive, doublons, gros fichiers), affichés dans la
 /// liste à la place du contenu du dossier jusqu'à leur fermeture ou un changement de dossier.
 struct Results {
     kind: ResultKind,
@@ -803,7 +799,6 @@ impl ExpliaApp {
         let query = self.scan.search.clone();
         let recursive = self.scan.recursive;
         let show_hidden = self.show_hidden;
-        let min_bytes = u64::from(self.scan.duplicate_min_mb) * 1024 * 1024;
         let large_min_bytes = u64::from(self.scan.large_min_mb) * 1024 * 1024;
         let current = Arc::clone(&self.scan.generation);
         let tx = self.event_tx.clone();
@@ -831,22 +826,12 @@ impl ExpliaApp {
                         },
                     );
                 }
-                ResultKind::EmptyFolders => {
-                    let folders = scan::find_empty_folders(&root, recursive, &cancelled);
-                    let entries: Vec<Entry> = folders
-                        .iter()
-                        .filter_map(|path| fs_nav::entry_from_path(path))
-                        .collect();
-                    send(Event::ScanBatch {
-                        generation,
-                        entries,
-                    });
-                }
                 ResultKind::Duplicates => {
                     let found = scan::find_duplicates(
                         &root,
                         recursive,
-                        min_bytes,
+                        // Toutes les tailles (les fichiers vides ne sont jamais des doublons).
+                        0,
                         &cancelled,
                         &mut |count| {
                             send(Event::ScanProgress {
@@ -1725,13 +1710,6 @@ impl ExpliaApp {
                         results.running = false;
                         results.truncated = truncated;
                         results.progress = None;
-                        // Dossiers vides : tous sont sélectionnés, il ne reste qu'à supprimer.
-                        if results.kind == ResultKind::EmptyFolders {
-                            self.recompute_visible();
-                            self.selection.multi = self.visible.clone();
-                            self.selection.anchor =
-                                self.selection.multi.first().map(|e| e.path.clone());
-                        }
                         results_changed = true;
                     }
                 }
@@ -1804,7 +1782,6 @@ impl ExpliaApp {
             skip_folder_sizes: self.skip_folder_sizes,
             show_drive_usage: self.show_drive_usage,
             recursive: self.scan.recursive,
-            duplicate_min_mb: self.scan.duplicate_min_mb,
             large_min_mb: self.scan.large_min_mb,
             view_mode: self.view_mode,
             show_hidden: self.show_hidden,
@@ -2008,41 +1985,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_folder_scan_lists_and_selects_them() {
-        let tree = TempTree::new("empty");
-        tree.dir("vide");
-        tree.dir("b/c");
-        tree.file("b/d/fichier.txt", b"x");
-        let (mut app, ctx) = app_in(&tree);
-        app.apply(&ctx, Action::FindEmptyFolders);
-        settle(&mut app, &ctx);
-        wait_scan(&mut app, &ctx);
-        assert_eq!(names(&app), ["c", "vide"]);
-        // Tous sont sélectionnés (multi-sélection de dossiers), prêts à être supprimés.
-        assert_eq!(app.selection.multi.len(), 2);
-        assert!(app.selection.multi.iter().all(|e| e.is_dir));
-        // Sans récursivité : seulement les sous-dossiers directs.
-        app.scan.recursive = false;
-        app.on_recursive_changed();
-        wait_scan(&mut app, &ctx);
-        assert_eq!(names(&app), ["vide"]);
-        // Fermer revient au contenu du dossier.
-        app.apply(&ctx, Action::CloseResults);
-        settle(&mut app, &ctx);
-        assert!(app.scan.results.is_none());
-        assert_eq!(names(&app), ["b", "vide"]);
-    }
-
-    #[test]
     fn duplicate_scan_groups_copies_and_selects_all_but_the_first() {
         let tree = TempTree::new("dups");
-        let big = vec![3u8; 1_200_000];
-        tree.file("a.bin", &big);
-        tree.file("sub/b.bin", &big);
-        tree.file("sub/c.bin", &big);
-        tree.file("autre.bin", &vec![4u8; 1_200_000]);
+        // Petits fichiers : les doublons sont cherchés quelle que soit leur taille.
+        tree.file("a.bin", b"meme contenu");
+        tree.file("sub/b.bin", b"meme contenu");
+        tree.file("sub/c.bin", b"meme contenu");
+        tree.file("autre.bin", b"autre contenu");
+        // Les fichiers vides ne sont pas des doublons.
+        tree.file("vide1.txt", b"");
+        tree.file("vide2.txt", b"");
         let (mut app, ctx) = app_in(&tree);
-        app.scan.duplicate_min_mb = 1;
         app.apply(&ctx, Action::FindDuplicates);
         settle(&mut app, &ctx);
         wait_scan(&mut app, &ctx);
@@ -2053,12 +2006,6 @@ mod tests {
         assert_eq!(app.selection.multi.len(), 2);
         // Le premier fichier du groupe (ordre des chemins) est conservé.
         assert!(app.selection.multi.iter().all(|e| e.name != "a.bin"));
-        // Seuil plus haut que les fichiers : aucun doublon.
-        app.scan.duplicate_min_mb = 2;
-        app.apply(&ctx, Action::FindDuplicates);
-        settle(&mut app, &ctx);
-        wait_scan(&mut app, &ctx);
-        assert!(app.visible.is_empty());
     }
 
     #[test]
@@ -2117,7 +2064,7 @@ mod tests {
         let tree = TempTree::new("navigate");
         tree.dir("sous");
         let (mut app, ctx) = app_in(&tree);
-        app.apply(&ctx, Action::FindEmptyFolders);
+        app.apply(&ctx, Action::FindDuplicates);
         settle(&mut app, &ctx);
         assert!(app.scan.results.is_some());
         app.navigate(Location::Dir(tree.0.join("sous")));
@@ -2157,7 +2104,6 @@ mod tests {
         tree.file("a/b/copie1.bin", &big);
         tree.file("c/copie2.bin", &big);
         let (mut app, ctx) = app_in(&tree);
-        app.scan.duplicate_min_mb = 1;
         app.apply(&ctx, Action::FindDuplicates);
         settle(&mut app, &ctx);
         wait_scan(&mut app, &ctx);

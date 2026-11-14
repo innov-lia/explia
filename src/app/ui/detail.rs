@@ -655,7 +655,6 @@ impl ExpliaApp {
         if let Some(results) = &self.scan.results {
             let what = match results.kind {
                 ResultKind::Search => "résultat(s) de recherche",
-                ResultKind::EmptyFolders => "dossier(s) vide(s)",
                 ResultKind::Duplicates => "fichier(s) en doublon",
                 ResultKind::LargeFiles => "gros fichier(s)",
             };

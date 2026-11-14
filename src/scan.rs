@@ -1,5 +1,4 @@
-//! Parcours de dossiers en lecture seule : recherche récursive, dossiers vides, doublons,
-//! gros fichiers.
+//! Parcours de dossiers en lecture seule : recherche récursive, doublons, gros fichiers.
 //!
 //! Ces fonctions s'exécutent dans un thread de travail ; elles testent `cancel` régulièrement
 //! pour s'arrêter dès qu'un nouveau parcours remplace le courant. Les liens symboliques et les
@@ -71,59 +70,6 @@ pub fn search(
         emit(batch);
     }
     false
-}
-
-/// Dossiers vides : sans aucun fichier à aucune profondeur (des sous-dossiers vides ne comptent
-/// pas). Seuls les dossiers vides les plus hauts sont renvoyés (supprimer l'un emporte ses
-/// sous-dossiers). `recursive` : tout l'arbre de `root` ; sinon, seulement les sous-dossiers
-/// directs de `root`. `root` lui-même n'est jamais renvoyé.
-pub fn find_empty_folders(root: &Path, recursive: bool, cancel: &dyn Fn() -> bool) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    visit_empty(root, true, recursive, cancel, &mut found);
-    found.sort();
-    found
-}
-
-/// Renvoie `true` si `dir` ne contient aucun fichier dans tout son arbre.
-fn visit_empty(
-    dir: &Path,
-    is_root: bool,
-    recursive: bool,
-    cancel: &dyn Fn() -> bool,
-    out: &mut Vec<PathBuf>,
-) -> bool {
-    // Un dossier illisible n'est jamais déclaré vide : il peut contenir des fichiers.
-    let Ok(read) = fs::read_dir(dir) else {
-        return false;
-    };
-    let mut has_content = false;
-    let mut empty_children = Vec::new();
-    for item in read.flatten() {
-        if cancel() {
-            return false;
-        }
-        let Ok(meta) = item.metadata() else {
-            has_content = true;
-            continue;
-        };
-        if meta.is_dir() && !fs_nav::is_link(&meta) {
-            if visit_empty(&item.path(), false, recursive, cancel, out) {
-                empty_children.push(item.path());
-            } else {
-                has_content = true;
-            }
-        } else {
-            // Fichier, lien ou autre : le dossier n'est pas vide.
-            has_content = true;
-        }
-    }
-    if has_content || is_root {
-        if recursive || is_root {
-            out.extend(empty_children);
-        }
-        return !has_content;
-    }
-    true
 }
 
 /// Fichiers identiques (même taille et même empreinte de contenu).
@@ -331,38 +277,6 @@ mod tests {
 
     fn never() -> bool {
         false
-    }
-
-    #[test]
-    fn empty_folders_are_the_highest_ones_without_any_file() {
-        let tree = TempTree::new("empty");
-        tree.dir("a");
-        tree.dir("b/c");
-        tree.file("b/d/file.txt", b"x");
-        tree.dir("e/f/g");
-        tree.file("h.txt", b"x");
-        let all = find_empty_folders(&tree.0, true, &never);
-        assert_eq!(tree.rel(&all), ["a", "b/c", "e"]);
-        // Sans récursivité : seulement les sous-dossiers directs.
-        let direct = find_empty_folders(&tree.0, false, &never);
-        assert_eq!(tree.rel(&direct), ["a", "e"]);
-    }
-
-    #[test]
-    fn root_is_never_reported_even_when_empty() {
-        let tree = TempTree::new("empty-root");
-        tree.dir("x/y");
-        let all = find_empty_folders(&tree.0, true, &never);
-        assert_eq!(tree.rel(&all), ["x"]);
-        let none = TempTree::new("empty-root-2");
-        assert!(find_empty_folders(&none.0, true, &never).is_empty());
-    }
-
-    #[test]
-    fn a_cancelled_scan_reports_nothing_unsafe() {
-        let tree = TempTree::new("empty-cancel");
-        tree.dir("a");
-        assert!(find_empty_folders(&tree.0, true, &|| true).is_empty());
     }
 
     #[test]

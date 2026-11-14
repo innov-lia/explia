@@ -101,10 +101,8 @@ pub(in crate::app) struct ScanState {
     pub(in crate::app) search: String,
     /// Donne le focus à la barre de recherche à la prochaine image (Ctrl+F).
     pub(in crate::app) focus_search: bool,
-    /// Option « Récursive » : recherche, dossiers vides et doublons parcourent les sous-dossiers.
+    /// Option « Récursive » : recherche, doublons et gros fichiers parcourent les sous-dossiers.
     pub(in crate::app) recursive: bool,
-    /// Taille minimale (Mo) des fichiers examinés pour les doublons.
-    pub(in crate::app) duplicate_min_mb: u32,
     /// Taille minimale (Mo) des fichiers listés par « Fichiers > N Mo ».
     pub(in crate::app) large_min_mb: u32,
 }
@@ -119,7 +117,6 @@ impl ScanState {
             search: String::new(),
             focus_search: false,
             recursive: settings.recursive,
-            duplicate_min_mb: settings.duplicate_min_mb,
             large_min_mb: settings.large_min_mb,
         }
     }

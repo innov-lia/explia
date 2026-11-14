@@ -199,9 +199,8 @@ pub(super) enum Action {
     StopPlayer,
     /// Change la façon d'afficher le dossier (liste, colonnes, grille d'images).
     SetViewMode(ViewMode),
-    /// Lance la recherche des dossiers vides (selon l'option « Récursive »).
-    FindEmptyFolders,
-    /// Lance la recherche des doublons (selon l'option « Récursive » et le seuil en Mo).
+    /// Lance la recherche des doublons, quelle que soit leur taille (selon l'option
+    /// « Récursive »).
     FindDuplicates,
     /// Lance la liste des fichiers plus gros que le seuil en Mo (selon l'option « Récursive »).
     FindLargeFiles,
@@ -457,7 +456,6 @@ impl ExpliaApp {
             Action::ToggleVideoFullscreen => {
                 self.set_video_fullscreen(ctx, !self.player.fullscreen)
             }
-            Action::FindEmptyFolders => self.start_scan(ResultKind::EmptyFolders),
             Action::FindDuplicates => self.start_scan(ResultKind::Duplicates),
             Action::FindLargeFiles => self.start_scan(ResultKind::LargeFiles),
             Action::SelectDuplicateCopies => {

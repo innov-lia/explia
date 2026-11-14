@@ -1,5 +1,5 @@
-//! Barres du haut : barre de menus, fil d'Ariane et saisie du chemin, recherche, filtre « Sélection
-//! », bandeau des résultats.
+//! Barres du haut : barre de menus, fil d'Ariane et saisie du chemin, recherche, filtre
+//! « Sélection », bandeau des résultats.
 
 use super::super::*;
 use super::widgets::*;
@@ -17,7 +17,6 @@ impl ExpliaApp {
                     self.scan.search.trim()
                 )
             }
-            ResultKind::EmptyFolders => format!("Dossiers vides : {count}"),
             ResultKind::Duplicates => {
                 let groups = self
                     .scan
@@ -26,10 +25,7 @@ impl ExpliaApp {
                     .copied()
                     .max()
                     .unwrap_or(0);
-                format!(
-                    "Doublons > {} Mo : {groups} groupe(s), {count} fichier(s)",
-                    self.scan.duplicate_min_mb
-                )
+                format!("Doublons : {groups} groupe(s), {count} fichier(s)")
             }
             ResultKind::LargeFiles => {
                 let total: u64 = self.visible.iter().filter_map(|e| e.size).sum();
@@ -85,8 +81,6 @@ impl ExpliaApp {
             enlarge_toolbar(ui);
             let spacing = ui.spacing().item_spacing.x;
             let search_width = SEARCH_WIDTH.min(ui.available_width() * 0.4);
-            // La case « Récursive » prend sa place à gauche de la barre de recherche.
-            let recursive_width = RECURSIVE_WIDTH;
             let selection_width = {
                 let font = egui::TextStyle::Button.resolve(ui.style());
                 let galley = ui.painter().layout_no_wrap(
@@ -96,12 +90,8 @@ impl ExpliaApp {
                 );
                 galley.size().x + ui.spacing().button_padding.x * 2.0
             };
-            let address_width = (ui.available_width()
-                - search_width
-                - recursive_width
-                - selection_width
-                - 3.0 * spacing)
-                .max(80.0);
+            let address_width =
+                (ui.available_width() - search_width - selection_width - 2.0 * spacing).max(80.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(address_width, ui.spacing().interact_size.y),
                 egui::Layout::left_to_right(egui::Align::Center),
@@ -114,15 +104,6 @@ impl ExpliaApp {
                     }
                 },
             );
-            if ui
-                .checkbox(&mut self.scan.recursive, "Récursive")
-                .on_hover_text(
-                    "Recherche, dossiers vides et doublons parcourent aussi les sous-dossiers",
-                )
-                .changed()
-            {
-                self.on_recursive_changed();
-            }
             self.search_box(ui, search_width);
             if let Some(chosen) = self.selection_menu(ui) {
                 action = Some(chosen);
@@ -131,46 +112,33 @@ impl ExpliaApp {
         action
     }
 
-    /// Filtre « Sélection », à droite de la barre de recherche : dossiers vides, doublons (du plus
-    /// gros au plus petit) et fichiers plus gros qu'un seuil, selon l'option « Récursive ».
+    /// Filtre « Sélection », à droite de la barre de recherche : option « Récursive », doublons
+    /// (du plus gros au plus petit) et fichiers plus gros qu'un seuil.
     pub(in crate::app) fn selection_menu(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         let on_dir = matches!(self.nav.location, Location::Dir(_));
-        let scope = if self.scan.recursive {
-            "sous-dossiers compris"
-        } else {
-            "dossier courant seulement"
-        };
         menu(ui, SELECTION_MENU_LABEL, |ui| {
-            ui.weak(format!("Portée : {scope} (case Récursive)"));
             if ui
-                .add_enabled(on_dir, egui::Button::new("📂 Dossiers vides"))
-                .on_hover_text("Liste et sélectionne les dossiers sans aucun fichier")
+                .checkbox(&mut self.scan.recursive, "Récursive")
+                .on_hover_text(
+                    "Recherche, doublons et gros fichiers parcourent aussi les sous-dossiers",
+                )
+                .changed()
+            {
+                self.on_recursive_changed();
+            }
+            ui.separator();
+            if ui
+                .add_enabled(on_dir, egui::Button::new("📑 Doublons"))
+                .on_hover_text(
+                    "Fichiers de même contenu (même empreinte), quelle que soit leur taille, \
+                     classés du plus gros au plus petit",
+                )
                 .clicked()
             {
-                action = Some(Action::FindEmptyFolders);
+                action = Some(Action::FindDuplicates);
                 ui.close();
             }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(on_dir, egui::Button::new("📑 Doublons"))
-                    .on_hover_text(
-                        "Fichiers de même contenu (même empreinte), plus gros que la taille \
-                         indiquée, classés du plus gros au plus petit",
-                    )
-                    .clicked()
-                {
-                    action = Some(Action::FindDuplicates);
-                    ui.close();
-                }
-                ui.label(">");
-                ui.add(
-                    egui::DragValue::new(&mut self.scan.duplicate_min_mb)
-                        .range(1..=1_000_000)
-                        .suffix(" Mo"),
-                )
-                .on_hover_text("Taille minimale des fichiers examinés (modifiable)");
-            });
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(on_dir, egui::Button::new("📦 Fichiers"))
@@ -195,14 +163,16 @@ impl ExpliaApp {
     }
 
     /// Barre de recherche par nom (voir `view::matches_query`) : filtre le dossier affiché, ou, si
-    /// « Récursive » est cochée, cherche aussi dans les sous-dossiers. Ctrl+F lui donne le focus ;
+    /// « Récursive » (menu Sélection) est cochée, cherche aussi dans les sous-dossiers. Ctrl+F lui donne le focus ;
     /// Échap l'efface.
     pub(in crate::app) fn search_box(&mut self, ui: &mut egui::Ui, width: f32) {
-        let edit = ui.add(
-            egui::TextEdit::singleline(&mut self.scan.search)
-                .desired_width(width)
-                .hint_text("🔍 Rechercher : nom, *.exe, a*.txt…"),
-        );
+        let edit = ui
+            .add(
+                egui::TextEdit::singleline(&mut self.scan.search)
+                    .desired_width(width)
+                    .hint_text("🔍 Rechercher"),
+            )
+            .on_hover_text("Nom, ou motif avec jokers : *.exe, a*.txt, img_??.png…");
         if std::mem::take(&mut self.scan.focus_search) {
             edit.request_focus();
         }
